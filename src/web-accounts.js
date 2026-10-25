@@ -17,7 +17,10 @@ class WebAccounts {
     if (this.find(inst)) return this.windows.get(id);
     const opening = this.create(inst);
     this.opening.set(id, opening);
-    try { return await opening; } finally { this.opening.delete(id); }
+    try { return await opening; } catch (error) {
+      if (this.opts.prepareWindow) this.close(id);
+      throw error;
+    } finally { this.opening.delete(id); }
   }
   async create(inst) {
     await this.opts.prepareSession(inst);
@@ -35,7 +38,8 @@ class WebAccounts {
     wc.on("console-message", (_event, level, message) => { if (level >= 2) this.opts.log.warn("web-account-console", { id: inst.id, message: String(message).slice(0, 300) }); });
     // A hidden BrowserWindow has no renderer until its first navigation.
     await wc.loadURL("about:blank");
-    wc.debugger.attach("1.3");
+    if (this.opts.prepareWindow) await this.opts.prepareWindow(win, inst);
+    else wc.debugger.attach("1.3");
     wc.debugger.on("message", (_event, method, params) => {
       if (method === "Page.fileChooserOpened") {
         win.fileChooser = params;
@@ -45,7 +49,10 @@ class WebAccounts {
     await wc.debugger.sendCommand("Page.enable");
     await wc.debugger.sendCommand("Page.setInterceptFileChooserDialog", { enabled: true });
     // Loading continues in the background; the browser can display progress and retry.
-    wc.loadURL(inst.url || store.get().settings.defaultUrl).catch((error) => { win.loadError = error.message; });
+    const navigation = wc.loadURL(inst.url || store.get().settings.defaultUrl);
+    if (this.opts.awaitNavigation) {
+      try { await navigation; } catch (error) { win.destroy(); throw error; }
+    } else navigation.catch((error) => { win.loadError = error.message; });
     return win;
   }
   async handle(req, res, url, api) {

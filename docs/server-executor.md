@@ -48,13 +48,13 @@ TimeoutStopSec=30
 WantedBy=multi-user.target
 ```
 
-本入口沿用现有 Chromium 的原生浏览器会话，不调用桌面代理设置、指纹伪装或 Cookie 导入函数。没有新增监听端口、反向代理、端口映射、DNS、防火墙、隧道或 Docker 网络配置；如果服务器的现有访问条件不足，应单独提出所需变更并取得授权。
+本入口使用独立 Chromium persist 会话，通过专用 studio-environment 工厂应用逐账号代理和固定指纹；不调用桌面共享代理认证缓存或 Cookie 导入函数。没有新增监听端口、反向代理、端口映射、DNS、防火墙、隧道或 Docker 网络配置；如果服务器的现有访问条件不足，应单独提出所需变更并取得授权。
 
 ## 协议 v1
 
 所有控制请求发送到 `POST /api/studio/doubao/executor`，`Authorization: Bearer <独立令牌>`；JSON 固定包含 `executorId` 和 `version: "doubao-workbench/1"`：
 
-- `heartbeat`：`{ action, executorId, version, leases: [{ operationId, leaseToken }] }`，每 15 秒续租，包括长时间浏览器操作与待回报记录。
+- `heartbeat`：`{ action, executorId, version, leases: [{ operationId, leaseToken }], sessionId }`，每 15 秒续租，包括长时间浏览器操作与待回报记录。
 - `claim`：`{ action, executorId, version }`；接收 `{ operation: null | { id, kind, accountId, taskId?, batchId?, leaseToken, leaseUntil, payload } }`。
 - `report`：再加 `operationId`、`leaseToken`、`outcome: success|failure|uncertain|progress` 和 `receipt`。
 
@@ -66,13 +66,14 @@ WantedBy=multi-user.target
 
 ## 管理员登录
 
-账号操作使用相同的领取/回报通道，不开放远程调试端口。`payload.action` 支持 `open|frame|input|navigate`；navigate 只允许固定豆包 `/chat/` 地址。input 由主站加密为 `payload.inputEncrypted: {iv,tag,data}`，三个字段均为 Base64：AES-256-GCM，12 字节随机 IV，16 字节 tag，key 为 `SHA256('doubao-admin-input-v1:'+独立执行端令牌)`。解密仅在内存中进行，操作日志只留密文。输入对象支持：
+账号操作使用相同的领取/回报通道，不开放远程调试端口。`payload.action` 支持 `open|frame|input|navigate|probe`；navigate 只允许固定豆包 `/chat/` 地址。input 由主站加密为 `payload.inputEncrypted: {iv,tag,data}`，三个字段均为 Base64：AES-256-GCM，12 字节随机 IV，16 字节 tag，key 为 `SHA256('doubao-admin-input-v1:'+独立执行端令牌)`。解密仅在内存中进行，操作日志只留密文。输入对象支持：
 
 - `{kind:'click',x,y}`：相对截图的 0–1 坐标。
 - `{kind:'text',text}`：人工输入的文字（主站上限 2000 字符）。
 - `{kind:'key',key}`：Enter、Tab、Backspace、Escape。
+- `{kind:'scroll',deltaX,deltaY}`：两个绝对值不超过 4000 的有限整数。
 
-用现有 WebAccounts 的隐藏窗口、capturePage 和 CDP 输入能力执行，回报 `{imageBase64,contentType:'image/jpeg',width,height,loginState:'logged_in'|'logged_out'|'unknown'}`；JPEG 上限 1 MiB。管理员自行处理密码、验证码和扫码。中断的输入操作只取新截图，不自动重放密码、OTP 或按键。
+用现有 WebAccounts 的隐藏窗口、capturePage 和 CDP 输入能力执行，回报 `{imageBase64,contentType:'image/jpeg',width,height,capturedAt,loginState:'logged_in'|'logged_out'|'unknown'}`；JPEG 上限 1 MiB。管理员自行处理密码、验证码和扫码。中断的输入操作只取新截图，不自动重放密码、OTP 或按键。
 
 ## 防重复与恢复
 
@@ -89,9 +90,9 @@ npm test
 
 测试复用真实本地草稿/任务仓和 orchestrator，替换外部 HTTP 和网页驱动边界；不登录真实豆包，不请求真实生成。覆盖持久化前置、重复/中断发送不重放、原生绑定和原对话关联、页面并发上限、服务模式入口隔离、原桌面额度行为保留、引用哈希/大小、登录命令加密、成片回传失败只重传。不能用这些模拟结果替代真实浏览器/服务器验收。
 
-## 当前基线与进度回报
+## 历史基线与进度回报
 
-执行端基于用户指定仓库 `https://github.com/wqdcjnb/infinite-doubao` 的最新主分支 **1.5.9 / 87d7cf87bf133679baa3f9eb1729e89adebb588b**。保留新版三个准备工作位的连续投递和已接收对话不重复加载逻辑；服务模式用额外信号量限制全部准备/回执/确认窗口数，桌面默认不设置此上限。
+此前服务端入口基于用户指定仓库 `https://github.com/wqdcjnb/infinite-doubao` 的最新主分支 **1.5.9 / 87d7cf87bf133679baa3f9eb1729e89adebb588b**。保留新版三个准备工作位的连续投递和已接收对话不重复加载逻辑；服务模式用额外信号量限制全部准备/回执/确认窗口数，桌面默认不设置此上限。
 
 发送期间每次心跳可附带同租约的 `outcome:progress` 回报，`receipt.tasks` 只包含已有持久化接收证据的任务。`confirmed:false` 表示只确认豆包接收；仅当持久化确认意图为 sent、页面明确检测到视频生成开始/视频结果或原任务已完成时，才给出 `confirmed:true`。普通的“处理中”文字不会当成已确认生成。进度回报与最终回报按顺序发送，防止迟到的进度覆盖最终结果。
 
@@ -105,3 +106,32 @@ npm test
 `track` 的 `outcome:progress` 是一次只读轮询结束，服务端将同一操作移回队尾并清除当前租约，让其他任务公平取回；下次以同一操作编号、全新租约再查同一原任务。执行端只在 track 的新租约下重新执行只读检查；send/import 不采用这种重放规则。服务端应保留旧租约已接受的进度回执，以便进度响应丢失时对完全相同的旧回报作幂等确认。
 
 确定的 HTTP 409 回报冲突只隔离对应操作日志记录，原结果保留供核对，其它任务和账号可以继续领取。暂时的回报错误保留原回执重试，同时继续处理其它待回报条目。大于 128 MiB 或格式不符的原 MP4 保留本地并转人工核对，不自动重传超大文件，也不重新生成。
+
+
+## 账号环境合同（2026-10-26）
+
+`payload.account.environment` 包含不可变 UUID `version`、masked 元数据和 `encrypted:{iv,tag,data}`。密文为 `{proxy:{mode:'custom',url},fingerprint:{seed,language,timezone,screen}}`，AES-256-GCM，key 为 `SHA256('doubao-account-env-v1:'+token)`。执行端只在内存持有代理用户名/密码，私有账号状态只保存加密快照、版本、摘要和固定指纹档案；不写代理明文。不同版本修改同账号环境会关闭该账号的旧登录窗口；平台必须先禁止活动批次及未完成操作修改环境。缺失配置不能新开账号环境；原已保存环境可供恢复原任务。
+
+`prepareStudioSession` 在首次目标导航前 await `fixed_servers` 配置，只有一条账号代理，使用 `<-loopback>` 禁止 Chromium 隐式本机绕过，不含 DIRECT fallback；失败中止。不同 persist session 的认证通过 `webContents.session` 路由，主进程探针用绑定 session 的 `net.request` 自己处理 login challenge，不按全局 host:port 缓存。目标站的 HTTP 认证不会得到代理密码。修改配置清理该 session 的连接和认证缓存，保留 Cookie。
+
+登录、草稿、发送和恢复查询窗口共用该 session 与安全窗口工厂。先导航无站点脚本的 about:blank，attach CDP，再设置 UA/UA-CH、时区与 `Page.addScriptToEvaluateOnNewDocument`，完成后才导航目标；仍为 sandbox/contextIsolation/noNode，无远程调试监听。固定种子经过 SHA-256 装配既有档案，语言、时区和屏幕采用保存配置；持久化档案跨重启复用，Chrome 版本按当前真实内核对齐。屏幕限制宽 1280–7680、高 900–4320，能容纳业务窗口。
+
+每次进程启动的 `StudioClient.sessionId` 为新 UUID，heartbeat 携带它。独立 `probe` 返回 `{environmentVersion,executorSessionId,environmentCheck:{proxy,fingerprint}}`。proxy 复用既有同线路 IP 探针/固定错误脱敏；fingerprint 复用页面实际读取与比较，profile 摘要为 `{seed,language,timezone,screen,browserVersion}`。只有 probe 回传环境摘要；普通截图返回 `capturedAt`，不把截图当探针。中断 probe 可重做只读探针；中断 input 只取 frame，禁止自动重放输入。
+
+受限无 GPU 的服务实测，原指纹检查 14 项中 13 项被比较器接受（9 项核心匹配、4 项仅作参考），WebGL context 不可用。专用检查仅在实际值严格为 `no webgl` 时将该项标为 `unsupported`、`capabilities.webgl=false`，message 为“核心环境已校验；WebGL不可用，未校验该项”。这不表示 GPU 指纹已验证；WebGL 可用但值不匹配仍失败，其他核心项仍严格比较。服务配置、GPU 参数没有改动。
+
+| 协议 | 真实受控 Linux Electron 43.2.0 验证 | 边界 |
+| --- | --- | --- |
+| HTTP Basic 认证 | 同网关两个账号不同凭据、页面和主进程请求通过 | 仅合成凭据，未验证真实公网代理 |
+| HTTP 无认证 | 原生 fixed_servers 配置可用；未单独实测 | 必须以实际 probe 结果为准 |
+| HTTPS 代理 | 自签测试证书被拒绝 `ERR_PROXY_CERTIFICATE_INVALID` | 保留内核证书验证；受信任证书及其鉴权未实测，必须以真实 probe 结果为准 |
+| SOCKS5 无认证 | 受控 localhost SOCKS5 握手及页面通过 | 未验证真实公网出口 |
+| SOCKS5 用户名/密码 | 配置阶段明确拒绝 | Chromium 原生不支持，不新增认证桥或服务 |
+
+代理失败实测导航和主进程请求均失败，可直达的 localhost 目标收到 0 次请求。受控 IP 为文档保留地址 `192.0.2.10/20`，不代表真实公网 IP。测试不连接真实豆包账号、不会生成或导入真实草稿。真实代理、实际出口、账号登录和真实成片仍需用户验收。
+
+额外本地回归：`node --test _test/studio-environment.test.js _test/studio-window.test.js _test/studio-bridge.test.js`。真实 Electron harness 为 `_test/studio-environment.e2e.cjs`，只允许固定隔离 smoke 路径，临时 localhost 测试代理在进程退出时关闭。服务器证据位于 `/var/lib/material-studio-doubao/smoke/account-environments-20261026`，沿用服务 uid、sandbox、PrivateTmp/ProtectSystem/ProtectHome 和资源限制，未改生产 unit/current/state/token。
+
+上游差异单独说明：本分支起点是 `fe95bf7`（1.5.10），生产执行端为 `f5afc23`。`f5afc23..fe95bf7` 的 13 文件、191 增/18 删属于已有上游：原生草稿保存时无输入框先点新工作任务、无旧 binding 不做恢复、保存阶段日志和相关测试/版本号；不是本次环境补丁。发布前必须单独审核并明确决定是否纳入，不能把整版 main 当成本补丁发布。
+
+技术依据：[Electron ClientRequest login](https://www.electronjs.org/docs/latest/api/client-request)、[Electron app login](https://www.electronjs.org/docs/latest/api/app#event-login)、[Electron Session setProxy](https://www.electronjs.org/docs/latest/api/session#sessetproxyconfig)、[Chromium proxy support](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md)。
