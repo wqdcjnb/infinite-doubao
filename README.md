@@ -1,15 +1,15 @@
 # 豆包工坊
 
-Windows 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.3.3**。
+Windows 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.3.4**。
 
 ## 下载与安装
 
-前往 [Releases](https://github.com/wqdcjnb/infinite-doubao/releases/latest) 下载 Windows x64 安装包 `DoubaoWorkshop-1.3.3-Setup.exe`，双击安装后通过桌面「豆包工坊」快捷方式启动。
+前往 [Releases](https://github.com/wqdcjnb/infinite-doubao/releases/latest) 下载 Windows x64 安装包 `DoubaoWorkshop-1.3.4-Setup.exe`，双击安装后通过桌面「豆包工坊」快捷方式启动。
 
 发行附件中的 `SHA256SUMS.txt` 用于校验下载文件。在 PowerShell 中运行：
 
 ```powershell
-Get-FileHash .\DoubaoWorkshop-1.3.3-Setup.exe -Algorithm SHA256
+Get-FileHash .\DoubaoWorkshop-1.3.4-Setup.exe -Algorithm SHA256
 ```
 
 新安装默认使用 `%LOCALAPPDATA%\Programs\豆包工坊`。升级已有版本会沿用原安装位置和用户数据目录，保留账号、会话、任务、素材和设置。
