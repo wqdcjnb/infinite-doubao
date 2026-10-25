@@ -1,6 +1,6 @@
 # 豆包工坊
 
-Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、JavaScript 和 Python 构建。当前源码版本为 **1.5.5**，公开安装包版本以 Releases 为准。
+Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、JavaScript 和 Python 构建。当前源码版本为 **1.5.6**，公开安装包版本以 Releases 为准。
 
 网页版：安装后双击桌面「豆包工坊 网页版」，或在软件顶部点击「打开网页版」。浏览器使用原账号、任务、素材和设置，本机服务地址为 `http://127.0.0.1:17825/`。使用方式、功能对应与验收说明见 [本机网页版](docs/web.md)。
 
@@ -10,7 +10,7 @@ Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、J
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | `DoubaoWorkshop-1.5.5-Setup.exe` | 双击安装，通过桌面「豆包工坊」或「豆包工坊 网页版」启动 |
+| Windows x64 | `DoubaoWorkshop-1.5.6-Setup.exe` | 双击安装，通过桌面「豆包工坊」或「豆包工坊 网页版」启动 |
 | macOS 13+，Apple 芯片 | 最新 Release 中已验收的 `mac-arm64.dmg` | 打开镜像，将应用拖入 Applications |
 | macOS 13+，Intel | 最新 Release 中已验收的 `mac-x64.dmg` | 打开镜像，将应用拖入 Applications |
 
@@ -23,7 +23,7 @@ Mac 包使用临时签名，**尚未经过 Apple Developer ID 签名和公证**�
 发行附件中的 `SHA256SUMS.txt` 用于校验下载文件。在 PowerShell 中运行：
 
 ```powershell
-Get-FileHash .\DoubaoWorkshop-1.5.5-Setup.exe -Algorithm SHA256
+Get-FileHash .\DoubaoWorkshop-1.5.6-Setup.exe -Algorithm SHA256
 ```
 
 新安装默认使用 `%LOCALAPPDATA%\Programs\豆包工坊`。升级已有版本会沿用原安装位置和用户数据目录，保留账号、会话、任务、素材和设置。
@@ -43,6 +43,8 @@ Get-FileHash .\DoubaoWorkshop-1.5.5-Setup.exe -Algorithm SHA256
 - 本地 REST API、MCP、SSE 和命令行入口。
 
 生成能力和额度以对应服务实际提供的权限为准。
+
+代理面板的“测 IP”使用当前账号会话，分别请求国内和国外检测站，并展示来源与检测时间。归属国内的 IP 只显示“国内”，国外 IP 显示国家和城市；无定位数据时显示“位置未知”。两个站点看到不同 IP 时提示可能存在分流，检测结果不代表豆包实际看到的出口。“直连”表示不使用应用代理，无法绕过路由器、上游网络或系统级透明转发。修改代理会清除旧检测结果，保存后立即应用；相同配置不会重置正在使用的连接。
 
 任务模板的视频时长使用拖动滑块，按 1 秒递增：Seedance 2.5 为 4–30 秒，Seedance 2.0 / Fast / Mini 为 4–15 秒。切换模型时自动收回超出上限的时长；旧版保存的 1–3 秒模板会调整到 4 秒，历史任务和已保存草稿快照保持不变。范围已与豆包页面及 [Seedance 官方文档](https://docs.volcengine.com/docs/ark/video-generation-tutorial?lang=zh)核对。
 
