@@ -29,7 +29,10 @@ jobs:
           node -e "if(process.arch !== '${{ matrix.arch }}') process.exit(1)"
           node _test/run-tests.cjs
       - name: Build DMG with bundled video and face-processing tools
-        run: node build/mac.mjs
+        run: |
+          brew list nasm >/dev/null 2>&1 || brew install nasm
+          brew list pkgconf >/dev/null 2>&1 || brew install pkgconf
+          node build/mac.mjs
       - name: Install and smoke-test packaged application
         run: node _test/mac-smoke.cjs
       - name: Attach verified packages to an existing matching draft release

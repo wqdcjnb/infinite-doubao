@@ -12,6 +12,8 @@ let editor=document.querySelector('textarea');
 const mode=document.querySelector('[data-testid="chat_input_action_mode"]'),box=document.querySelector('aside'), messages=document.querySelector('#messages'),send=document.querySelector('[type="submit"]');
 window.fixtureTrace=[];
 const trace=event=>{window.fixtureTrace.push({event,at:Date.now(),performance:performance.now(),disabled:send.disabled});if(window.fixtureTrace.length>50)window.fixtureTrace.shift();};
+const nativeTimeout=window.setTimeout;
+window.setTimeout=function(callback,delay,...args){const start=performance.now();return nativeTimeout(()=>{if(performance.now()-start>2000)trace('delayed-timer:'+delay+':'+Math.round(performance.now()-start));callback(...args);},delay);};
 new MutationObserver(()=>trace('send-attribute')).observe(send,{attributes:true});
 document.addEventListener('click',e=>{if(e.target.tagName==='BUTTON')trace('click:'+e.target.textContent);},true);
 function persist(){localStorage.setItem('fixture',JSON.stringify(saved));}

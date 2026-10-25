@@ -3,7 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { pipeline } from "node:stream/promises";
-import { createGunzip } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -20,7 +19,7 @@ if (path.dirname(out) !== path.join(root, "dist") || !/^mac-(arm64|x64)$/.test(p
 fs.rmSync(out, { recursive: true, force: true });
 fs.mkdirSync(out, { recursive: true });
 fs.mkdirSync(cache, { recursive: true });
-const run = (exe, args) => execFileSync(exe, args, { stdio: "inherit", cwd: root });
+const run = (exe, args, cwd = root) => execFileSync(exe, args, { stdio: "inherit", cwd });
 async function sha256(file) {
   const hash = crypto.createHash("sha256");
   for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
@@ -45,6 +44,9 @@ const dmgRoot = path.join(out, "image");
 const app = path.join(dmgRoot, `${name}.app`);
 run("ditto", [path.join(runtime, "Electron.app"), app]);
 const contents = path.join(app, "Contents"), res = path.join(contents, "Resources");
+for (const license of ["LICENSE", "LICENSES.chromium.html"]) {
+  if (fs.existsSync(path.join(runtime, license))) fs.copyFileSync(path.join(runtime, license), path.join(res, license));
+}
 fs.rmSync(path.join(res, "default_app.asar"), { force: true });
 fs.renameSync(path.join(contents, "MacOS", "Electron"), path.join(contents, "MacOS", name));
 const plist = path.join(contents, "Info.plist");
@@ -84,16 +86,36 @@ run(python, ["-I", "-m", "pip", "install", "--no-index", "--no-deps", "--no-cach
 run(python, ["-B", "-I", "-c", "import cv2,numpy;print('Bundled:',cv2.__version__,numpy.__version__)"]);
 const tools = path.join(res, "tools");
 fs.mkdirSync(tools);
+// Build portable GPL tools from pinned source; no nonfree codecs or Homebrew dylibs in the app.
+const ffmpegTar = await download(`https://ffmpeg.org/releases/ffmpeg-${deps.ffmpegVersion}.tar.xz`, deps.ffmpegSource);
+const x264Tar = await download(`https://github.com/mirror/x264/archive/${deps.x264Revision}.tar.gz`, deps.x264Source);
+const native = path.join(out, "native"), prefix = path.join(native, "installed");
+fs.mkdirSync(native);
+run("tar", ["-xf", ffmpegTar, "-C", native]);
+run("tar", ["-xf", x264Tar, "-C", native]);
+const x264 = path.join(native, `x264-${deps.x264Revision}`), ffmpeg = path.join(native, `ffmpeg-${deps.ffmpegVersion}`);
+process.env.MACOSX_DEPLOYMENT_TARGET = "13.0";
+process.env.PKG_CONFIG_PATH = path.join(prefix, "lib", "pkgconfig");
+run("./configure", [`--prefix=${prefix}`, "--enable-static", "--enable-pic", "--disable-cli", "--disable-opencl", "--extra-cflags=-mmacosx-version-min=13.0"], x264);
+run("make", ["-j4"], x264); run("make", ["install"], x264);
+run("./configure", [`--prefix=${prefix}`, "--enable-gpl", "--enable-libx264", "--disable-shared", "--enable-static", "--disable-autodetect", "--disable-doc", "--disable-debug", "--disable-ffplay", "--pkg-config-flags=--static", `--extra-cflags=-I${prefix}/include -mmacosx-version-min=13.0`, `--extra-ldflags=-L${prefix}/lib -mmacosx-version-min=13.0`], ffmpeg);
+run("make", ["-j4"], ffmpeg);
 for (const tool of ["ffmpeg", "ffprobe"]) {
-  const gzip = await download(`https://github.com/eugeneware/ffmpeg-static/releases/download/${deps.ffmpegRelease}/${tool}-darwin-${arch}.gz`, deps[arch][tool]);
   const dest = path.join(tools, tool);
-  await pipeline(fs.createReadStream(gzip), createGunzip(), fs.createWriteStream(dest));
+  fs.copyFileSync(path.join(ffmpeg, tool), dest);
   fs.chmodSync(dest, 0o755);
   run(dest, ["-version"]);
+  const links = execFileSync("otool", ["-L", dest], { encoding: "utf8" });
+  if (/\/opt\/homebrew\/|\/usr\/local\/|\/Users\//.test(links.split("\n").slice(1).join("\n"))) throw new Error(`Nonportable ${tool} library dependency: ${links}`);
 }
-const license = await download(`https://github.com/eugeneware/ffmpeg-static/releases/download/${deps.ffmpegRelease}/darwin-${arch}.LICENSE`, deps[arch].license);
-fs.copyFileSync(license, path.join(tools, "FFmpeg-LICENSE.txt"));
-fs.writeFileSync(path.join(res, "THIRD-PARTY.txt"), `Electron ${deps.electron}: https://github.com/electron/electron\nCPython ${deps.python}: https://github.com/astral-sh/python-build-standalone/releases/tag/${deps.pythonRelease}\nOpenCV ${deps.opencv}: https://github.com/opencv/opencv-python\nNumPy ${deps.numpy}: https://github.com/numpy/numpy\nFFmpeg: https://github.com/eugeneware/ffmpeg-static/releases/tag/${deps.ffmpegRelease}\nFFmpeg source: https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz\nSee bundled licenses and Python dist-info directories.\n`);
+const sources = path.join(tools, "sources"); fs.mkdirSync(sources);
+fs.copyFileSync(ffmpegTar, path.join(sources, path.basename(ffmpegTar)));
+fs.copyFileSync(x264Tar, path.join(sources, `x264-${deps.x264Revision}.tar.gz`));
+fs.copyFileSync(path.join(root, "build/mac.mjs"), path.join(sources, "mac.mjs"));
+fs.copyFileSync(path.join(root, "build/mac-dependencies.json"), path.join(sources, "mac-dependencies.json"));
+fs.copyFileSync(path.join(x264, "COPYING"), path.join(tools, "x264-COPYING.txt"));
+for (const file of fs.readdirSync(ffmpeg).filter((f) => /^(COPYING|LICENSE)/.test(f))) fs.copyFileSync(path.join(ffmpeg, file), path.join(tools, "FFmpeg-" + file));
+fs.writeFileSync(path.join(res, "THIRD-PARTY.txt"), `Electron ${deps.electron}: https://github.com/electron/electron\nCPython ${deps.python}: https://github.com/astral-sh/python-build-standalone/releases/tag/${deps.pythonRelease}\nOpenCV ${deps.opencv}: https://github.com/opencv/opencv-python\nNumPy ${deps.numpy}: https://github.com/numpy/numpy\nFFmpeg ${deps.ffmpegVersion} with x264: GPL, source archives and build configuration included in tools/sources.\nhttps://ffmpeg.org/ https://www.videolan.org/developers/x264.html\nSee bundled license files and Python dist-info directories.\n`);
 // A local ad-hoc signature makes the arm64 bundle executable; it is not Developer ID notarization.
 // Production signing can be supplied by a developer's login keychain, with no secrets in this repository.
 const identity = process.env.DOLAMOD_MAC_SIGN_IDENTITY;

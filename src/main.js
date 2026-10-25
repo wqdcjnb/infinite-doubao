@@ -41,6 +41,11 @@ process.on("uncaughtException", (error) => { bootLog("uncaught", error); if (!st
 process.on("unhandledRejection", (error) => { bootLog("unhandled-rejection", error); if (!startupReady) reportStartupFailure(error); });
 
 const { app, BrowserWindow, ipcMain, session, shell, dialog, Menu, globalShortcut } = require("electron");
+if (process.platform === "darwin") {
+  // Intel macOS can defer a hidden guest's 100 ms timer past the task's 20 s deadline.
+  app.commandLine.appendSwitch("disable-background-timer-throttling");
+  app.commandLine.appendSwitch("disable-renderer-backgrounding");
+}
 app.on("before-quit", () => { appQuitting = true; });
 const path = require("node:path");
 const fs = require("node:fs");
@@ -212,6 +217,8 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
       webviewTag: true,
+      // Keep the host's scheduler alive while a Mac guest is used from the drafts panel.
+      backgroundThrottling: process.platform !== "darwin",
       spellcheck: false
     }
   });
@@ -274,6 +281,7 @@ function createWindow() {
 
 app.on("web-contents-created", (_e, contents) => {
   if (contents.getType() !== "webview") return;
+  if (process.platform === "darwin") contents.setBackgroundThrottling(false);
   contents.on("console-message", (_ev, level, message, line, source) => {
     if (level >= 2) log.warn("webview-console", { level, message: String(message).slice(0, 300), source: String(source).slice(0, 120), line });
   });
