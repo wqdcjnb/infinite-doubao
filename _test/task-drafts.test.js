@@ -53,3 +53,48 @@ test("空提示词非法模式空选择被拒绝，移除记录保留模板", as
   await assert.rejects(queue.submitDrafts([]), /勾选/);
   const d = drafts.create(t.id); drafts.remove(d.id); assert.equal(drafts.list().length, 0); assert.ok(templates.get(t.id));
 });
+
+test("批量删除旧版和已保存草稿，保留未选记录、模板、附件及任务，重载不恢复", async () => {
+  const t = template(), file = path.join(P.home(), "reference.png"); fs.writeFileSync(file, "image");
+  await templates.importAttachments(t.id, [file]);
+  const old = drafts.create(t.id), saved = drafts.create(t.id), keep = drafts.create(t.id);
+  delete old.draftNumber;
+  old.executionMode = "video";
+  drafts.updateMany({ [saved.id]: { nativeState: "saved", instanceId: "old-account" } });
+  const task = queue.submitTemplate(templates.snapshot(t.id));
+  const result = queue.removeDrafts([old.id, saved.id, old.id]);
+  assert.deepEqual(result, { removed: [old.id, saved.id], count: 2 });
+  store.load();
+  assert.deepEqual(drafts.list().map(d => d.id), [keep.id]);
+  assert.ok(templates.get(t.id)); assert.ok(fs.existsSync(saved.template.attachments[0].path));
+  assert.ok(store.get().tasks.some(t => t.id === task.taskId));
+  queue.removeDrafts([keep.id]); store.load(); assert.equal(drafts.list().length, 0);
+});
+
+test("批量删除空选择、过期选择和写盘失败时整批保留", () => {
+  const a = drafts.create(template().id), b = drafts.create(a.template.id);
+  for (const ids of [[], null, a.id]) assert.throws(() => drafts.removeMany(ids), /勾选/);
+  assert.throws(() => drafts.removeMany([a.id, "missing"]), /刷新草稿箱/);
+  const save = store.save; store.save = () => false;
+  try { assert.throws(() => drafts.removeMany([a.id, b.id]), /删除草稿失败/); }
+  finally { store.save = save; }
+  assert.deepEqual(drafts.list().map(d => d.id), [a.id, b.id]);
+  store.load(); assert.deepEqual(drafts.list().map(d => d.id), [a.id, b.id]);
+});
+
+test("跨窗口保存进行中禁止删除，操作结束后可清理", async () => {
+  const inst = require("../src/instances").create({ name: "隔离测试", url: "about:blank" });
+  const d = drafts.create(template().id);
+  let release;
+  queue.init({ resolveDriver: () => new Promise(resolve => { release = resolve; }) });
+  const pending = queue.saveDrafts([d.id], { instanceId: inst.id });
+  try {
+    assert.throws(() => queue.removeDrafts([d.id]), /正在保存或发送/);
+    assert.equal(drafts.list().length, 1);
+  } finally {
+    release({ isLoggedIn: async () => ({ loggedIn: false }) });
+    await assert.rejects(pending, /登录/);
+    queue.init({ resolveDriver: null });
+  }
+  queue.removeDrafts([d.id]); assert.equal(drafts.list().length, 0);
+});

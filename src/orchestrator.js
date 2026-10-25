@@ -485,6 +485,10 @@ function commitTemplates(records, draftIds = [], startQueue = true) {
 function submitTemplate(template) {
   return commitTemplates([templateRecords(templates.validateSnapshot(template))])[0];
 }
+function removeDrafts(ids) {
+  if (runtime.nativeDrafts.size) throw new Error("草稿正在保存或发送，请完成后再删除");
+  return drafts.removeMany(ids);
+}
 function selectedDrafts(ids) {
   if (!Array.isArray(ids) || !ids.length) throw new Error("请先勾选要提交的草稿");
   return [...new Set(ids)].map((id) => {
@@ -668,4 +672,4 @@ function state() {
     running: [...runtime.running.values()].map((c) => ({ taskId: c.task.id, instanceId: c.inst.id, instanceName: c.inst.name, shotId: c.shot.id, shotIndex: c.shot.index, storyboardId: c.sb.id })).concat([...runtime.nativeDrafts.values()].map((c) => ({ ...c, taskId: "native-drafts", storyboardId: "" }))),
     busy: [...runtime.busy], parallel: maxParallel(), stopped: [...runtime.stopped], lastError: runtime.lastError, stats, tasks: taskList({ limit: 50 }) };
 }
-module.exports = { init, submitTemplate, saveDrafts, submitDrafts, stopTask, recoverTemplateTasks, wakeQueue, events, state, start, pause, resume, stop, stopAll, pump, dispatchOne, retryTask, redispatch, taskList, getTask, patchTask, pickInstance, buildShotPayload, quota };
+module.exports = { init, submitTemplate, saveDrafts, submitDrafts, removeDrafts, stopTask, recoverTemplateTasks, wakeQueue, events, state, start, pause, resume, stop, stopAll, pump, dispatchOne, retryTask, redispatch, taskList, getTask, patchTask, pickInstance, buildShotPayload, quota };

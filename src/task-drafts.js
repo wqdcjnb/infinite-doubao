@@ -31,12 +31,19 @@ function updateMany(patches) {
 }
 
 function remove(id) {
-  const data = store.get();
-  const previous = data.taskDrafts;
-  if (!previous.some((d) => d.id === id)) throw new Error("草稿不存在或已提交，请刷新草稿箱");
-  data.taskDrafts = previous.filter((d) => d.id !== id);
-  if (!store.save()) { data.taskDrafts = previous; throw new Error("移除草稿失败"); }
+  removeMany([id]);
   return { removed: id };
 }
 
-module.exports = { list, create, createMany, updateMany, remove, numberFor };
+function removeMany(ids) {
+  if (!Array.isArray(ids) || !ids.length) throw new Error("请先勾选要删除的草稿");
+  const selected = new Set(ids);
+  const data = store.get();
+  const previous = data.taskDrafts;
+  if ([...selected].some((id) => !previous.some((d) => d.id === id))) throw new Error("部分草稿不存在或已提交，请刷新草稿箱");
+  data.taskDrafts = previous.filter((d) => !selected.has(d.id));
+  if (!store.save()) { data.taskDrafts = previous; throw new Error("删除草稿失败，请检查磁盘空间或目录权限"); }
+  return { removed: [...selected], count: selected.size };
+}
+
+module.exports = { list, create, createMany, updateMany, remove, removeMany, numberFor };

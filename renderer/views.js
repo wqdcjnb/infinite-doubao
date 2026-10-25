@@ -21,6 +21,7 @@ const V = {
   templateDirty: false,
   drafts: [],
   selectedDrafts: new Set(),
+  expandedDrafts: new Set(),
   draftBusy: false,
   draftMessage: "",
   tasks: [],
@@ -461,6 +462,7 @@ function bindTemplateEvents() {
   q("#templateShowDrafts").addEventListener("click", () => setView("drafts"));
   q("#draftAccount").addEventListener("change", renderDrafts);
   q("#draftRefresh").addEventListener("click", () => guard(refreshDrafts));
+  q("#draftDelete").addEventListener("click", () => guard(deleteSelectedDrafts));
   q("#draftSubmit").addEventListener("click", () => guard(submitSelectedDrafts));
   q("#draftSave").addEventListener("click", () => guard(async () => {
     if (q("#draftSave").disabled) return;
@@ -497,6 +499,7 @@ async function refreshDrafts() {
   for (const inst of V.instances) { const option = node("option", "", inst.name); option.value = inst.id; account.appendChild(option); }
   account.value = V.instances.some((i) => i.id === chosen) ? chosen : "";
   V.selectedDrafts = new Set([...V.selectedDrafts].filter((id) => V.drafts.some((d) => d.id === id)));
+  V.expandedDrafts = new Set([...V.expandedDrafts].filter((id) => V.drafts.some((d) => d.id === id)));
   renderDrafts();
 }
 
@@ -504,6 +507,7 @@ function renderDrafts() {
   q("#draftCount").textContent = String(V.drafts.length);
   q("#draftSelection").textContent = `已选 ${V.selectedDrafts.size} / ${V.drafts.length} 条`;
   const selected = V.drafts.filter((d) => V.selectedDrafts.has(d.id));
+  q("#draftDelete").disabled = V.draftBusy || !selected.length;
   const account = q("#draftAccount").value;
   const mismatch = selected.find((d) => d.instanceId && d.instanceId !== account);
   const uncertain = selected.some((d) => d.nativeState === "saving" || d.submissionRecord?.task.submissionUncertain);
@@ -530,9 +534,13 @@ function renderDrafts() {
     check.disabled = V.draftBusy;
     check.setAttribute("aria-label", `选择草稿「${t.name}」`);
     check.addEventListener("change", () => { check.checked ? V.selectedDrafts.add(draft.id) : V.selectedDrafts.delete(draft.id); renderDrafts(); });
-    const info = node("div", "draft-info");
-    info.appendChild(node("strong", "", t.name));
-    info.appendChild(node("small", "draft-number", draft.draftNumber ? `编号：${draft.draftNumber}` : draft.nativeState ? "旧版草稿（未编号）；重新加入草稿箱后可按编号识别" : "保存到豆包时自动生成编号"));
+    const info = node("details", "draft-info");
+    info.open = V.expandedDrafts.has(draft.id);
+    info.addEventListener("toggle", () => { info.open ? V.expandedDrafts.add(draft.id) : V.expandedDrafts.delete(draft.id); });
+    const summary = node("summary");
+    summary.appendChild(node("strong", "", t.name));
+    summary.appendChild(node("small", "draft-number", `编号：${draft.draftNumber || "未编号"}`));
+    info.appendChild(summary);
     const state = draft.submissionRecord?.task.submissionUncertain ? "发送结果待核对" : draft.nativeState === "sent" ? "已发送，待取回结果" : draft.nativeState === "saved" ? "已存入豆包草稿" : draft.nativeState === "saving" ? "保存结果待核对" : "待存入豆包";
     info.appendChild(node("small", "", `${state}${draft.instanceName ? ` · ${draft.instanceName}` : ""}`));
     if (draft.nativeError) info.appendChild(node("small", "attachment-missing", draft.nativeError));
@@ -560,6 +568,26 @@ async function addTemplateDraft(multiple = false) {
     V.selectedDrafts = new Set(added.map((d) => d.id));
     draftSuccess(`${multiple ? `${added.length} 条任务` : `「${template.name}」`}已加入草稿箱`);
   } finally { V.draftBusy = false; await refreshDrafts(); renderTemplateList(); }
+}
+
+async function deleteSelectedDrafts() {
+  if (q("#draftDelete").disabled) return;
+  const ids = [...V.selectedDrafts];
+  if (!await window.DMDialogs.confirm({ title: `删除选中的 ${ids.length} 条草稿记录？`,
+    message: "删除后无法恢复这些工坊草稿记录。", detail: "豆包网页中的草稿、原模板、本地附件和任务记录会保留。",
+    confirmLabel: `删除 ${ids.length} 条记录`, danger: true })) return;
+  if (V.draftBusy) return;
+  V.draftBusy = true; V.draftMessage = "正在删除所选草稿…";
+  renderDrafts(); renderTemplateList();
+  try {
+    const result = await call("dm:drafts:remove", ids);
+    ids.forEach((id) => V.selectedDrafts.delete(id));
+    draftSuccess(`已删除 ${result.count} 条草稿记录`);
+  } finally {
+    V.draftBusy = false;
+    await refreshDrafts();
+    renderTemplateList();
+  }
 }
 
 async function submitSelectedDrafts() {

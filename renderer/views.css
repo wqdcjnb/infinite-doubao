@@ -121,7 +121,12 @@
 .draft-account-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 24px; margin-top: 18px; padding: 18px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; }
 .draft-account-bar .field { flex: 1; min-width: 200px; margin: 0; }
 .draft-account-bar strong { display: block; padding: 9px 0; font-size: 13px; color: var(--text); }
-.draft-info > small { display: block; margin-top: 5px; }
+.draft-info > small, .draft-info summary > small { display: block; margin-top: 5px; }
+.draft-info summary { position: relative; padding-right: 20px; cursor: pointer; list-style: none; }
+.draft-info summary::-webkit-details-marker { display: none; }
+.draft-info summary::after { content: "›"; position: absolute; top: 0; right: 0; color: var(--text-mute); }
+.draft-info[open] summary::after { transform: rotate(90deg); }
+.draft-info summary:focus-visible { outline: 2px solid var(--cyan); outline-offset: 4px; border-radius: 4px; }
 .draft-info .draft-number { font-family: var(--mono); overflow-wrap: anywhere; color: var(--text-dim); }
 .draft-box-head > div { min-width: 0; }
 .draft-actions { flex-wrap: wrap; padding: 12px 0; border-bottom: 1px solid var(--line); }

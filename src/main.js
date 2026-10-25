@@ -675,7 +675,8 @@ function registerIpc() {
     return { ...result, ids: added.map((d) => d.id) };
   }));
   ipcMain.handle("dm:drafts:save", wrap(async (ids, options) => orchestrator.saveDrafts(ids, options)));
-  ipcMain.handle("dm:draft:remove", wrap(async (id) => taskDrafts.remove(id)));
+  ipcMain.handle("dm:draft:remove", wrap(async (id) => { orchestrator.removeDrafts([id]); return { removed: id }; }));
+  ipcMain.handle("dm:drafts:remove", wrap(async (ids) => orchestrator.removeDrafts(ids)));
   ipcMain.handle("dm:drafts:submit", wrap(async (ids, options) => orchestrator.submitDrafts(ids, options)));
   ipcMain.handle("dm:task:stop", wrap(async (id) => orchestrator.stopTask(id)));
 
