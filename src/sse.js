@@ -13,8 +13,10 @@ const interceptor = require("./interceptor");
 
 const clients = new Set();
 let heartbeat = null;
+let unsubscribe = null;
 
 function broadcast(event, data) {
+  if (!clients.size) return;
   const payload = `event: ${event}\ndata: ${JSON.stringify(data === undefined ? null : data)}\n\n`;
   for (const res of clients) {
     try { res.write(payload); } catch { clients.delete(res); }
@@ -42,10 +44,20 @@ function setup(server) {
 
   server.get("/api/events", (c) => c.ok({ clients: clients.size }));
 
-  orchestrator.events.on("event", (e) => broadcast("task", e));
-  log.onLog((line) => broadcast("log", line));
-  interceptor.events.on("add", (item) => broadcast("resource", item));
-  interceptor.events.on("update", (item) => broadcast("resource", item));
+  if (!unsubscribe) {
+    const onTask = (e) => broadcast("task", e);
+    const onResource = (item) => broadcast("resource", item);
+    const stopLogs = log.onLog((line) => broadcast("log", line));
+    orchestrator.events.on("event", onTask);
+    interceptor.events.on("add", onResource);
+    interceptor.events.on("update", onResource);
+    unsubscribe = () => {
+      orchestrator.events.off("event", onTask);
+      interceptor.events.off("add", onResource);
+      interceptor.events.off("update", onResource);
+      stopLogs();
+    };
+  }
 
   if (!heartbeat) {
     heartbeat = setInterval(() => broadcast("ping", { at: Date.now() }), 20000);
@@ -55,6 +67,7 @@ function setup(server) {
 }
 
 function close() {
+  if (unsubscribe) { unsubscribe(); unsubscribe = null; }
   for (const res of clients) { try { res.end(); } catch {} }
   clients.clear();
   if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }

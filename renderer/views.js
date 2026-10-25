@@ -122,6 +122,28 @@ function copyText(text) {
   }
 }
 
+// Burst events share one refresh; a change during IPC gets one follow-up read.
+const refreshJobs = new Map();
+const refreshTimers = new Map();
+function queueRefresh(key, refresh) {
+  const current = refreshJobs.get(key);
+  if (current) { current.again = true; return current.promise; }
+  const job = { again: false, promise: null };
+  refreshJobs.set(key, job);
+  job.promise = Promise.resolve().then(async () => {
+    do { job.again = false; await refresh(); } while (job.again);
+  }).finally(() => refreshJobs.delete(key));
+  return job.promise;
+}
+
+function scheduleRefresh(key, refresh, view) {
+  if (refreshTimers.has(key)) return;
+  refreshTimers.set(key, setTimeout(() => {
+    refreshTimers.delete(key);
+    if (!document.hidden && (!view || V.view === view)) guard(refresh);
+  }, 100));
+}
+
 /* ------------------------------------------------------------------ 弹窗 */
 
 let modalOnOk = null;
@@ -184,10 +206,11 @@ async function setView(name) {
 /* ------------------------------------------------------------ 通用数据 */
 
 async function refreshBadges() {
-  const [state, server] = await Promise.all([
-    guard(() => call("dm:state"), null),
-    guard(() => call("dm:server"), null)
-  ]);
+  return queueRefresh("badges", updateBadges);
+}
+
+async function updateBadges() {
+  const state = await guard(() => call("dm:state"), null);
   if (state) {
     V.settings = state.settings || V.settings;
     q("#verText").textContent = `v${state.brand.version}`;
@@ -203,11 +226,12 @@ async function refreshBadges() {
     const dot = q("#taskDot");
     if (dot) dot.classList.toggle("on", ((state.orchestrator && state.orchestrator.running) || []).length > 0);
   }
-  V.server = server;
+  if (!state) return;
+  V.server = state.server;
   const badge = q("#vbServer");
   if (badge) {
-    const on = !!(server && server.port);
-    badge.textContent = on ? `API :${server.port}` : "API 关";
+    const on = !!(V.server && V.server.port);
+    badge.textContent = on ? `API :${V.server.port}` : "API 关";
     badge.classList.toggle("ok", on);
   }
 }
@@ -481,11 +505,18 @@ async function submitSelectedDrafts() {
 const jianyingOpeningTasks = new Set();
 
 async function refreshTasks() {
+  return queueRefresh("tasks", updateTasks);
+}
+
+async function updateTasks() {
+  const status = V.taskFilter;
   const filter = {};
   if (V.taskFilter) filter.status = V.taskFilter;
   filter.limit = 200;
-  V.tasks = await guard(() => call("dm:tasks", filter), []) || [];
-  renderTaskTable();
+  const tasks = await guard(() => call("dm:tasks", filter), []) || [];
+  if (status !== V.taskFilter) return;
+  V.tasks = tasks;
+  if (V.view === "tasks") renderTaskTable();
 }
 
 function taskStatusText(task) {
@@ -682,23 +713,44 @@ async function redispatchTask(task) {
 
 /* ============================================================== 素材库 */
 
+let assetGrid = null;
+const assetCards = new Map();
+
 async function refreshAssets() {
-  const body = q("#assetBody");
+  return queueRefresh("assets", updateAssets);
+}
+
+async function updateAssets() {
   const result = await guard(() => call("dm:videos"), null);
-  body.replaceChildren();
+  if (V.view !== "assets") return;
+  const body = q("#assetBody");
   q("#videoCount").textContent = String(result?.items.length || 0);
   q("#videoDirectory").textContent = result ? `保存目录：${result.directory}` : "";
-  if (!result) {
-    body.appendChild(node("div", "empty-hint", "读取视频目录失败，请检查目录后刷新。"));
+  if (!result?.items.length) {
+    assetGrid = null;
+    assetCards.clear();
+    body.replaceChildren(node("div", "empty-hint", result
+      ? "还没有保存的成片。生成并下载完成后，视频会自动出现在这里。"
+      : "读取视频目录失败，请检查目录后刷新。"));
     return;
   }
-  if (!result.items.length) {
-    body.appendChild(node("div", "empty-hint", "还没有保存的成片。生成并下载完成后，视频会自动出现在这里。"));
-    return;
+  if (!assetGrid) { assetGrid = node("div", "video-grid"); body.replaceChildren(assetGrid); }
+  const paths = new Set(result.items.map((item) => item.path));
+  for (const [file, cached] of assetCards) {
+    if (!paths.has(file)) { cached.card.remove(); assetCards.delete(file); }
   }
-  const grid = node("div", "video-grid");
-  for (const item of result.items) grid.appendChild(videoCard(item));
-  body.appendChild(grid);
+  result.items.forEach((item, index) => {
+    const signature = JSON.stringify(item);
+    let cached = assetCards.get(item.path);
+    if (!cached || cached.signature !== signature) {
+      const card = videoCard(item);
+      if (cached) cached.card.replaceWith(card);
+      cached = { signature, card };
+      assetCards.set(item.path, cached);
+    }
+    // Inserting a new first item leaves existing players attached and playing.
+    if (assetGrid.children[index] !== cached.card) assetGrid.insertBefore(cached.card, assetGrid.children[index] || null);
+  });
 }
 
 function videoCard(item) {
@@ -912,20 +964,35 @@ async function refreshApi() {
 
 /* ================================================================ 日志 */
 
+let renderedLogLines = [];
+let renderedLogFilter = "";
+
 async function refreshLogs() {
-  V.logLines = await guard(() => call("dm:logs", 300, q("#logFilter").value.trim()), []) || [];
-  renderLogs();
+  return queueRefresh("logs", async () => {
+    V.logLines = await guard(() => call("dm:logs", 300, q("#logFilter").value.trim()), []) || [];
+    if (V.view === "logs") renderLogs();
+  });
 }
 
 function renderLogs() {
   const body = q("#logBody");
   const atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 40;
-  body.replaceChildren();
   const filter = q("#logFilter").value.trim().toLowerCase();
-  const list = filter
+  const filtered = filter
     ? V.logLines.filter((l) => JSON.stringify(l).toLowerCase().includes(filter))
     : V.logLines;
-  for (const line of list.slice(-400)) {
+  const list = filtered.slice(-400);
+  const offset = renderedLogLines.indexOf(list[0]);
+  let retained = Math.min(renderedLogLines.length - offset, list.length);
+  if (filter !== renderedLogFilter || offset < 0 || body.children.length !== renderedLogLines.length ||
+      !list.slice(0, retained).every((line, i) => line === renderedLogLines[offset + i])) {
+    body.replaceChildren();
+    retained = 0;
+  } else {
+    for (let i = 0; i < offset; i++) body.firstElementChild.remove();
+    while (body.children.length > retained) body.lastElementChild.remove();
+  }
+  for (const line of list.slice(retained)) {
     const row = node("div", "log-line lv-" + (line.level || "info"));
     row.appendChild(node("span", "log-t", (line.t || "").slice(11, 19)));
     row.appendChild(node("span", "log-lv", String(line.level || "info").toUpperCase()));
@@ -936,6 +1003,8 @@ function renderLogs() {
     if (text) row.appendChild(node("span", "log-msg", text));
     body.appendChild(row);
   }
+  renderedLogLines = list;
+  renderedLogFilter = filter;
   if (atBottom) body.scrollTop = body.scrollHeight;
 }
 
@@ -1157,8 +1226,9 @@ function bindEvents() {
     refreshBadges();
   });
 
-  q("#logFilter").addEventListener("input", () => renderLogs());
+  q("#logFilter").addEventListener("input", () => scheduleRefresh("log-filter", renderLogs, "logs"));
   q("#logClear").addEventListener("click", () => { V.logLines = []; renderLogs(); });
+  q("#logLive").addEventListener("change", () => { if (q("#logLive").checked) renderLogs(); });
 
   q("#dmModalClose").addEventListener("click", closeModal);
   q("#dmModal").addEventListener("click", (e) => { if (e.target.id === "dmModal") closeModal(); });
@@ -1168,19 +1238,26 @@ function bindEvents() {
 
   // 主进程事件 → 界面
   DM.onEvent((e) => {
-    if (!e) return;
-    refreshBadges();
-    if (V.view === "tasks") refreshTasks();
-    if (V.view === "assets" && e.type === "task" && e.task?.status === "succeeded") refreshAssets();
+    if (!e || e.type === "log") return;
+    scheduleRefresh("badges", refreshBadges);
+    if (V.view === "tasks") scheduleRefresh("tasks", refreshTasks, "tasks");
+    if (V.view === "assets" && e.type === "task" && e.task?.status === "succeeded") scheduleRefresh("assets", refreshAssets, "assets");
   });
   DM.onLog((line) => {
     if (!line) return;
     V.logLines.push(line);
     if (V.logLines.length > 800) V.logLines = V.logLines.slice(-800);
-    if (V.view === "logs" && q("#logLive").checked) renderLogs();
+    if (V.view === "logs" && q("#logLive").checked) scheduleRefresh("logs", () => { if (q("#logLive").checked) renderLogs(); }, "logs");
   });
-  DM.onResource((item) => { if (V.view === "assets" && item?.downloaded) refreshAssets(); });
+  DM.onResource((item) => { if (V.view === "assets" && item?.downloaded) scheduleRefresh("assets", refreshAssets, "assets"); });
   DM.onHotkey((payload) => say(`已按 ${payload.key} 全部停止`, true));
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    scheduleRefresh("badges", refreshBadges);
+    if (V.view === "tasks") scheduleRefresh("tasks", refreshTasks, "tasks");
+    if (V.view === "assets") scheduleRefresh("assets", refreshAssets, "assets");
+    if (V.view === "logs" && q("#logLive").checked) scheduleRefresh("logs", renderLogs, "logs");
+  });
 }
 
 async function boot() {
@@ -1189,7 +1266,7 @@ async function boot() {
   V.instances = await guard(() => call("dm:instances"), []) || [];
   await refreshBadges();
   setView("accounts");
-  setInterval(refreshBadges, 8000);
+  setInterval(() => { if (!document.hidden) refreshBadges(); }, 8000);
 
 }
 

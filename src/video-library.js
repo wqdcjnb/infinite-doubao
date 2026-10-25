@@ -12,6 +12,7 @@ const keyOf = (file) => process.platform === "win32" ? file.toLowerCase() : file
 
 async function list() {
   const data = store.get();
+  const tasksById = new Map(data.tasks.map((task) => [task.id, task]));
   const directory = path.resolve(P.downloadDir(data.settings.downloadDir));
   const candidates = new Map();
   const resources = new Map(interceptor.list().filter((r) => r.downloaded).map((r) => [keyOf(path.resolve(r.downloaded)), r]));
@@ -26,7 +27,7 @@ async function list() {
     for (const file of task.result?.files || []) add(file, task);
   }
   // Persisted downloads remain visible after changing the save directory or restarting.
-  for (const resource of resources.values()) add(resource.downloaded, data.tasks.find((task) => task.id === resource.taskId));
+  for (const resource of resources.values()) add(resource.downloaded, tasksById.get(resource.taskId));
   async function scan(folder) {
     let entries;
     try { entries = await fs.readdir(folder, { withFileTypes: true }); }

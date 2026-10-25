@@ -206,9 +206,9 @@
     var owner = node.closest ? node.closest("[data-message-role], [data-role]") : node;
     return (owner && (owner.getAttribute("data-message-role") || owner.getAttribute("data-role"))) || "";
   }
-  function taskMessages() {
+  function taskMessages(list) {
     if (!tracking) return [];
-    var list = messages();
+    list = list || messages();
     var anchor = -1;
     list.forEach(function (node, index) {
       if (tracking.messageIds.indexOf(messageId(node)) >= 0 || tracking.nodes.indexOf(node) >= 0) anchor = index;
@@ -235,9 +235,8 @@
       text: document.body ? String(document.body.innerText || "") : "", resumed: !!opts.resume, confirmed: opts.confirmedKeys || [] };
     return { ok: true, baselineUrls: urls, baselineMessageIds: ids };
   };
-  function newText() {
-    var roots = taskMessages();
-    if (messages().length) return roots.map(txt).join("\n");
+  function newText(roots, hasMessages) {
+    if (hasMessages) return roots.map(txt).join("\n");
     if (!tracking) return "";
     var current = document.body ? String(document.body.innerText || "") : "";
     var before = tracking.text;
@@ -249,17 +248,19 @@
   }
   api.readProgress = function () {
     if (!tracking) return { state: "unknown", percent: 0, mediaUrls: [], snippet: "尚未建立任务跟踪" };
-    var roots = taskMessages();
-    var urls = messages().length ? roots.reduce(function (out, root) { return out.concat(videoUrls(root)); }, []) : videoUrls();
+    // 只在本次同步轮询内复用快照；下一次仍重新读取页面，避免漏掉流式消息或成片。
+    var list = messages();
+    var roots = taskMessages(list);
+    var urls = list.length ? roots.reduce(function (out, root) { return out.concat(videoUrls(root)); }, []) : videoUrls();
     urls = urls.filter(function (url, index, list) { return tracking.keys.indexOf(videoKey(url)) < 0 && list.indexOf(url) === index; });
-    var tail = newText().slice(-4000);
+    var tail = newText(roots, list.length).slice(-4000);
     var pm = tail.match(/(\d{1,3})\s*%/g);
     var percent = pm && pm.length ? Math.min(100, Math.max.apply(null, pm.map(function (s) { return parseInt(s, 10) || 0; }))) : 0;
     var state = "unknown";
     if (/(生成失败|审核不通过|未通过审核|违规内容|免费数量用完|额度已用完|今日次数已用完|已达上限)/.test(tail)) state = "failed";
     else if (/(生成中|排队中|正在生成|处理中)/.test(tail)) state = "running";
     else if (urls.length || /(生成完成|已完成|已生成)/.test(tail)) state = "done";
-    else if (api.peekGenerationConfirmation().kind) state = "waiting_confirmation";
+    else if (findConfirmation(null, roots).kind) state = "waiting_confirmation";
     return { state: state, percent: state === "done" ? 100 : percent, videos: urls.length, mediaUrls: urls, snippet: tail.slice(-400) };
   };
   function confirmationKey(root, content, kind) {
@@ -267,9 +268,9 @@
     for (var i = 0; i < content.length; i += 1) { hash ^= content.charCodeAt(i); hash = Math.imul(hash, 16777619); }
     return tracking.taskId + ":" + kind + ":" + (messageId(root) || "dialog") + ":" + (hash >>> 0).toString(16);
   }
-  function findConfirmation(options) {
+  function findConfirmation(options, current) {
     if (!tracking) return { ok: false };
-    var current = taskMessages();
+    current = current || taskMessages();
     // Once a new assistant response exists, the earlier confirmation request
     // is history and must not be sent again.
     var roots = current.length ? [current[current.length - 1]] : [];

@@ -7,7 +7,8 @@
  * 本机已有 Python + opencv，走子进程最省事，也方便单独调试脚本。
  */
 
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn, execFile } = require("node:child_process");
+const execFileAsync = require("node:util").promisify(execFile);
 const path = require("node:path");
 const fs = require("node:fs");
 
@@ -20,6 +21,7 @@ const SCRIPT = path.join(PY_DIR, "face_mask.py");
 const MODEL = path.join(PY_DIR, "face_detection_yunet_2023mar.onnx");
 
 let cachedPython = null;
+let pendingProbe = null;
 
 function exeDir() {
   return path.join(path.dirname(process.execPath), "resources");
@@ -38,16 +40,22 @@ function candidateFfmpeg() {
   return "ffmpeg";
 }
 
-function tryPython(cmd, args) {
+async function tryPython(cmd, args) {
   try {
-    const r = spawnSync(cmd, [...args, "-B", "-c", "import cv2,sys;print(cv2.__version__)"], { encoding: "utf8", timeout: 15000, windowsHide: true });
-    if (r.status === 0 && String(r.stdout || "").trim()) return { cmd, args, version: String(r.stdout).trim() };
+    const r = await execFileAsync(cmd, [...args, "-B", "-c", "import cv2,sys;print(cv2.__version__)"], { encoding: "utf8", timeout: 15000, windowsHide: true });
+    if (String(r.stdout || "").trim()) return { cmd, args, version: String(r.stdout).trim() };
   } catch {}
   return null;
 }
 
 function findPython() {
   if (cachedPython) return cachedPython;
+  // Share discovery while opening the panel and starting a job overlap.
+  cachedPython = discoverPython();
+  return cachedPython;
+}
+
+async function discoverPython() {
   const env = process.env.DOLAMOD_PYTHON;
   const cands = [];
   const bundled = path.join(exeDir(), "python", "python.exe");
@@ -55,22 +63,25 @@ function findPython() {
   if (env) cands.push({ cmd: env, args: [] });
   cands.push({ cmd: "python", args: [] }, { cmd: "python3", args: [] }, { cmd: "py", args: ["-3"] });
   for (const c of cands) {
-    const hit = tryPython(c.cmd, c.args);
-    if (hit) { cachedPython = hit; return hit; }
+    const hit = await tryPython(c.cmd, c.args);
+    if (hit) return hit;
   }
-  cachedPython = { cmd: "", args: [], missing: true };
-  return cachedPython;
+  return { cmd: "", args: [], missing: true };
 }
 
 function probeFaceMask() {
-  const py = findPython();
+  if (!pendingProbe) pendingProbe = probeTools().finally(() => { pendingProbe = null; });
+  return pendingProbe;
+}
+
+async function probeTools() {
   const ffmpeg = candidateFfmpeg();
-  const ffmpegOk = (() => {
+  const [py, ffmpegOk] = await Promise.all([findPython(), (async () => {
     try {
-      const r = spawnSync(ffmpeg, ["-version"], { encoding: "utf8", timeout: 8000, windowsHide: true });
-      return r.status === 0;
+      await execFileAsync(ffmpeg, ["-version"], { encoding: "utf8", timeout: 8000, windowsHide: true });
+      return true;
     } catch { return false; }
-  })();
+  })()]);
   return {
     python: py.missing ? "" : `${py.cmd} ${py.args.join(" ")}`.trim(),
     opencv: py.version || "",
@@ -81,9 +92,9 @@ function probeFaceMask() {
   };
 }
 
-function runFaceMask(opts) {
+async function runFaceMask(opts) {
+  const py = await findPython();
   return new Promise((resolve) => {
-    const py = findPython();
     if (py.missing) {
       resolve({ ok: false, message: "没找到可用的 Python（需要 opencv-python）。请先执行：pip install opencv-python-headless" });
       return;

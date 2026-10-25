@@ -23,9 +23,11 @@ const boot = (() => {
 // preload 此时 HTML 还没开始解析；主进程已通过 will-attach-webview 把
 // contextIsolation 关掉，所以这里的同步调用直接落在页面主世界，
 // 站点在 <head> 里读 navigator 拿到的已经是伪装值。
+let fingerprintInstalled = false;
 if (boot.profile) {
   try {
     installFingerprint(boot.profile);
+    fingerprintInstalled = true;
   } catch (error) {
     try { ipcRenderer.send("dm:fp-error", String((error && error.message) || error)); } catch {}
   }
@@ -36,7 +38,9 @@ if (boot.profile) {
 try {
   const pageSource = buildPageScript({
     cfg: {
-      profile: boot.profile,
+      // 同一主世界已经同步安装，避免页面脚本再次叠加 Canvas/Audio 等包装。
+      // 同步安装失败时仍保留原来的主世界注入回退。
+      profile: fingerprintInstalled ? null : boot.profile,
       instanceId: boot.instanceId || boot.accountId || "",
       kernel: "embedded",
       enhancer: boot.enhancer || (boot.mask && boot.mask.enhancer) || {}

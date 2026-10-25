@@ -57,6 +57,7 @@ function taskList(filter = {}) {
 function patchTask(id, patch, durable = false) {
   const task = getTask(id);
   if (!task) return null;
+  if (!durable && Object.entries(patch || {}).every(([key, value]) => Object.is(task[key], value))) return task;
   const previous = Object.fromEntries(Object.keys(patch || {}).map((key) => [key, task[key]]));
   Object.assign(task, patch || {});
   if (!store.save() && durable) { Object.assign(task, previous); throw new Error("任务状态保存失败，已阻止重复提交风险，请检查配置目录"); }
