@@ -46,6 +46,28 @@ test("签名版本信息支持相对安装包地址和正确的版本排序", as
   for (const currentVersion of ["1.3.0", "2.0.0"]) assert.equal((await check({ ...f.opts, currentVersion })).hasUpdate, false);
 });
 
+test("可选组件与安装包一同校验发布，损坏组件不会更新清单，服务只开放合法组件文件", async t => {
+  const f = await fixture(t);
+  const stage = path.join(f.dir, "incoming"); fs.mkdirSync(stage);
+  const data = Buffer.from("optional media tools");
+  const components = { url: "DoubaoWorkshop-MediaTools-1.3.0-win32-x64.tar.gz", size: data.length, sha256: crypto.createHash("sha256").update(data).digest("hex") };
+  fs.writeFileSync(path.join(stage, "latest.json"), JSON.stringify(f.sign({ components })));
+  fs.writeFileSync(path.join(stage, f.manifest.file.url), f.body);
+  fs.writeFileSync(path.join(stage, components.url), "broken");
+  await assert.rejects(activate(f.dir, stage), /checksum/);
+  assert.equal(fs.existsSync(path.join(f.dir, "public", "latest.json")), false);
+  fs.writeFileSync(path.join(stage, components.url), data);
+  await activate(f.dir, stage);
+  assert.deepEqual(fs.readFileSync(path.join(f.dir, "public", components.url)), data);
+  const server = createServer(path.join(f.dir, "public"));
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const base = `http://127.0.0.1:${server.address().port}/`;
+    assert.equal((await fetch(base + components.url)).status, 200);
+    assert.equal((await fetch(base + "arbitrary.tar.gz")).status, 404);
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});
+
 test("篡改、无签名、无哈希、错误平台和非法版本被拒绝", async (t) => {
   const f = await fixture(t);
   for (const manifest of [ { ...f.sign(), notes: "篡改" }, { ...f.sign(), sig: "" },

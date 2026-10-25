@@ -102,6 +102,7 @@ function filesFromStoryboard(storyboardId) {
  * @param {object} opts {name, storyboardId, files:[{file|path,durationMs}], ratio, dir, fps, width, height}
  */
 async function createDraft(opts = {}) {
+  if (fs.existsSync(P.res("optional-components.json")) && !P.optionalDir()) throw new Error("请先在设置中下载本地素材处理组件，再导出剪映草稿");
   const settings = store.get().settings || {};
   if (opts.storyboardId && !(opts.files || []).length) {
     opts = { ...opts, files: filesFromStoryboard(opts.storyboardId) };

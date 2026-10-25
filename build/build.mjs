@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { splitComponents } from "./components.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -151,6 +152,7 @@ function main() {
   fs.mkdirSync(toolsDir, { recursive: true });
   const ffmpegCands = [
     path.join(ROOT, "tools", "ffmpeg.exe"),
+    path.join(RUNTIME, "resources", "tools", "ffmpeg.exe"),
     path.join(RUNTIME, "..", "看海无限画布-客户版-启动器修复-最终版", "ffmpeg.exe"),
     "D:\\看海无限画布-客户版-启动器修复-最终版\\ffmpeg.exe",
     path.join(ROOT, "_rev", "ffmpeg-static", "ffmpeg.exe"),
@@ -166,6 +168,7 @@ function main() {
     }
   }
 
+  splitComponents({ resources: RES, out: OUT, version: JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"))).version });
   if (!packAsar(stage, ASAR)) process.exit(1);
   rmrf(stage);
 

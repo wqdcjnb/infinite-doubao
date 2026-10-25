@@ -79,6 +79,7 @@ const jianyingImport = require("./jianying-import");
 const zizi = require("./zizi");
 const update = require("./update");
 const updater = update.createUpdater();
+const componentManager = require("./components").createManager();
 const httpMod = require("./http");
 const api = require("./api");
 const mcp = require("./mcp");
@@ -558,6 +559,9 @@ function registerIpc() {
   };
 
   ipcMain.handle("dm:renderer:ready", wrap(async () => { orchestrator.wakeQueue(); return true; }));
+  ipcMain.handle("dm:components:status", wrap(async () => componentManager.status()));
+  ipcMain.handle("dm:components:install", wrap(async () => componentManager.install()));
+  ipcMain.handle("dm:components:cancel", wrap(async () => componentManager.cancel()));
 
   ipcMain.handle("dm:state", wrap(async () => ({
     brand: { name: brand.name, version: brand.version, englishName: brand.englishName, features: brand.get().features },

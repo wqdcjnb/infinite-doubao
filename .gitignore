@@ -21,6 +21,7 @@
 !/build/install-update-server.ps1
 !/build/mac.mjs
 !/build/mac-dependencies.json
+!/build/components.mjs
 !/.github/
 
 !/_test/

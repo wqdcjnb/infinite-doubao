@@ -12,7 +12,7 @@ function createServer(root) {
     let name;
     try { name = decodeURIComponent(new URL(req.url, "http://localhost").pathname).slice(1); }
     catch { res.writeHead(400); return res.end(); }
-    if (!/^latest(?:-darwin-(?:arm64|x64))?\.json$/.test(name) && !/^DoubaoWorkshop-\d+\.\d+\.\d+-(?:Setup\.exe|mac-(?:arm64|x64)\.dmg)$/.test(name)) { res.writeHead(404); return res.end(); }
+    if (!/^latest(?:-darwin-(?:arm64|x64))?\.json$/.test(name) && !/^DoubaoWorkshop-\d+\.\d+\.\d+-(?:Setup\.exe|mac-(?:arm64|x64)\.dmg)$/.test(name) && !/^DoubaoWorkshop-MediaTools-\d+\.\d+\.\d+-(?:win32-x64|darwin-(?:arm64|x64))\.tar\.gz$/.test(name)) { res.writeHead(404); return res.end(); }
     const file = path.join(root, name);
     fs.stat(file, (error, stat) => {
       if (error || !stat.isFile()) { res.writeHead(404); return res.end(); }

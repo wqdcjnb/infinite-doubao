@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { splitComponents } from "./components.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const arch = process.arch;
@@ -127,6 +128,9 @@ fs.copyFileSync(path.join(x264, "COPYING"), path.join(tools, "x264-COPYING.txt")
 for (const file of fs.readdirSync(ffmpeg).filter((f) => /^(COPYING|LICENSE)/.test(f))) fs.copyFileSync(path.join(ffmpeg, file), path.join(tools, "FFmpeg-" + file));
 fs.writeFileSync(path.join(res, "THIRD-PARTY.txt"), `Electron ${deps.electron}: https://github.com/electron/electron\nCPython ${deps.python}: https://github.com/astral-sh/python-build-standalone/releases/tag/${deps.pythonRelease}\nOpenCV ${deps.opencv}: https://github.com/opencv/opencv-python\nNumPy ${deps.numpy}: https://github.com/numpy/numpy\nFFmpeg ${deps.ffmpegVersion} with x264: GPL, source archives and build configuration included in tools/sources.\nhttps://ffmpeg.org/ https://www.videolan.org/developers/x264.html\nSee bundled license files and Python dist-info directories.\n`);
 // A local ad-hoc signature makes the arm64 bundle executable; it is not Developer ID notarization.
+// Keep native tools signed when they are extracted outside the application bundle.
+run("codesign", ["--force", "--deep", "--sign", "-", app]);
+splitComponents({ resources: res, out, version: pkg.version });
 // Production signing can be supplied by a developer's login keychain, with no secrets in this repository.
 const identity = process.env.DOLAMOD_MAC_SIGN_IDENTITY;
 if (identity) {

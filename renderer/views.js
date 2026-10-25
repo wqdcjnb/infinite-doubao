@@ -1122,6 +1122,7 @@ async function refreshSettings() {
   openVideos.addEventListener("click", () => guard(() => DM.openHome()));
   storageGroup.appendChild(openVideos);
   box.appendChild(storageGroup);
+  box.appendChild(window.DMComponents.panel());
 
   box.appendChild(group("额度与命名", [
     numberRow("每实例每日条数", (s.quota || {}).perDay || 2, `本地派发上限，按 ${(s.quota || {}).resetTz || "Asia/Tokyo"} 每日重置；平台实际额度以账号为准`, (v) => patchSetting(["quota", "perDay"], v), { min: 1 }),

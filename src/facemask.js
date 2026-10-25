@@ -42,7 +42,9 @@ function findPython() {
 async function discoverPython() {
   const env = process.env.DOLAMOD_PYTHON;
   const cands = [];
-  const bundled = process.platform === "win32" ? P.res("python", "python.exe") : P.res("python", "bin", "python3");
+  const runtime = P.optionalDir() || P.resources();
+  if (fs.existsSync(P.res("optional-components.json")) && !P.optionalDir()) return { cmd: "", args: [], missing: true };
+  const bundled = process.platform === "win32" ? path.join(runtime, "python", "python.exe") : path.join(runtime, "python", "bin", "python3");
   try { if (fs.existsSync(bundled)) cands.push({ cmd: bundled, args: ["-I"] }); } catch {}
   if (env) cands.push({ cmd: env, args: [] });
   for (const cmd of process.platform === "darwin" ? ["python3", "python"] : ["python", "python3"]) cands.push({ cmd, args: [] });
@@ -81,7 +83,7 @@ async function runFaceMask(opts) {
   const py = await findPython();
   return new Promise((resolve) => {
     if (py.missing) {
-      resolve({ ok: false, message: "没找到可用的 Python（需要 opencv-python）。请先执行：pip install opencv-python-headless" });
+      resolve({ ok: false, message: "请先在设置中下载“本地素材处理组件”，安装后即可使用遮脸功能。" });
       return;
     }
     if (!fs.existsSync(SCRIPT)) {
@@ -137,4 +139,5 @@ async function runFaceMask(opts) {
   });
 }
 
-module.exports = { runFaceMask, probeFaceMask };
+function resetProbe() { cachedPython = null; pendingProbe = null; }
+module.exports = { runFaceMask, probeFaceMask, resetProbe };

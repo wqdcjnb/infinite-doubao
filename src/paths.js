@@ -79,8 +79,29 @@ function toolDir() {
 }
 
 function tool(name, platform = process.platform) {
+  const optional = optionalDir();
+  if (optional) {
+    const file = path.join(optional, "tools", name + (platform === "win32" ? ".exe" : ""));
+    if (fs.existsSync(file)) return file;
+  }
   const bundled = res("tools", name + (platform === "win32" ? ".exe" : ""));
   return fs.existsSync(bundled) ? bundled : name;
+}
+
+function optionalFiles() {
+  return process.platform === "win32" ? ["python/python.exe", "tools/ffmpeg.exe", "tools/ffprobe.exe"] : ["python/bin/python3", "tools/ffmpeg", "tools/ffprobe"];
+}
+
+function optionalDir() {
+  // Existing full installations keep their tools without another download.
+  if (optionalFiles().every((f) => fs.existsSync(res(f)))) return resources();
+  try {
+    const m = JSON.parse(fs.readFileSync(res("optional-components.json"), "utf8"));
+    if (!/^[a-f0-9]{64}$/.test(m.id) || m.platform !== process.platform || m.arch !== process.arch) return "";
+    const root = path.join(dir("components"), m.id);
+    if (JSON.parse(fs.readFileSync(path.join(root, "ready.json"), "utf8")).id === m.id && optionalFiles().every((f) => fs.existsSync(path.join(root, f)))) return root;
+  } catch {}
+  return "";
 }
 
 /** 成片目录：设置里可覆盖，默认放到系统下载目录下的专用文件夹 */
@@ -128,4 +149,4 @@ function all(customDownloadDir) {
   };
 }
 
-module.exports = { init, ensure, home, dir, res, resources, pyDir, toolDir, tool, downloadDir, legacyDownloadDir, paths, all };
+module.exports = { init, ensure, home, dir, res, resources, pyDir, toolDir, tool, optionalDir, optionalFiles, downloadDir, legacyDownloadDir, paths, all };

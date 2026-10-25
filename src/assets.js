@@ -164,6 +164,7 @@ function run(cmd, args, timeoutMs = 120000) {
  * @param {string} outPath 输出图片
  */
 async function grid(files, outPath, opts = {}) {
+  if (fs.existsSync(P.res("optional-components.json")) && !P.optionalDir()) return { ok: false, message: "请先在设置中下载本地素材处理组件" };
   const paths = (Array.isArray(files) ? files : []).filter((f) => {
     try { return fs.existsSync(f); } catch { return false; }
   });

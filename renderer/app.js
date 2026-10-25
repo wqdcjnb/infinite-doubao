@@ -725,11 +725,12 @@ function renderMaskPanel(body) {
   card.appendChild(el("h4", null, "上传前处理素材"));
   const probe = el("div", "hint", "检测环境加载中…");
   card.appendChild(probe);
+  card.appendChild(window.DMComponents.panel());
   API.probeMask().then((p) => {
     const ok = p.opencv && p.model && p.script;
     probe.innerHTML = ok
       ? `<span class="badge">OpenCV ${p.opencv}</span> <span class="badge">YuNet 模型就绪</span> <span class="badge${p.ffmpegOk ? "" : " warn"}">ffmpeg ${p.ffmpegOk ? "就绪" : "未找到"}</span>`
-      : `<span class="badge err">环境不完整</span> ${p.opencv ? "" : "缺 opencv（pip install opencv-python-headless）"} ${p.model ? "" : "缺模型"} ${p.script ? "" : "缺脚本"}`;
+      : "请先安装上方的本地素材处理组件，完成后重新打开此面板即可使用。";
   });
 
   const fMode = field(card, "打码方式");

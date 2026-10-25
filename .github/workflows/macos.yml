@@ -41,7 +41,7 @@ jobs:
         run: |
           tag="v$(node -p "require('./package.json').version")"
           if gh release view "$tag" --json isDraft,targetCommitish > release.json 2>/dev/null && node -e "const r=require('./release.json');process.exit(r.isDraft && r.targetCommitish === process.env.GITHUB_SHA ? 0 : 1)"; then
-            gh release upload "$tag" dist/mac-${{ matrix.arch }}/*.dmg dist/mac-${{ matrix.arch }}/SHA256SUMS*.txt --clobber
+            gh release upload "$tag" dist/mac-${{ matrix.arch }}/*.dmg dist/mac-${{ matrix.arch }}/SHA256SUMS*.txt dist/mac-${{ matrix.arch }}/DoubaoWorkshop-MediaTools-*.tar.gz --clobber
           else
             echo "No matching draft release; keep packages as workflow artifacts only."
           fi
@@ -54,5 +54,7 @@ jobs:
             dist/mac-${{ matrix.arch }}/SHA256SUMS*.txt
             dist/mac-${{ matrix.arch }}/mac-smoke.json
             dist/mac-${{ matrix.arch }}/mac-main-window.png
+            dist/mac-${{ matrix.arch }}/DoubaoWorkshop-MediaTools-*.tar.gz
+            dist/mac-${{ matrix.arch }}/components-*.json
           if-no-files-found: warn
           compression-level: 0

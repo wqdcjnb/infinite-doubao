@@ -25,6 +25,21 @@ async function activate(root, staging, manifestName = "latest.json") {
   const latest = path.join(publicDir, manifestName);
   const target = path.join(publicDir, m.file.url);
   fs.mkdirSync(publicDir, { recursive: true });
+  let component;
+  if (m.components) {
+    component = m.components;
+    if (component.url !== `DoubaoWorkshop-MediaTools-${m.version}-${m.platform}-${m.arch}.tar.gz`) throw new Error("Invalid component filename");
+    const archive = path.join(staging, component.url);
+    const digest = crypto.createHash("sha256");
+    for await (const chunk of fs.createReadStream(archive)) digest.update(chunk);
+    if (fs.statSync(archive).size !== component.size || digest.digest("hex") !== component.sha256) throw new Error("Component checksum mismatch");
+    const existing = path.join(publicDir, component.url);
+    if (fs.existsSync(existing)) {
+      const old = crypto.createHash("sha256");
+      for await (const chunk of fs.createReadStream(existing)) old.update(chunk);
+      if (old.digest("hex") !== component.sha256) throw new Error("Refusing replacement of published components");
+    }
+  }
   if (fs.existsSync(latest)) {
     const prior = JSON.parse(fs.readFileSync(latest, "utf8"));
     const a = m.version.split(".").map(Number), b = prior.version.split(".").map(Number);
@@ -36,6 +51,7 @@ async function activate(root, staging, manifestName = "latest.json") {
     for await (const chunk of fs.createReadStream(target)) hash.update(chunk);
     if (hash.digest("hex") !== m.file.sha256) throw new Error("An installer with this version already exists");
   } else fs.renameSync(file, target);
+  if (component && !fs.existsSync(path.join(publicDir, component.url))) fs.renameSync(path.join(staging, component.url), path.join(publicDir, component.url));
   fs.copyFileSync(path.join(staging, manifestName), latest + ".next");
   fs.renameSync(latest + ".next", latest);
   console.log(`Published ${m.version}, ${m.file.size} bytes, SHA256 ${m.file.sha256}`);

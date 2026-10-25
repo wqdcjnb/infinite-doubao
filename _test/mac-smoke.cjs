@@ -22,6 +22,7 @@ async function attach() {
   throw new Error("Packaged main window did not open");
 }
 let c, mounted = false;
+let componentServer;
 (async () => {
   assert.equal(process.platform, "darwin");
   fs.mkdirSync(mount);
@@ -38,6 +39,19 @@ let c, mounted = false;
   store.save();
   const marker = path.join(home, "attachments", "保留素材.txt");
   fs.writeFileSync(marker, "keep user data");
+  const catalog = JSON.parse(fs.readFileSync(path.join(res, "optional-components.json")));
+  assert.equal(fs.existsSync(path.join(res, "python")), false);
+  assert.equal(fs.existsSync(path.join(res, "tools")), false);
+  let componentRequests = 0;
+  componentServer = require("node:http").createServer((req, response) => {
+    if (req.url !== "/" + catalog.file.name) { response.writeHead(404); response.end(); return; }
+    componentRequests++;
+    response.writeHead(200, { "Content-Length": catalog.file.size });
+    fs.createReadStream(path.join(out, catalog.file.name)).pipe(response);
+  });
+  await new Promise(resolve => componentServer.listen(18856, "127.0.0.1", resolve));
+  store.get().settings.updateUrl = "http://127.0.0.1:18856/latest.json";
+  store.save();
   run("/usr/bin/open", ["-n", "-a", app, "--args", `--user-data-dir=${home}`, "--remote-debugging-port=9261"]);
   c = await attach();
   assert.equal(path.resolve((await c.eval("DM.paths()")).home), home);
@@ -47,22 +61,32 @@ let c, mounted = false;
   assert.ok(status.data.source.endsWith(`latest-darwin-${process.arch}.json`));
   assert.equal(await c.eval("!!document.querySelector('[data-view=\"drafts\"]')"), true);
   report.checks.push("Installed main window, preload IPC, draft navigation, platform update endpoint");
+  assert.equal((await c.eval("DM.call('dm:components:status')")).data.phase, "idle");
+  assert.equal((await c.eval("DM.probeMask()")).opencv, "");
+  assert.equal(componentRequests, 0);
+  const installed = (await c.eval("DM.call('dm:components:install')")).data;
+  assert.equal(installed.phase, "installed", JSON.stringify(installed));
+  const componentRoot = installed.directory;
+  assert.ok(componentRoot.startsWith(home));
+  assert.equal(componentRequests, 1);
+  componentServer.close(); componentServer = null;
+  report.checks.push("Lean app starts without media tools; explicit download installs verified tools in persistent user data");
   const probe = await c.eval("DM.probeMask()");
   assert.ok(probe.model && probe.script && probe.ffmpegOk && probe.opencv, JSON.stringify(probe));
-  assert.ok(probe.python.startsWith(res)); assert.ok(probe.ffmpeg.startsWith(res));
+  assert.ok(probe.python.startsWith(componentRoot)); assert.ok(probe.ffmpeg.startsWith(componentRoot));
   const input = path.join(fixture, "中文测试视频.mp4"), maskOut = path.join(fixture, "处理结果");
-  run(path.join(res, "tools", "ffmpeg"), ["-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240:r=10", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", input]);
+  run(path.join(componentRoot, "tools", "ffmpeg"), ["-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240:r=10", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", input]);
   const masked = await c.eval(`DM.runMask(${JSON.stringify({ files: [input], outDir: maskOut, keepOriginal: true })})`);
   assert.equal(masked.ok, true, JSON.stringify(masked));
   assert.equal(masked.results.length, 1); assert.ok(fs.statSync(masked.results[0].out).size > 1000);
-  const duration = run(path.join(res, "tools", "ffprobe"), ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", masked.results[0].out]);
+  const duration = run(path.join(componentRoot, "tools", "ffprobe"), ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", masked.results[0].out]);
   assert.ok(Number(duration.trim()) > 0);
   report.checks.push("Bundled Python/OpenCV/YuNet and FFmpeg/ffprobe processed a video with a Chinese path");
   const png = path.join(fixture, "图片素材.png"), grid = path.join(fixture, "四宫格.png");
-  run(path.join(res, "tools", "ffmpeg"), ["-y", "-i", input, "-frames:v", "1", png]);
+  run(path.join(componentRoot, "tools", "ffmpeg"), ["-y", "-i", input, "-frames:v", "1", png]);
   const collage = await c.eval(`DM.call('dm:asset:grid',${JSON.stringify([png, png, png, png])},${JSON.stringify({ out: grid, cols: 2, cell: 256 })})`);
   assert.ok(collage.ok && collage.data.ok, JSON.stringify(collage));
-  run(path.join(res, "python", "bin", "python3"), ["-B", "-I", "-c", "import cv2,sys;assert cv2.imread(sys.argv[1]).shape[:2]==(512,512)", grid]);
+  run(path.join(componentRoot, "python", "bin", "python3"), ["-B", "-I", "-c", "import cv2,sys;assert cv2.imread(sys.argv[1]).shape[:2]==(512,512)", grid]);
   assert.equal((await c.eval(`DM.runMask(${JSON.stringify({ files: [png], outDir: maskOut, keepOriginal: true })})`)).ok, true);
   report.checks.push("PNG image processing and four-image grid composition");
   fs.copyFileSync(input, path.join(__dirname, "clip.mp4"));
@@ -75,6 +99,7 @@ let c, mounted = false;
   run("/usr/bin/open", ["-a", app]); c = await attach();
   assert.equal((await c.eval("DM.call('dm:state')")).ok, true);
   assert.equal(fs.readFileSync(marker, "utf8"), "keep user data");
+  assert.equal((await c.eval("DM.call('dm:components:status')")).data.phase, "installed");
   report.checks.push("Closing and reopening from LaunchServices restores the main window and preserves user data");
   report.ok = true;
 })().catch(async (error) => {
@@ -87,6 +112,7 @@ let c, mounted = false;
   }
 }).finally(() => {
   c?.close();
+  componentServer?.close();
   try { run("/usr/bin/osascript", ["-e", `tell application ${JSON.stringify(app)} to quit`]); } catch {}
   if (mounted) try { run("hdiutil", ["detach", mount]); } catch {}
   fs.writeFileSync(path.join(out, "mac-smoke.json"), JSON.stringify(report, null, 2));
