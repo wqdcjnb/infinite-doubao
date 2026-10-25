@@ -18,7 +18,7 @@ function functionSource(name) {
 
 function fixture() {
   const steps = []; const ipc = new Map(); const configured = [];
-  const instance = { id: "fixture-account", partition: "persist:fixture-account", proxy: { mode: "system" } };
+  const instance = { id: "fixture-account", partition: "persist:fixture-account", url: "https://www.doubao.com/chat/?fixture=route", proxy: { mode: "system" } };
   const accountSession = { cookies: new EventEmitter(), fetch() { throw new Error("No network in entrypoint tests"); } };
   let resolveSession, rejectSession;
   const sessionReady = new Promise((resolve, reject) => { resolveSession = resolve; rejectSession = reject; });
@@ -31,7 +31,7 @@ function fixture() {
     }
   };
   const orchestrator = { wakeQueue: (id) => { assert.equal(id, instance.id); steps.push("wake"); } };
-  const diagnosticResult = { ok: true, mode: "system", domestic: { ok: true, ip: "192.0.2.1" }, international: { ok: true, ip: "203.0.113.2" }, differentExits: true };
+  const diagnosticResult = { ok: true, mode: "system", ip: "203.0.113.2", countryCode: "US", country: "美国", city: "阿什本", source: "https://ipwho.is/?lang=zh-CN" };
   const diagnostics = [];
   const proxyDiagnostics = { async testProxy(ses, opts) { steps.push("diagnose"); diagnostics.push({ ses, opts }); return diagnosticResult; } };
   const store = { get: () => data, save: () => true, proxyUrlOf: () => "fixture-proxy-url" };
@@ -64,7 +64,23 @@ test("代理检测等账号会话配置完成，使用该账号session而非UI�
   f.resolveSession(); const result = await pending;
   assert.equal(result, f.diagnosticResult); assert.deepEqual(f.steps, ["apply", "attach", "diagnose"]);
   assert.equal(f.diagnostics[0].ses, f.accountSession); assert.equal(f.diagnostics[0].opts.mode, "system");
+  assert.equal(f.diagnostics[0].opts.targetUrl, f.instance.url, "按账号目标URL匹配代理规则");
+  assert.equal(result.ip, "203.0.113.2");
+  for (const key of ["domestic", "international", "differentExits"]) assert.equal(key in result, false, "入口只返回一个检测结果");
   assert.equal(f.accountSession.cookies.listenerCount("changed"), 1);
+});
+
+test("入口透传账号目标和检测国别，不按直连或代理模式改写归属地", async () => {
+  const f = fixture(); f.resolveSession();
+  for (const mode of ["direct", "system", "custom"]) {
+    f.instance.proxy.mode = mode;
+    f.instance.url = `https://fixture.invalid/${mode}`;
+    const result = await f.invoke("proxy:test", f.instance.id);
+    assert.equal(f.diagnostics.at(-1).opts.mode, mode);
+    assert.equal(f.diagnostics.at(-1).opts.targetUrl, f.instance.url);
+    assert.equal(result.countryCode, "US"); assert.equal(result.country, "美国"); assert.equal(result.city, "阿什本");
+    assert.equal(result.ip, "203.0.113.2");
+  }
 });
 
 test("代理配置失败时检测不执行且不返回假成功或原始认证错误", async () => {
@@ -80,7 +96,7 @@ test("不存在的账号不会配置会话，检测结果失败也不会被入�
   const f = fixture();
   const missing = await f.invoke("proxy:test", "missing");
   assert.equal(missing.ok, false); assert.deepEqual(f.steps, []);
-  f.diagnosticResult.ok = false; f.diagnosticResult.domestic.ok = false; f.diagnosticResult.international.ok = false;
+  f.diagnosticResult.ok = false; f.diagnosticResult.ip = "";
   f.resolveSession(); const result = await f.invoke("proxy:test", f.instance.id);
   assert.equal(result, f.diagnosticResult); assert.equal(result.ok, false);
 });

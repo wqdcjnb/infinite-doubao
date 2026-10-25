@@ -114,13 +114,13 @@ function activeAccount() {
   return state.accounts.find((a) => a.id === state.activeId) || null;
 }
 
-function proxyConfigKey(proxy) {
-  return JSON.stringify([proxy?.mode || "direct", proxy?.url || ""]);
+function proxyConfigKey(proxy, targetUrl) {
+  return JSON.stringify([proxy?.mode || "direct", proxy?.url || "", targetUrl || state.settings.defaultUrl || "https://www.doubao.com/chat/"]);
 }
 
 function cachedProxyResult(acc) {
   const cached = acc && state.proxyCache[acc.id];
-  return cached?.key === proxyConfigKey(acc?.proxy) ? cached.result : null;
+  return cached?.key === proxyConfigKey(acc?.proxy, acc?.url) ? cached.result : null;
 }
 
 function hasProxyIp(site) {
@@ -132,22 +132,8 @@ function proxyLocation(site) {
   return [...new Set([site?.country, site?.city || site?.region].filter(Boolean))].join(" ") || "位置未知";
 }
 
-function proxyExitsDiffer(result) {
-  return !!result && (result.differentExits === true || (hasProxyIp(result.domestic) && hasProxyIp(result.international) && result.domestic.ip.trim() !== result.international.ip.trim()));
-}
-
-const PROXY_SPLIT_HINT = "出口不同，可能存在分流；不代表豆包实际出口";
-
 function proxySummary(result) {
-  if (!result) return [];
-  const domestic = hasProxyIp(result.domestic);
-  const international = hasProxyIp(result.international);
-  if (domestic && international && !proxyExitsDiffer(result)) {
-    const site = result.domestic.countryCode || result.domestic.country ? result.domestic : result.international;
-    return [`${proxyLocation(site)} · ${site.ip.trim()}`];
-  }
-  return [["国内检测站", result.domestic], ["国外检测站", result.international]]
-    .filter(([, site]) => hasProxyIp(site)).map(([label, site]) => `${label}：${proxyLocation(site)} · ${site.ip.trim()}`);
+  return hasProxyIp(result) ? `${proxyLocation(result)} · ${result.ip.trim()}` : "";
 }
 
 /* -------------------------------------------------------------- 状态栏 */
@@ -160,9 +146,9 @@ function renderStatus() {
   const geo = cachedProxyResult(acc);
   const summary = proxySummary(geo);
   $("#sbIp").textContent = geo
-    ? (summary.length ? `IP ${summary.join(" ｜ ")}${proxyExitsDiffer(geo) ? " ｜ 出口不同" : ""}` : "IP 检测失败")
+    ? (summary ? `IP ${summary}` : "IP 检测失败")
     : (acc ? "IP 未检测" : "IP —");
-  $("#sbIp").title = proxyExitsDiffer(geo) ? PROXY_SPLIT_HINT : summary.join("\n");
+  $("#sbIp").title = summary || geo?.message || "";
 }
 
 function tickClock() {
@@ -214,15 +200,11 @@ function renderList() {
       : (acc.proxy && acc.proxy.mode === "system" ? "系统代理" : "直连（不使用应用代理）");
     meta.appendChild(el("span", null, proxyText));
     const geo = cachedProxyResult(acc);
-    for (const text of proxySummary(geo)) {
+    const text = proxySummary(geo);
+    if (text) {
       const address = el("span", null, text);
       address.title = text;
       meta.appendChild(address);
-    }
-    if (proxyExitsDiffer(geo)) {
-      const warning = el("span", "proxy-exit-warning", "出口不同");
-      warning.title = PROXY_SPLIT_HINT;
-      meta.appendChild(warning);
     }
     meta.appendChild(el("span", null, acc.fingerprint ? acc.fingerprint.timezone : ""));
     item.appendChild(meta);
@@ -408,7 +390,13 @@ function navigate(url) {
   const full = /^https?:\/\//i.test(target) ? target : `https://${target}`;
   tab.view.loadURL(full).catch((error) => toast("打开失败：" + error.message, true));
   const acc = state.accounts.find((a) => a.id === tab.id);
-  if (acc) { acc.url = full; API.updateAccount(acc.id, { url: full }); }
+  if (acc) {
+    if (acc.url !== full) invalidateProxyResult(acc.id);
+    acc.url = full;
+    API.updateAccount(acc.id, { url: full });
+    renderList();
+    if (state.panel === "proxy") renderPanel();
+  }
 }
 
 /* ---------------------------------------------------------------- 抽屉面板 */
@@ -645,23 +633,22 @@ function invalidateProxyResult(id) {
 function renderProxyResult(box, result, operation) {
   box.replaceChildren();
   if (operation) { box.appendChild(el("div", "hint", operation === "test" ? "检测中…" : "保存中…")); return; }
-  if (!result) { box.appendChild(el("div", "hint", "点「测 IP」检测到两处检测站的出口")); return; }
-  for (const [label, site] of [["国内检测站", result.domestic], ["国外检测站", result.international]]) {
-    const row = el("div", "proxy-probe-site");
-    row.appendChild(el("strong", null, label));
-    const valid = hasProxyIp(site);
-    row.appendChild(el("div", valid ? "proxy-probe-address" : "proxy-probe-error", valid
-      ? `${proxyLocation(site)} · ${site.ip.trim()}` : `检测失败：${site?.message || result.message || "未获取有效 IP"}`));
-    const details = [`来源：${site?.source || "未提供"}`];
-    if (valid && site.isp) details.push(site.isp);
-    if (Number.isFinite(site?.latency)) details.push(`${site.latency}ms`);
-    row.appendChild(el("div", "hint", details.join(" · ")));
-    box.appendChild(row);
-  }
+  if (!result) { box.appendChild(el("div", "hint", "点「测 IP」检测当前账号线路的 IP")); return; }
+  const card = el("div", "proxy-probe-card");
+  card.appendChild(el("strong", null, "检测到的 IP"));
+  const valid = hasProxyIp(result);
+  card.appendChild(el("div", valid ? "proxy-probe-address" : "proxy-probe-error", valid
+    ? proxySummary(result) : `检测失败：${result.message || "未获取有效 IP"}`));
+  const details = el("details", "proxy-probe-details");
+  details.appendChild(el("summary", null, "检测详情"));
+  details.appendChild(el("div", "hint", `来源：${result.source || "未提供"}`));
   const time = new Date(result.checkedAt);
-  box.appendChild(el("div", "hint", `检测时间：${Number.isNaN(time.getTime()) ? "未知" : time.toLocaleString()}`));
-  box.appendChild(el("div", proxyExitsDiffer(result) ? "proxy-exit-warning" : "hint", proxyExitsDiffer(result)
-    ? PROXY_SPLIT_HINT : "检测结果仅代表到各检测站的出口，不代表豆包实际出口。"));
+  details.appendChild(el("div", "hint", `检测时间：${Number.isNaN(time.getTime()) ? "未知" : time.toLocaleString()}`));
+  if (Number.isFinite(result.latency)) details.appendChild(el("div", "hint", `耗时：${result.latency}ms`));
+  if (valid && result.isp) details.appendChild(el("div", "hint", `运营商：${result.isp}`));
+  details.appendChild(el("div", "hint", "按账号代理规则检测；路由器或透明分流可能使具体网站出口不同"));
+  card.appendChild(details);
+  box.appendChild(card);
 }
 
 function renderProxyPanel(body) {
@@ -670,7 +657,7 @@ function renderProxyPanel(body) {
   const proxy = acc.proxy || { mode: "direct" };
 
   const card = el("div", "card");
-  card.appendChild(el("h4", null, "出口 IP"));
+  card.appendChild(el("h4", null, "账号线路"));
 
   const modeSel = el("select");
   [["direct", "直连（不使用应用代理）"], ["system", "跟随系统代理（Clash / v2rayN）"], ["custom", "自定义代理"]].forEach(([v, t]) => {
@@ -760,10 +747,11 @@ function renderProxyPanel(body) {
       if (!current) return;
       current.proxy = updated.proxy || nextProxy;
       if (isCurrentPanel() && kind === "apply") { urlIn.value = current.proxy.url || ""; modeSel.value = current.proxy.mode; }
-      const key = proxyConfigKey(current.proxy);
+      const key = proxyConfigKey(current.proxy, current.url);
       if (kind === "test") {
         const report = await API.testProxy(acc.id);
-        if (state.activeId !== acc.id || proxyVersions.get(acc.id) !== version || proxyConfigKey(current.proxy) !== key) return;
+        const latest = state.accounts.find((item) => item.id === acc.id);
+        if (!latest || state.activeId !== acc.id || proxyVersions.get(acc.id) !== version || proxyConfigKey(latest.proxy, latest.url) !== key) return;
         state.proxyCache[acc.id] = { key, result: report || { ok: false, message: "未收到检测结果" } };
       } else if (state.activeId === acc.id) {
         toast(kind === "apply" ? "已套用第一条代理，点「测 IP」验证" : "代理已保存");
