@@ -628,6 +628,7 @@ function registerIpc() {
   ipcMain.handle("dm:template:detach", wrap(async (id, fileId) => taskTemplates.removeAttachment(id, fileId)));
   ipcMain.handle("dm:template:submit", wrap(async (id) => orchestrator.submitTemplate(taskTemplates.snapshot(id))));
   ipcMain.handle("dm:drafts", wrap(async () => taskDrafts.list()));
+  ipcMain.handle("dm:drafts:collect", wrap(async (ids) => taskDrafts.createMany(ids)));
   ipcMain.handle("dm:draft:create", wrap(async (id, mode, options) => {
     const draft = taskDrafts.create(id, mode);
     await orchestrator.saveDrafts([draft.id], options);

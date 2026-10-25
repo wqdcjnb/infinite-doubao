@@ -40,6 +40,18 @@ async function waitFor(check) {
   throw new Error("Native draft fixture timed out");
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
+test("旧版本地草稿转为云电脑，已绑定的旧版对话草稿禁止保存和发送", async () => {
+  const chosen = account("chosen"), ids = batch();
+  drafts.updateMany(Object.fromEntries(ids.map((id) => [id, { executionMode: "video" }])));
+  await queue.saveDrafts(ids, { instanceId: chosen.id });
+  assert.ok(calls.filter((c) => c.method === "prepareNativeDraft").every((c) => c.options.executionMode === "work"));
+  store.load(); assert.ok(drafts.list().every((d) => d.executionMode === "work"));
+  drafts.updateMany({ [ids[0]]: { executionMode: "video" } });
+  const before = calls.length;
+  await assert.rejects(queue.saveDrafts(ids), /旧版对话草稿/);
+  await assert.rejects(queue.submitDrafts(ids), /仅支持通过云电脑/);
+  assert.equal(calls.length, before); assert.equal(sends().length, 0);
+});
 test("指定账号保存和发送整批，已存原生草稿不得静默改用另一号", async () => {
   const first = account("first"), chosen = account("chosen"), ids = batch();
   await queue.saveDrafts(ids, { instanceId: chosen.id });

@@ -38,7 +38,8 @@ test("写盘失败回滚整批快照和草稿状态", () => {
 });
 test("空提示词非法模式空选择被拒绝，移除记录保留模板", async () => {
   assert.throws(() => drafts.create(template(" ").id), /提示词/);
-  const t = template(); assert.throws(() => drafts.create(t.id, "invalid"), /请选择/);
+  const t = template(); assert.throws(() => drafts.create(t.id, "invalid"), /仅支持/);
+  assert.throws(() => drafts.create(t.id, "video"), /仅支持工作任务 · 云电脑/);
   await assert.rejects(queue.submitDrafts([]), /勾选/);
   const d = drafts.create(t.id); drafts.remove(d.id); assert.equal(drafts.list().length, 0); assert.ok(templates.get(t.id));
 });

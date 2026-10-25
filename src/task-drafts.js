@@ -11,7 +11,7 @@ function create(templateId, executionMode = "work") {
 }
 
 function createMany(templateIds, executionMode = "work") {
-  if (!["video", "work"].includes(executionMode)) throw new Error("请选择对话视频生成或工作任务 · 云电脑");
+  if (executionMode !== "work") throw new Error("草稿提交仅支持工作任务 · 云电脑");
   if (!Array.isArray(templateIds) || !templateIds.length) throw new Error("请先勾选任务模板");
   const added = [...new Set(templateIds)].map((id) => ({ id: crypto.randomBytes(12).toString("hex"), template: templates.snapshot(id), executionMode, createdAt: new Date().toISOString() }));
   const previous = list();

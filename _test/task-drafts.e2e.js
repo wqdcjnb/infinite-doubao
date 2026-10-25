@@ -17,12 +17,17 @@ const server = http.createServer((req,res)=>{
   await new Promise(r=>server.listen(port,'127.0.0.1',r));const c=await CDP.attach();
   const wait=async fn=>{for(let n=0;n<400;n++){if(await fn())return;await new Promise(r=>setTimeout(r,100));}throw new Error('Native fixture timeout');};
   const click=sel=>c.eval(`document.querySelector(${JSON.stringify(sel)}).click()`);
-  const fill=(sel,value)=>c.eval(`(()=>{const e=document.querySelector(${JSON.stringify(sel)});e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+  const fill=(sel,value)=>c.eval(`(()=>{const e=document.querySelector(${JSON.stringify(sel)});e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));})()`);
   const call=async(channel,...args)=>{const r=await c.eval(`DM.call(${[channel,...args].map(JSON.stringify).join(',')})`);assert.equal(r.ok,true,r.error);return r.data;};
   const page=code=>c.eval(`document.querySelector('webview').executeJavaScript(${JSON.stringify(code)})`);
   try{
     await wait(()=>c.eval('!!window.DM'));assert.equal(path.resolve((await c.eval('DM.paths()')).home),home);
     assert.equal((await call('dm:tasks')).length,0);assert.equal((await call('dm:drafts')).length,0);
+    assert.deepEqual(await c.eval("Array.from(document.querySelectorAll('.vtab')).slice(1,4).map(b=>b.dataset.view)"),['templates','drafts','tasks']);
+    await click('[data-view="drafts"]');
+    await wait(()=>c.eval("document.querySelector('#draftAccount').options.length===3"));
+    assert.equal(await c.eval("document.querySelector('#draftAccount').checkVisibility()"),true);
+    assert.equal(await c.eval("!!document.querySelector('#draftMode')"),false);
     await click('[data-view="templates"]');
     for(let i=1;i<=3;i++){
       await click('#templateNew');await wait(async()=>(await call('dm:templates')).items.length===i);
@@ -32,9 +37,17 @@ const server = http.createServer((req,res)=>{
     }
     const items=(await call('dm:templates')).items;
     await call('dm:template:attach',items[1].id,[path.join(__dirname,'clip.mp4')]);
-    await fill('#draftAccount','batch-fixture-2');
     for (let i=0;i<3;i++) await c.eval(`document.querySelectorAll('.template-select-row input')[${i}].click()`);
     await click('#templatesAddDrafts');
+    await wait(()=>c.eval("document.querySelector('#view-drafts').classList.contains('active')&&!document.querySelector('#templateAddDraft').disabled"));
+    assert.equal((await call('dm:drafts')).length,3);
+    assert.ok((await call('dm:drafts')).every(d=>d.executionMode==='work'&&!d.instanceId&&!d.nativeState));
+    assert.equal(await c.eval("document.querySelector('#draftSave').disabled&&document.querySelector('#draftSubmit').disabled"),true);
+    assert.equal(sent.length,0);
+    await fill('#draftAccount','batch-fixture-2');
+    assert.equal(await c.eval("document.querySelector('#draftSave').disabled"),false);
+    assert.equal(await c.eval("document.querySelector('#draftSubmit').disabled"),true);
+    await click('#draftSave');
     await wait(async()=>{const ds=await call('dm:drafts');return ds.length===3&&ds.every(d=>d.nativeState==='saved');});
     await wait(()=>c.eval("!document.querySelector('#templateAddDraft').disabled"));
     assert.equal(sent.length,0);assert.equal((await call('dm:tasks')).length,0);
@@ -42,10 +55,13 @@ const server = http.createServer((req,res)=>{
     const ds=await call('dm:drafts');assert.equal(new Set(ds.map(d=>d.instanceId)).size,1);
     assert.ok(ds.every(d=>d.instanceId==='batch-fixture-2'),'explicitly selected account owns the entire batch');
     assert.equal(new Set(ds.map(d=>d.nativeBinding.title)).size,1,'duplicate titles remain independent');
-    console.log('PASS: one UI action stores three different templates in real sidebar-shaped drafts; no sends');
+    console.log('PASS: dedicated drafts page between submit and queue; collect first, choose account, save three native cloud drafts together; no sends');
     await c.eval("document.querySelector('webview').reload()");
     await wait(()=>page("document.readyState==='complete'&&document.querySelector('aside').children.length===3"));
-    await click('[data-view="templates"]');await wait(()=>c.eval("document.querySelectorAll('.draft-row').length===3"));
+    await click('[data-view="drafts"]');await wait(()=>c.eval("document.querySelectorAll('.draft-row').length===3"));
+    await fill('#draftAccount','batch-fixture-1');
+    assert.equal(await c.eval("document.querySelector('#draftSubmit').disabled"),true,'wrong account cannot send bound drafts');
+    await fill('#draftAccount','batch-fixture-2');
     await c.eval("document.querySelectorAll('.draft-row input')[2].click()");
     await c.eval("document.querySelector('#draftBox').scrollIntoView({block:'start'})");
     fs.writeFileSync(path.join(home,'native-drafts.png'),Buffer.from((await c.send('Page.captureScreenshot')).data,'base64'));

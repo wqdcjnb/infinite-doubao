@@ -96,10 +96,13 @@
 .template-submit-bar p { margin: 5px 0 0; color: var(--text-mute); font-size: 10.5px; line-height: 1.6; }
 .template-empty { text-align: center; padding: 90px 25px; }
 .template-page-head > button { margin-bottom: 16px; }
-.draft-mode-field { margin-top: 18px; }
-.draft-box { max-width: 920px; margin: 22px auto 0; padding: 20px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
+.draft-box { width: 100%; max-width: 1060px; box-sizing: border-box; margin: 10px auto; padding: 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
 .draft-box-head, .draft-actions { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
-.draft-box h2 { font-size: 16px; margin: 0 0 8px; }
+.draft-box h1 { font-size: 23px; margin: 0 0 8px; }
+.draft-account-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 24px; margin-top: 18px; padding: 18px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; }
+.draft-account-bar .field { flex: 1; min-width: 200px; margin: 0; }
+.draft-account-bar strong { display: block; padding: 9px 0; font-size: 13px; color: var(--text); }
+.draft-info > small { display: block; margin-top: 5px; }
 .draft-box-head > div { min-width: 0; }
 .draft-actions { flex-wrap: wrap; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .draft-actions > span { flex: 1; color: var(--text-mute); font-size: 12px; }

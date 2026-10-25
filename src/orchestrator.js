@@ -531,7 +531,14 @@ async function saveDrafts(ids, options = {}) {
   const selected = selectedDrafts(ids);
   for (const d of selected) {
     if (d.nativeState === "saving" || d.submissionRecord) throw new Error(`草稿「${d.template.name}」上次操作未确认，请先在豆包页面核对，避免重复保存或发送`);
+    if (d.executionMode !== "work" && (d.instanceId || d.nativeBinding || d.nativeState)) throw new Error(`草稿「${d.template.name}」是旧版对话草稿，草稿提交仅支持云电脑，请将模板重新加入草稿箱`);
     if (!d.nativeBinding) templates.validateSnapshot(d.template);
+  }
+  // Older local-only drafts have no webpage state and can be saved as cloud tasks.
+  const converted = selected.filter((d) => d.executionMode !== "work");
+  if (converted.length) {
+    drafts.updateMany(Object.fromEntries(converted.map((d) => [d.id, { executionMode: "work" }])));
+    converted.forEach((d) => { d.executionMode = "work"; });
   }
   return withNativeDrafts(selected, options, async (driver, inst, check) => {
     let count = 0;
@@ -565,6 +572,7 @@ async function submitDrafts(ids, options = {}) {
   const selected = selectedDrafts(ids);
   for (const d of selected) {
     if (d.submissionRecord?.task.submissionUncertain) throw new Error(`草稿「${d.template.name}」发送结果尚未确认，请核对豆包最近任务，不会自动重发`);
+    if (d.executionMode !== "work" && !d.submissionRecord) throw new Error(`草稿「${d.template.name}」仅支持通过云电脑提交，请先存入云电脑草稿`);
     if (!d.submissionRecord && d.nativeState !== "saved") throw new Error("请先将所选草稿存入豆包网页，再一起发送");
   }
   return withNativeDrafts(selected, options, async (driver, inst, check, operation) => {

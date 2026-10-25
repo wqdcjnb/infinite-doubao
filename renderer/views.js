@@ -197,6 +197,7 @@ async function setView(name) {
   qa(".vtab").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   qa(".view").forEach((s) => s.classList.toggle("active", s.id === `view-${name}`));
   if (name === "templates") await guard(refreshTemplates);
+  if (name === "drafts") await guard(refreshDrafts);
   if (name === "tasks") refreshTasks();
   if (name === "assets") refreshAssets();
   if (name === "api") refreshApi();
@@ -419,11 +420,12 @@ async function submitTemplate() {
 function bindTemplateEvents() {
   q("#templateAddDraft").addEventListener("click", () => guard(addTemplateDraft));
   q("#templatesAddDrafts").addEventListener("click", () => guard(() => addTemplateDraft(true)));
-  q("#templateShowDrafts").addEventListener("click", () => q("#draftBox").scrollIntoView({ behavior: "smooth", block: "start" }));
+  q("#templateShowDrafts").addEventListener("click", () => setView("drafts"));
+  q("#draftAccount").addEventListener("change", renderDrafts);
   q("#draftRefresh").addEventListener("click", () => guard(refreshDrafts));
   q("#draftSubmit").addEventListener("click", () => guard(submitSelectedDrafts));
   q("#draftSave").addEventListener("click", () => guard(async () => {
-    if (V.draftBusy || !V.selectedDrafts.size) return;
+    if (q("#draftSave").disabled) return;
     V.draftBusy = true; renderDrafts(); renderTemplateList();
     try {
       const result = await call("dm:drafts:save", [...V.selectedDrafts], { instanceId: q("#draftAccount").value });
@@ -451,7 +453,7 @@ async function refreshDrafts() {
   V.drafts = await call("dm:drafts");
   const account = q("#draftAccount"), chosen = account.value;
   V.instances = await call("dm:instances");
-  account.replaceChildren(node("option", "", "自动选择空闲账号（已存草稿使用原账号）"));
+  account.replaceChildren(node("option", "", "请选择豆包账号"));
   account.firstElementChild.value = "";
   for (const inst of V.instances) { const option = node("option", "", inst.name); option.value = inst.id; account.appendChild(option); }
   account.value = V.instances.some((i) => i.id === chosen) ? chosen : "";
@@ -462,8 +464,15 @@ async function refreshDrafts() {
 function renderDrafts() {
   q("#draftCount").textContent = String(V.drafts.length);
   q("#draftSelection").textContent = `已选 ${V.selectedDrafts.size} / ${V.drafts.length} 条`;
-  q("#draftSubmit").disabled = V.draftBusy || !V.selectedDrafts.size;
-  q("#draftSave").disabled = V.draftBusy || !V.selectedDrafts.size;
+  const selected = V.drafts.filter((d) => V.selectedDrafts.has(d.id));
+  const account = q("#draftAccount").value;
+  const mismatch = selected.find((d) => d.instanceId && d.instanceId !== account);
+  const uncertain = selected.some((d) => d.nativeState === "saving" || d.submissionRecord?.task.submissionUncertain);
+  const ready = selected.every((d) => d.nativeState === "saved" || d.submissionRecord);
+  const blocked = V.draftBusy || !selected.length || !account || !!mismatch || uncertain;
+  q("#draftSubmit").disabled = blocked || !ready;
+  q("#draftSave").disabled = blocked || selected.some((d) => d.submissionRecord);
+  q("#draftStatus").textContent = V.draftBusy ? "正在处理所选草稿，请稍候…" : !selected.length ? "勾选要一起保存或发送的草稿。" : !account ? "请在上方选择一个豆包账号，再保存或发送所选草稿。" : mismatch ? `所选草稿包含 ${mismatch.instanceName || "其他账号"} 的网页草稿，请只勾选同一账号的草稿，并选择该账号。` : uncertain ? "部分草稿上次操作尚未确认，请先打开所属账号的豆包页面核对。" : !ready ? "先点击 ①，将所选草稿全部存入豆包网页，再点击 ② 一起发送。" : `所选草稿将由 ${V.instances.find((i) => i.id === account)?.name || "所选账号"} 通过云电脑一起发送。`;
   q("#templateAddDraft").disabled = V.draftBusy;
   q("#draftAccount").disabled = V.draftBusy;
   const all = q("#draftSelectAll");
@@ -472,7 +481,7 @@ function renderDrafts() {
   all.disabled = V.draftBusy || !V.drafts.length;
   const box = q("#draftList");
   box.replaceChildren();
-  if (!V.drafts.length) box.appendChild(node("div", "empty-hint", "勾选左侧多个模板，点击「所选模板存入豆包草稿」，再在这里一起发送。"));
+  if (!V.drafts.length) box.appendChild(node("div", "empty-hint", "在「任务提交」中勾选多个不同模板，点击「所选模板加入草稿箱」，再到这里指定账号、统一保存和发送。"));
   for (const draft of V.drafts) {
     const t = draft.template;
     const row = node("div", "draft-row");
@@ -488,7 +497,7 @@ function renderDrafts() {
     info.appendChild(node("small", "", `${state}${draft.instanceName ? ` · ${draft.instanceName}` : ""}`));
     if (draft.nativeError) info.appendChild(node("small", "attachment-missing", draft.nativeError));
     info.appendChild(node("p", "", t.prompt));
-    info.appendChild(node("small", "", `${draft.executionMode === "work" ? "工作任务 · 云电脑" : "对话 · 视频生成"} · ${modelLabel(t.model)} · ${t.duration} 秒 · ${t.attachments.length} 附件 · ${fmtTime(draft.createdAt)}`));
+    info.appendChild(node("small", "", `${draft.executionMode !== "work" && draft.instanceId ? "旧版对话草稿，请重新加入云电脑草稿" : "工作任务 · 云电脑"} · ${modelLabel(t.model)} · ${t.duration} 秒 · ${t.attachments.length} 附件 · ${fmtTime(draft.createdAt)}`));
     row.append(check, info);
     const remove = trashButton(`移除草稿「${t.name}」`, () => {
       openModal("移除草稿记录", node("div", "hint", `移除「${t.name}」的软件记录？豆包网页中的草稿、原模板和本地附件会保留。`), [
@@ -505,16 +514,16 @@ async function addTemplateDraft(multiple = false) {
   if (V.draftBusy) return;
   V.draftBusy = true; renderDrafts(); renderTemplateList();
   try {
-    const mode = q("#draftMode").value;
     const template = await saveTemplate();
-    const result = await call("dm:drafts:create-many", multiple ? [...V.selectedTemplates] : [template.id], mode, { instanceId: q("#draftAccount").value });
-    result.ids.forEach((id) => V.selectedDrafts.add(id));
-    say(`${result.count} 条已存入 ${result.instanceName} 网页左侧的「草稿」，可勾选一起发送`);
+    const added = await call("dm:drafts:collect", multiple ? [...V.selectedTemplates] : [template.id]);
+    V.selectedDrafts = new Set(added.map((d) => d.id));
+    say(`${added.length} 条已加入草稿箱，请选择账号后统一存入豆包草稿`);
+    await setView("drafts");
   } finally { V.draftBusy = false; await refreshDrafts(); renderTemplateList(); }
 }
 
 async function submitSelectedDrafts() {
-  if (V.draftBusy || !V.selectedDrafts.size) return;
+  if (q("#draftSubmit").disabled) return;
   const ids = [...V.selectedDrafts];
   V.draftBusy = true;
   renderDrafts(); renderTemplateList();
@@ -1271,7 +1280,7 @@ function bindEvents() {
   // 主进程事件 → 界面
   DM.onEvent((e) => {
     if (!e || e.type === "log") return;
-    if (e.type === "draft") { say(e.message); if (V.view === "templates") refreshDrafts(); }
+    if (e.type === "draft") { say(e.message); if (["templates", "drafts"].includes(V.view)) scheduleRefresh("drafts", refreshDrafts, V.view); }
     scheduleRefresh("badges", refreshBadges);
     if (V.view === "tasks") scheduleRefresh("tasks", refreshTasks, "tasks");
     if (V.view === "assets" && e.type === "task" && e.task?.status === "succeeded") scheduleRefresh("assets", refreshAssets, "assets");
