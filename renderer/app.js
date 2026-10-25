@@ -18,7 +18,6 @@ const state = {
   panel: "",
   paths: null,
   settings: {},
-  resources: [],
   maskFiles: [],
   maskResults: [],
   maskRunning: false,
@@ -288,15 +287,6 @@ function openAccount(acc, opts = {}) {
   view.classList.add("background-account");
   $("#stack").appendChild(view);
 
-  view.addEventListener("ipc-message", (e) => {
-    if (e.channel === "dm:resources") {
-      const batch = Array.isArray(e.args && e.args[0]) ? e.args[0] : [];
-      if (batch.length) {
-        state.resources = [...batch, ...state.resources].slice(0, 240);
-        if (state.panel === "res") renderResPanel();
-      }
-    }
-  });
   view.addEventListener("dom-ready", () => {
     try { view.setZoomFactor(1); } catch {}
   });
@@ -376,14 +366,13 @@ function togglePanel(name) {
 }
 
 function renderPanel() {
-  const titles = { env: "环境指纹", proxy: "代理 / IP", mask: "素材遮脸", res: "素材库" };
+  const titles = { env: "环境指纹", proxy: "代理 / IP", mask: "素材遮脸" };
   $("#drawerTitle").textContent = titles[state.panel] || "";
   const body = $("#drawerBody");
   body.textContent = "";
   if (state.panel === "env") renderEnvPanel(body);
   else if (state.panel === "proxy") renderProxyPanel(body);
   else if (state.panel === "mask") renderMaskPanel(body);
-  else if (state.panel === "res") renderResPanel(body);
 }
 
 /* ---- 环境面板 ---- */
@@ -919,43 +908,6 @@ function onMaskProgress(p) {
   } else if (p.event === "error") {
     toast(`⚠️ ${String(p.file || "").split(/[\\/]/).pop()}：${p.message}`, true);
   }
-}
-
-/* ---- 素材面板 ---- */
-
-function renderResPanel(body) {
-  const card = el("div", "card");
-  card.appendChild(el("h4", null, "页面嗅探到的素材"));
-  if (!state.resources.length) {
-    card.appendChild(el("div", "hint", "打开豆包页面后，这里会显示加载过的图片/视频地址"));
-  } else {
-    const grid = el("div", "res-grid");
-    for (const r of state.resources.filter((x) => x.type === "image").slice(0, 60)) {
-      const img = document.createElement("img");
-      img.src = r.url;
-      img.title = r.url;
-      img.loading = "lazy";
-      img.addEventListener("click", () => API.openExternal(r.url));
-      grid.appendChild(img);
-    }
-    card.appendChild(grid);
-    const vids = state.resources.filter((x) => x.type === "video").slice(0, 12);
-    if (vids.length) {
-      const sub = el("div", "hint");
-      sub.style.marginTop = "8px";
-      sub.textContent = `视频地址 ${vids.length} 条（点开可查看）`;
-      card.appendChild(sub);
-      for (const v of vids) {
-        const item = el("div", "mask-item");
-        item.appendChild(el("span", null, v.url.split(/[\\/]/).pop().slice(0, 26)));
-        const btn = el("button", "ghost small", "打开");
-        btn.addEventListener("click", () => API.openExternal(v.url));
-        item.appendChild(btn);
-        card.appendChild(item);
-      }
-    }
-  }
-  body.appendChild(card);
 }
 
 boot().catch((error) => {

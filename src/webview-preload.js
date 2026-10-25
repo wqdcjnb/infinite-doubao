@@ -3,11 +3,10 @@
 /**
  * 账号网页（webview）注入脚本
  *
- * 三件事：
+ * 两件事：
  *   1) 指纹伪装：向主进程同步取本账号的档案，在主世界 document_start 阶段注入改写。
  *      必须用主世界执行 —— preload 默认在隔离世界，改 navigator 页面根本看不到。
  *   2) 无水印导出：在视频卡片上挂「无水印下载」按钮，解析官方原片地址后交给主进程下载。
- *   3) 页面资源嗅探：把页面里出现的图片/视频地址回传给宿主界面（素材库）。
  */
 
 const { ipcRenderer, webFrame } = require("electron");
@@ -60,7 +59,6 @@ const IS_DOUBAO = /(^|\.)(doubao|dola)\.(com|cn)$/i.test(HOST) || /cici/i.test(H
 window.addEventListener("DOMContentLoaded", () => {
   if (IS_DOLA || IS_DOUBAO) {
     installNoWatermark();
-    installResourceSniffer();
   }
 });
 
@@ -443,53 +441,6 @@ function installNoWatermark() {
       timer = setTimeout(() => scan(document), 200);
     }).observe(document.documentElement, { childList: true, subtree: true });
     setInterval(() => scan(document), 2000);
-  });
-}
-
-/* -------------------------------------------------------------- 资源嗅探 */
-
-function installResourceSniffer() {
-  const pending = [];
-  let timer = null;
-  const pageBase = (() => { try { return location.origin; } catch { return ""; } })();
-
-  const kindOf = (url, mime) => {
-    const n = `${url} ${mime || ""}`.toLowerCase();
-    if (/video\/(mp4|webm|quicktime)|\.(mp4|webm|mov|m4v)(\?|#|$)/i.test(n)) return "video";
-    if (/image\/(jpeg|png|webp|gif)|\.(jpe?g|png|webp|gif)(\?|#|$)/i.test(n)) return "image";
-    return "";
-  };
-
-  const record = (item) => {
-    const url = (() => { try { return new URL(item.url, location.href).toString(); } catch { return ""; } })();
-    if (!url || !url.startsWith("http")) return;
-    if (/avatar|emoji|icon|logo|favicon|sprite/i.test(url)) return;
-    if (pending.some((p) => p.url === url)) return;
-    pending.push({ ...item, url, page: pageBase });
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      if (!pending.length) return;
-      const batch = pending.splice(0, pending.length);
-      try { ipcRenderer.sendToHost("dm:resources", batch); } catch {}
-    }, 400);
-  };
-
-  try {
-    new PerformanceObserver((list) => {
-      for (const e of list.getEntries()) {
-        const k = kindOf(e.name, e.initiatorType);
-        if (k) record({ url: e.name, type: k });
-      }
-    }).observe({ type: "resource", buffered: true });
-  } catch {}
-
-  window.addEventListener("DOMContentLoaded", () => {
-    try {
-      document.querySelectorAll("img").forEach((img) => {
-        const src = img.currentSrc || img.src;
-        if (src && img.naturalWidth >= 200) record({ url: src, type: "image", name: img.alt || "" });
-      });
-    } catch {}
   });
 }
 
