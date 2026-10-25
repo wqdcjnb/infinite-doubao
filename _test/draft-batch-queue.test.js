@@ -42,6 +42,35 @@ async function waitFor(check) {
   throw new Error("Native draft fixture timed out");
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
+
+test("新草稿和旧版本地草稿保存编号，普通提交不带草稿编号", async () => {
+  account("first"); const ids = batch();
+  drafts.updateMany({ [ids[0]]: { draftNumber: undefined } });
+  const originals = drafts.list().map(d => d.template.prompt);
+  await queue.saveDrafts(ids);
+  const saved = drafts.list().map(d => ({ ...d }));
+  for (const d of saved) {
+    assert.match(d.draftNumber, /^DB-[0-9A-F]{24}$/);
+    assert.ok(d.nativePrompt.startsWith(`【草稿编号：${d.draftNumber}】`));
+    assert.match(d.nativePrompt, /请勿将编号或此说明作为画面、字幕或旁白/);
+  }
+  assert.deepEqual(drafts.list().map(d => d.template.prompt), originals);
+  await queue.saveDrafts(ids); assert.equal(calls.filter(c => c.method === "saveNativeDraft").length, 2);
+  await queue.submitDrafts(ids);
+  assert.deepEqual(store.get().tasks.map(t => t.draftNumber), saved.map(d => d.draftNumber));
+  account("second"); const normal = queue.submitTemplate(templates.snapshot(template("normal").id)).taskId;
+  assert.equal(queue.getTask(normal).prompt.includes("草稿编号"), false);
+});
+
+test("已存网页的旧草稿保留原提示词和旧恢复方式", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  drafts.updateMany(Object.fromEntries(ids.map(id => [id, { draftNumber: undefined, nativePrompt: "旧提示词 " + id }])));
+  calls.length = 0;
+  await queue.saveDrafts(ids); assert.equal(calls.filter(c => c.method === "saveNativeDraft").length, 0);
+  await queue.submitDrafts(ids);
+  assert.ok(sends().every(c => c.options.prompt.startsWith("旧提示词 ")));
+  assert.ok(calls.filter(c => c.method === "restoreNativeDrafts").flatMap(c => c.options).every(b => !b.draftNumber));
+});
 test("整批页面先就绪，所有发送先触发，慢回执不阻塞其他发送", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   let release;

@@ -24,6 +24,32 @@ function page(items, delayed) {
   return { api: context.window.auto, rows, sends: () => sends };
 }
 const binding = (id, title, prompt) => ({ id, title, prompt, executionMode: "work", index: 0, titles: [title] });
+const numberA = "DB-111111111111111111111111", numberB = "DB-222222222222222222222222";
+const numbered = (number, body = "相同视频提示词") => `【草稿编号：${number}】\n\n${body}`;
+
+test("编号确定身份，标题后缀和列表顺序改变不影响相同提示词的不同草稿", async () => {
+  const p = page([{ title: numbered(numberB, "不同显示标题"), prompt: numbered(numberB) }, { title: numbered(numberA, "新的显示标题"), prompt: numbered(numberA) }]);
+  const result = await p.api.restoreNativeDrafts([{ ...binding("a", "旧标题", numbered(numberA)), draftNumber: numberA }]);
+  assert.equal(result.ok, true); assert.equal(p.rows[1].dataset.dmDraftId, "a");
+  assert.equal((await p.api.openNativeDraft({ id: "a", prompt: numbered(numberA), executionMode: "work" })).ok, true);
+  assert.equal(p.sends(), 0);
+});
+test("侧栏截断编号时打开草稿核对完整编号，相同正文仍可区分", async () => {
+  const p = page([{ title: "【草稿编号：DB", prompt: numbered(numberB) }, { title: "【草稿编号：DB", prompt: numbered(numberA) }]);
+  assert.equal((await p.api.restoreNativeDrafts([{ ...binding("a", "旧标题", numbered(numberA)), draftNumber: numberA }])).ok, true);
+  assert.equal(p.rows[1].dataset.dmDraftId, "a"); assert.equal(p.sends(), 0);
+});
+test("复制编号导致重复或修改编号时停止，不能回退按标题猜测", async () => {
+  for (const shortened of [false, true]) for (const alreadyMapped of [false, true]) {
+    const p = page(["正文 A", "正文 B"].map(body => ({ title: shortened ? "【草稿编号：DB" : numbered(numberA, body), prompt: numbered(numberA, body) })));
+    if (alreadyMapped) p.rows[0].dataset.dmDraftId = "a";
+    const result = await p.api.restoreNativeDrafts([{ ...binding("a", "旧标题", numbered(numberA, "正文 A")), draftNumber: numberA }]);
+    assert.equal(result.ok, false); assert.match(result.reason, /重复草稿编号/); assert.equal(p.sends(), 0);
+  }
+  const p = page([{ title: numbered(numberB), prompt: numbered(numberB) }]);
+  assert.equal((await p.api.restoreNativeDrafts([{ ...binding("a", numbered(numberB), numbered(numberA)), draftNumber: numberA }])).ok, false);
+  assert.equal(p.sends(), 0);
+});
 
 test("新增无关草稿或列表重排后按所选草稿恢复，不依赖旧位置", async () => {
   const p = page([{ title: "新草稿", prompt: "其他内容" }, { title: "原草稿", prompt: "完整任务" }]);

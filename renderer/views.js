@@ -532,6 +532,7 @@ function renderDrafts() {
     check.addEventListener("change", () => { check.checked ? V.selectedDrafts.add(draft.id) : V.selectedDrafts.delete(draft.id); renderDrafts(); });
     const info = node("div", "draft-info");
     info.appendChild(node("strong", "", t.name));
+    info.appendChild(node("small", "draft-number", draft.draftNumber ? `编号：${draft.draftNumber}` : draft.nativeState ? "旧版草稿（未编号）；重新加入草稿箱后可按编号识别" : "保存到豆包时自动生成编号"));
     const state = draft.submissionRecord?.task.submissionUncertain ? "发送结果待核对" : draft.nativeState === "sent" ? "已发送，待取回结果" : draft.nativeState === "saved" ? "已存入豆包草稿" : draft.nativeState === "saving" ? "保存结果待核对" : "待存入豆包";
     info.appendChild(node("small", "", `${state}${draft.instanceName ? ` · ${draft.instanceName}` : ""}`));
     if (draft.nativeError) info.appendChild(node("small", "attachment-missing", draft.nativeError));

@@ -37,7 +37,7 @@ const server = http.createServer((req,res)=>{
     for(let i=1;i<=3;i++){
       await click('#templateNew');await wait(async()=>(await call('dm:templates')).items.length===i);
       await wait(()=>c.eval("document.activeElement?.id==='templateName'"));
-      await fill('#templateName','不同模板 '+i);await fill('#templatePrompt','相同标题前缀，独立提示词 '+i);await click('#templateSave');
+      await fill('#templateName','不同模板 '+i);await fill('#templatePrompt','相同的视频提示词，仅附件不同');await click('#templateSave');
       await wait(()=>c.eval("document.querySelector('#templateSaveState').textContent.startsWith('已保存')"));
     }
     const items=(await call('dm:templates')).items;
@@ -65,6 +65,9 @@ const server = http.createServer((req,res)=>{
     fs.writeFileSync(path.join(home,'draft-save-success.png'),Buffer.from((await c.send('Page.captureScreenshot')).data,'base64'));
     assert.equal(await page("document.querySelector('aside').children.length"),3);
     const ds=await call('dm:drafts');assert.equal(new Set(ds.map(d=>d.instanceId)).size,1);
+    assert.equal(new Set(ds.map(d=>d.draftNumber)).size,3);
+    assert.ok(ds.every(d=>/^DB-[0-9A-F]{24}$/.test(d.draftNumber)&&d.nativePrompt.startsWith('【草稿编号：'+d.draftNumber+'】')));
+    assert.equal(await c.eval("document.querySelectorAll('.draft-number').length"),3);
     assert.ok(ds.every(d=>d.instanceId==='batch-fixture-2'),'explicitly selected account owns the entire batch');
     assert.equal(new Set(ds.map(d=>d.nativeBinding.title)).size,1,'duplicate titles remain independent');
     console.log('PASS: dedicated drafts page between submit and queue; collect first, choose account, save three native cloud drafts together; no sends');
@@ -83,8 +86,9 @@ const server = http.createServer((req,res)=>{
     await c.eval("document.querySelector('#draftSubmit').click();document.querySelector('#draftSubmit').click()");
     await wait(()=>sent.length===2);
     assert.equal(resultsReady,false);assert.ok(sent.every(s=>s.mode==='云电脑'));
-    const first=sent.find(s=>s.prompt.includes('独立提示词 1')),second=sent.find(s=>s.prompt.includes('独立提示词 2'));
+    const first=sent.find(s=>s.prompt.startsWith('【草稿编号：'+ds[0].draftNumber+'】')),second=sent.find(s=>s.prompt.startsWith('【草稿编号：'+ds[1].draftNumber+'】'));
     assert.ok(first&&second);assert.equal(first.refs.length,0);assert.equal(second.refs.length,1);
+    assert.equal(first.prompt.split('\n\n').slice(1).join('\n\n'),second.prompt.split('\n\n').slice(1).join('\n\n'),'identical user prompts remain separate by number');
     assert.ok(Math.max(...receivedAt)-Math.min(...receivedAt)<1000,'requests arrive together before either acknowledgement');
     console.log('PASS: both requests arrive before either acknowledgement, spread='+ (Math.max(...receivedAt)-Math.min(...receivedAt)) +'ms; prompts and attachments stay separate');
     resultsReady=true;
@@ -97,7 +101,7 @@ const server = http.createServer((req,res)=>{
     await c.eval("document.querySelector('webview').reload()");
     await wait(()=>page("document.readyState==='complete'&&document.querySelector('aside').children.length===2"));
     assert.equal((await c.eval(`DM.call('dm:drafts:submit',${JSON.stringify(ds.slice(0,2).map(d=>d.id))})`)).ok,false);
-    console.log('PASS: changed sidebar and duplicate-title reordering recover by complete prompt; unrelated/unselected drafts retained; no resends');
+    console.log('PASS: identical prompts with different attachments recover by unique numbers after reload/reordering; unrelated/unselected drafts retained; no resends');
     await click('[data-view="templates"]');
     await wait(()=>c.eval("!document.querySelector('#templateEditor').classList.contains('hidden')"));
     await click('#templateAddDraft');

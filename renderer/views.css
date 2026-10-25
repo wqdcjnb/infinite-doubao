@@ -122,6 +122,7 @@
 .draft-account-bar .field { flex: 1; min-width: 200px; margin: 0; }
 .draft-account-bar strong { display: block; padding: 9px 0; font-size: 13px; color: var(--text); }
 .draft-info > small { display: block; margin-top: 5px; }
+.draft-info .draft-number { font-family: var(--mono); overflow-wrap: anywhere; color: var(--text-dim); }
 .draft-box-head > div { min-width: 0; }
 .draft-actions { flex-wrap: wrap; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .draft-actions > span { flex: 1; color: var(--text-mute); font-size: 12px; }

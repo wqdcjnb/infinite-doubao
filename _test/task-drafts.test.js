@@ -9,6 +9,16 @@ let count = 0;
 beforeEach(() => { P.init({ home: path.join(root, String(++count)) }); store.load(); });
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 function template(prompt = "清晨湖面的小鱼") { return templates.create({ name: "草稿", prompt, model: "seedance_v2.0_mini", duration: 5 }); }
+
+test("重复添加同一模板分配独立编号，重载和编辑模板不改变编号", () => {
+  const t = template(), a = drafts.create(t.id), b = drafts.create(t.id);
+  assert.match(a.draftNumber, /^DB-[0-9A-F]{24}$/);
+  assert.notEqual(a.draftNumber, b.draftNumber);
+  templates.update(t.id, { prompt: "改动后的模板" }); store.load();
+  assert.deepEqual(drafts.list().map(d => d.draftNumber), [a.draftNumber, b.draftNumber]);
+  assert.ok(drafts.list().every(d => d.template.prompt === "清晨湖面的小鱼"));
+  drafts.remove(a.id); assert.notEqual(drafts.create(t.id).draftNumber, a.draftNumber);
+});
 test("草稿保存提示词和附件快照，重载不发送", async () => {
   const t = template(), file = path.join(P.home(), "ref.png"); fs.writeFileSync(file, "image");
   await templates.importAttachments(t.id, [file]); const d = drafts.create(t.id);

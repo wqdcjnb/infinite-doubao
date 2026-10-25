@@ -5,6 +5,7 @@ const store = require("./store");
 const templates = require("./task-templates");
 
 function list() { return store.get().taskDrafts; }
+function numberFor(id) { return `DB-${String(id).toUpperCase()}`; }
 
 function create(templateId, executionMode = "work") {
   return createMany([templateId], executionMode)[0];
@@ -13,7 +14,10 @@ function create(templateId, executionMode = "work") {
 function createMany(templateIds, executionMode = "work") {
   if (executionMode !== "work") throw new Error("草稿提交仅支持工作任务 · 云电脑");
   if (!Array.isArray(templateIds) || !templateIds.length) throw new Error("请先勾选任务模板");
-  const added = [...new Set(templateIds)].map((id) => ({ id: crypto.randomBytes(12).toString("hex"), template: templates.snapshot(id), executionMode, createdAt: new Date().toISOString() }));
+  const added = [...new Set(templateIds)].map((templateId) => {
+    const id = crypto.randomBytes(12).toString("hex");
+    return { id, draftNumber: numberFor(id), template: templates.snapshot(templateId), executionMode, createdAt: new Date().toISOString() };
+  });
   const previous = list();
   store.get().taskDrafts = [...previous, ...added];
   if (!store.save()) { store.get().taskDrafts = previous; throw new Error("草稿保存失败，请检查磁盘空间或目录权限"); }
@@ -35,4 +39,4 @@ function remove(id) {
   return { removed: id };
 }
 
-module.exports = { list, create, createMany, updateMany, remove };
+module.exports = { list, create, createMany, updateMany, remove, numberFor };

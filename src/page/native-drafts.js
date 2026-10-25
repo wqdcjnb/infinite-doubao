@@ -11,6 +11,19 @@
   function sendButton() { return document.querySelector('button[data-testid="chat_input_send_button"]'); }
   function enabled(button) { return button && !button.disabled && !["aria-disabled", "aria-busy", "data-disabled", "data-loading"].some(function (attr) { return button.getAttribute(attr) === "true"; }); }
   function normalize(value) { return String(value || "").replace(/\s+/g, " ").trim(); }
+  function numberIn(value) { var match = normalize(value).match(/^【草稿编号：(DB-[0-9A-F]{24})】/); return match && match[1]; }
+  function candidatesFor(binding) {
+    return rows().filter(function (row) {
+      var label = title(row);
+      if (!binding.draftNumber) return label === binding.title;
+      var number = numberIn(label);
+      if (number) return number === binding.draftNumber;
+      // A shortened sidebar label only selects candidates; the full editor
+      // content must still match the complete number and prompt before sending.
+      var prefix = label.replace(/[.…]+$/, "");
+      return prefix && ("【草稿编号：" + binding.draftNumber + "】").startsWith(prefix);
+    });
+  }
   function switchTo(work) {
     var prefix = work ? /^新工作任务(?:\s|$)/ : /^新对话(?:\s|$)/;
     var button = Array.from(document.querySelectorAll('button, [role="button"]')).find(function (b) { return prefix.test(text(b)); });
@@ -35,20 +48,21 @@
     if (bindings.length) await wait(function () {
       var current = rows(), signature = JSON.stringify(current.map(title));
       if (signature !== previous) { previous = signature; stableAt = Date.now(); }
-      return bindings.every(function (b) { return current.some(function (r) { return title(r) === b.title; }); }) && Date.now() - stableAt >= 600;
+      return bindings.every(function (b) { return candidatesFor(b).length; }) && Date.now() - stableAt >= 600;
     }, "未找到所选豆包草稿，可能尚未同步或已被移除，请在账号页面核对后重试");
     var used = new Set(), mapped = [];
     for (var binding of bindings) {
+      var candidates = candidatesFor(binding);
+      if (binding.draftNumber && candidates.filter(function (r) { return numberIn(title(r)) === binding.draftNumber; }).length > 1) throw new Error("发现重复草稿编号 " + binding.draftNumber + "，未触发发送，请核对网页草稿");
       var row = rowFor(binding.id);
-      if (row && title(row) !== binding.title) row = null;
+      if (row && (!candidates.includes(row) || (binding.draftNumber && candidates.length > 1))) row = null;
       if (!row) {
-        var candidates = rows().filter(function (r) { return title(r) === binding.title; });
         if (candidates.length === 1) row = candidates[0];
         else {
           // Sidebar order is not an identity: other tabs can add or reorder drafts.
           // Equal sidebar titles must be resolved by the complete saved prompt.
           if (!normalize(binding.prompt)) throw new Error("多条草稿标题相同，缺少完整提示词，无法确认原草稿");
-          var matches = [];
+          var matches = [], numberMatches = 0;
           for (var candidate of candidates) {
             if (!candidate.isConnected) throw new Error("核对期间豆包草稿列表变化，请重试");
             candidate.click();
@@ -58,8 +72,10 @@
               if (content !== lastContent) { lastContent = content; contentAt = Date.now(); }
               return candidate.isConnected && candidate.classList.contains("bg-dbx-bg-float") && text(editor()) && Date.now() - contentAt >= 600;
             }, "草稿内容尚未加载，未触发发送，请重试");
+            if (binding.draftNumber && numberIn(text(editor())) === binding.draftNumber) numberMatches++;
             if (text(editor()) === normalize(binding.prompt) && (binding.executionMode !== "work" || mode() === "云电脑")) matches.push(candidate);
           }
+          if (numberMatches > 1) throw new Error("发现重复草稿编号 " + binding.draftNumber + "，未触发发送，请核对网页草稿");
           if (matches.length > 1) throw new Error("多条豆包草稿的完整提示词相同，无法区分附件归属；请在账号页面核对并区分这些草稿后重试");
           row = matches[0];
         }

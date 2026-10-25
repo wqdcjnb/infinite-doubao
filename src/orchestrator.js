@@ -498,7 +498,7 @@ function requirePage(result) {
   return result;
 }
 function nativeBindings(instanceId) {
-  return drafts.list().filter((d) => d.instanceId === instanceId && d.nativeState === "saved" && d.nativeBinding).map((d) => ({ ...d.nativeBinding, prompt: d.nativePrompt, executionMode: d.executionMode }));
+  return drafts.list().filter((d) => d.instanceId === instanceId && d.nativeState === "saved" && d.nativeBinding).map((d) => ({ ...d.nativeBinding, draftNumber: d.draftNumber, prompt: d.nativePrompt, executionMode: d.executionMode }));
 }
 function bindingPatches(bindings) {
   return Object.fromEntries((bindings || []).map((binding) => [binding.id, { nativeBinding: binding }]));
@@ -556,10 +556,12 @@ async function saveDrafts(ids, options = {}) {
       check();
       if (draft.nativeState === "saved") { count++; continue; }
       const record = templateRecords(draft.template, draft.executionMode);
+      const draftNumber = draft.draftNumber || drafts.numberFor(draft.id);
+      record.task.prompt = `【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`;
       try {
       requirePage(await driver.call("prepareNativeDraft", { executionMode: draft.executionMode, model: record.task.model, duration: record.task.duration, ratio: record.task.ratio }));
       // Save intent before uploading/filling: an interrupted save must not create duplicates.
-      drafts.updateMany({ [draft.id]: { instanceId: inst.id, instanceName: inst.name, nativeState: "saving", nativePrompt: record.task.prompt, nativeError: "" } });
+      drafts.updateMany({ [draft.id]: { draftNumber, instanceId: inst.id, instanceName: inst.name, nativeState: "saving", nativePrompt: record.task.prompt, nativeError: "" } });
       if (record.task.refs.length) requirePage(await driver.pasteFiles(record.task.refs));
       requirePage(await driver.setText(record.task.prompt));
       check();
@@ -604,7 +606,7 @@ async function submitDrafts(ids, options = {}) {
         const options = { id: draft.id, prompt: draft.nativePrompt, executionMode: draft.executionMode };
         const opened = requirePage(await driver.call("openNativeDraft", options));
         const record = templateRecords(draft.template, draft.executionMode), task = record.task;
-        Object.assign(task, { prompt: draft.nativePrompt, draftBatchId, instanceId: inst.id, instanceName: inst.name, preferredInstanceId: inst.id, submissionUncertain: true });
+        Object.assign(task, { prompt: draft.nativePrompt, draftNumber: draft.draftNumber, draftBatchId, instanceId: inst.id, instanceName: inst.name, preferredInstanceId: inst.id, submissionUncertain: true });
         const tracking = requirePage(await driver.beginTask({ taskId: task.id, prompt: task.prompt, resume: false }));
         Object.assign(task, { baselineUrls: tracking.baselineUrls || [], baselineMessageIds: tracking.baselineMessageIds || [], baselineMediaKeys: [...new Set([...(tracking.baselineUrls || []).map(mediaKey), ...interceptor.list({ instanceId: inst.id, kind: "video", limit: 800 }).map((m) => mediaKey(m.url))])], confirmationIntents: {} });
         await driver.setGenerationOptions({ model: task.model, duration: task.duration });
