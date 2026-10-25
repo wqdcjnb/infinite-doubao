@@ -96,6 +96,40 @@
     activate(entry);
     return entry;
   }
+  api.prepareWorkTask = async function () {
+    function cloudMode() {
+      return nodes('[data-testid="chat_input_action_mode"]', editorRoot()).find(function (el) { return /^云电脑\s*[>›»]?$/.test(text(el)) && !unavailable(el); });
+    }
+    try {
+      await waitFor(editor, "页面输入区尚未就绪，请等待网页加载后重试", LOAD_TIMEOUT);
+      if (hasDraft() || hasMessages() || /\/chat\/[^/?#]+/.test(location.pathname) || !cloudMode()) {
+        var previousUrl = location.href;
+        var inConversation = /\/chat\/[^/?#]+/.test(location.pathname);
+        var previousMode = text(nodes('[data-testid="chat_input_action_mode"]', editorRoot())[0]);
+        var entry = nodes('button, [role="button"]').find(function (el) { return /^新工作任务(?:\s|$)/.test(text(el)); });
+        if (!entry || unavailable(entry)) throw new Error("未找到可用的新工作任务入口，请在豆包页面检查工作任务权限");
+        activate(entry);
+        await waitFor(function () {
+          var modeText = text(nodes('[data-testid="chat_input_action_mode"]', editorRoot())[0]);
+          return editor() && !hasDraft() && !hasMessages() && (!inConversation || location.href !== previousUrl) && (cloudMode() || (modeText && modeText !== previousMode));
+        }, "新工作任务未加载完成，任务尚未发送", LOAD_TIMEOUT);
+      }
+      if (!cloudMode()) {
+        var mode = await waitFor(function () { return nodes('[data-testid="chat_input_action_mode"]', editorRoot())[0]; }, "未找到工作任务模式选择器", LOAD_TIMEOUT);
+        if (unavailable(mode)) throw new Error("工作任务模式不可用");
+        activate(mode);
+        var cloud = await waitFor(function () {
+          return nodes('[role="menuitem"], [role="option"], [role="menuitemradio"]').find(function (el) { return /^云电脑(?:\s|$)/.test(text(el)); });
+        }, "当前账号没有可选择的云电脑模式", LOAD_TIMEOUT);
+        if (unavailable(cloud)) throw new Error("当前账号的云电脑模式不可用");
+        activate(cloud);
+      }
+      await waitFor(cloudMode, "豆包未切换到工作任务 · 云电脑，任务尚未发送", LOAD_TIMEOUT);
+      return { ok: true, mode: "work", verified: "cloud-computer-control" };
+    } catch (error) {
+      return { ok: false, code: "prepare_failed", reason: String(error && error.message || error) };
+    }
+  };
   api.prepareVideoGeneration = async function (options) {
     var phase = "page-ready";
     try {

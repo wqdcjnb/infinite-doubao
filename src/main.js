@@ -65,6 +65,7 @@ const quota = require("./quota");
 const accountProbe = require("./account-probe");
 const storyboard = require("./storyboard");
 const taskTemplates = require("./task-templates");
+const taskDrafts = require("./task-drafts");
 const assets = require("./assets");
 const videoLibrary = require("./video-library");
 const orchestrator = require("./orchestrator");
@@ -72,6 +73,7 @@ const jianying = require("./jianying");
 const jianyingImport = require("./jianying-import");
 const zizi = require("./zizi");
 const update = require("./update");
+const updater = update.createUpdater();
 const httpMod = require("./http");
 const api = require("./api");
 const mcp = require("./mcp");
@@ -85,6 +87,7 @@ const DEFAULT_URL = store.DEFAULT_URL;
 let mainWindow = null;
 let server = null;
 let registeredStopHotkey = "";
+let activeMaskJobs = 0;
 const openingAccounts = new Map();
 const watchedLoginSessions = new WeakSet();
 
@@ -520,7 +523,8 @@ function registerIpc() {
   ipcMain.handle("mask:run", async (event, input) => {
     const files = Array.isArray(input && input.files) ? input.files : [];
     if (!files.length) return { ok: false, message: "没有选中文件" };
-    return await runFaceMask({
+    activeMaskJobs++;
+    try { return await runFaceMask({
       files,
       mode: input.mode || "mosaic",
       strength: Number(input.strength) || 18,
@@ -528,7 +532,7 @@ function registerIpc() {
       keepOriginal: input.keepOriginal !== false,
       outDir: input.outDir || "",
       onProgress: (p) => { try { event.sender.send("mask:progress", p); } catch {} }
-    });
+    }); } finally { activeMaskJobs--; }
   });
 
   /* ---------------- 新界面：统一以模块为准 ---------------- */
@@ -623,6 +627,10 @@ function registerIpc() {
   ipcMain.handle("dm:template:attach", wrap(async (id, files) => taskTemplates.importAttachments(id, files)));
   ipcMain.handle("dm:template:detach", wrap(async (id, fileId) => taskTemplates.removeAttachment(id, fileId)));
   ipcMain.handle("dm:template:submit", wrap(async (id) => orchestrator.submitTemplate(taskTemplates.snapshot(id))));
+  ipcMain.handle("dm:drafts", wrap(async () => taskDrafts.list()));
+  ipcMain.handle("dm:draft:create", wrap(async (id, mode) => taskDrafts.create(id, mode)));
+  ipcMain.handle("dm:draft:remove", wrap(async (id) => taskDrafts.remove(id)));
+  ipcMain.handle("dm:drafts:submit", wrap(async (ids) => orchestrator.submitDrafts(ids)));
   ipcMain.handle("dm:task:stop", wrap(async (id) => orchestrator.stopTask(id)));
 
   ipcMain.handle("dm:storyboards", wrap(async () => storyboard.list()));
@@ -698,7 +706,24 @@ function registerIpc() {
   ipcMain.handle("dm:prompt:check", wrap(async (text) => zizi.check(text || "")));
   ipcMain.handle("dm:prompt:appeal", wrap(async (opts) => zizi.appealScript(opts || {})));
 
-  ipcMain.handle("dm:update:check", wrap(async () => update.check({})));
+  ipcMain.handle("dm:update:status", wrap(async () => updater.status()));
+  ipcMain.handle("dm:update:check", wrap(async () => updater.check()));
+  ipcMain.handle("dm:update:download", wrap(async () => updater.download()));
+  ipcMain.handle("dm:update:install", wrap(async () => {
+    if (!app.isPackaged) throw new Error("开发模式不能覆盖安装，请使用已安装的版本");
+    if (activeMaskJobs || orchestrator.state().running.length || store.get().tasks.some((task) => ["queued", "running"].includes(task.status))) {
+      throw new Error("还有生成或遮脸任务正在执行，请完成或停止任务后再安装更新");
+    }
+    return updater.install(async (installer) => {
+      store.save();
+      interceptor.saveResources();
+      const { spawn } = require("node:child_process");
+      const child = spawn(installer, ["/UPDATE", `/D=${path.dirname(process.execPath)}`, `/WAITPID=${process.pid}`], { detached: true, stdio: "ignore" });
+      await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+      child.unref();
+      setTimeout(() => app.quit(), 200);
+    });
+  }));
 
   ipcMain.handle("dm:logs", wrap(async (limit, q) => log.recent(Number(limit) || 200, q || "")));
   ipcMain.handle("dm:server", wrap(async () => (server ? server.info() : null)));
@@ -762,6 +787,7 @@ orchestrator.init({
 });
 
 orchestrator.events.on("event", (e) => pushToUi("dm:event", e));
+updater.events.on("change", (state) => pushToUi("dm:update", state));
 log.onLog((line) => pushToUi("dm:log", line));
 interceptor.events.on("add", (item) => pushToUi("dm:resource", item));
 interceptor.events.on("update", (item) => pushToUi("dm:resource", item));

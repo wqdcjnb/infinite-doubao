@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld("DM", {
   },
 
   onEvent: (cb) => on("dm:event", cb),
+  onUpdate: (cb) => on("dm:update", cb),
   onLog: (cb) => on("dm:log", cb),
   onResource: (cb) => on("dm:resource", cb),
   onAccountOpen: (cb) => on("dm:account:open", cb),

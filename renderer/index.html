@@ -21,7 +21,7 @@
       <div class="brand">
         <div class="brand-text">
           <strong>豆包工坊</strong>
-          <span class="brand-sub"><i class="pulse"></i>DOUBAO WORKSHOP <em id="verText">v1.2.2</em></span>
+          <span class="brand-sub"><i class="pulse"></i>DOUBAO WORKSHOP <em id="verText">v1.3.0</em></span>
         </div>
       </div>
 
@@ -58,6 +58,7 @@
         <button class="vtab" data-view="logs">日志</button>
         <button class="vtab" data-view="settings">设置</button>
         <span class="viewbar-grow"></span>
+        <button class="ghost tiny" id="btnUpdate" title="从局域网检查并下载最新版本">检查更新</button>
         <span class="vb-badge" id="vbServer" title="本地接口状态">API —</span>
       </nav>
 
@@ -160,7 +161,7 @@
             <p class="hint">模板和附件保存在本机，可重复提交。</p>
           </aside>
           <div class="template-main">
-            <div class="template-page-head"><h1>任务提交</h1><p>一份模板，一次创作。保存提示词和参考素材，随时再次使用。</p></div>
+            <div class="template-page-head"><h1>任务提交</h1><p>填写提示词和参考素材，存入草稿箱后勾选多条一起提交。</p><button class="ghost tiny" id="templateShowDrafts">查看草稿箱 <span id="draftCount">0</span></button></div>
             <div id="templateEmpty" class="template-empty">
               <strong>从第一个任务模板开始</strong>
               <p>写好提示词，选择模型和时长，再添加图片或视频附件。</p>
@@ -181,12 +182,19 @@
               <input id="templateFileInput" type="file" multiple accept=".jpg,.jpeg,.png,.webp,.gif,.bmp,.mp4,.mov,.webm,.m4v,.avi,.mkv" hidden />
               <div id="templateAttachments" class="template-attachments"></div>
               <div class="template-storage"><span>本地副本：<span id="templateAttachmentDir"></span></span><button class="ghost tiny" id="templateOpenDir">打开文件夹</button></div>
+              <div class="field draft-mode-field"><label for="draftMode">草稿提交模式</label><select id="draftMode"><option value="work">工作任务 · 云电脑</option><option value="video">对话 · 视频生成</option></select><p class="hint">工作任务会在豆包页面选择云电脑；模型和时长作为生成要求随提示词发送。</p></div>
               <div class="template-submit-bar">
                 <div><span id="templateSaveState" role="status"></span><p>使用已打开的账号提交，进度与成片在「任务队列」查看。</p></div>
                 <button class="ghost" id="templateSave">保存模板</button>
-                <button class="primary" id="templateSubmit">提交任务 ↗</button>
+                <button class="primary" id="templateAddDraft">存入草稿箱</button>
+                <button class="ghost" id="templateSubmit" title="直接使用对话的视频生成入口提交当前模板">直接生成视频 ↗</button>
               </div>
             </div>
+            <section class="draft-box" id="draftBox" aria-label="草稿箱">
+              <div class="draft-box-head"><div><h2>草稿箱</h2><p class="hint">草稿和附件保存在本机。一次加入队列，同一账号依次执行，不同账号按并发设置执行。</p></div><button class="ghost tiny" id="draftRefresh">刷新</button></div>
+              <div class="draft-actions"><label class="switch"><input type="checkbox" id="draftSelectAll" /> 全选</label><span id="draftSelection" role="status">已选 0 条</span><button class="primary" id="draftSubmit" disabled>提交所选草稿</button></div>
+              <div id="draftList"></div>
+            </section>
           </div>
         </div>
       </section>
@@ -326,7 +334,7 @@
         </div>
         <div class="field hidden" id="accProxyWrap">
           <label>代理地址</label>
-          <input id="accProxyUrl" placeholder="socks5://user:pass@1.2.3.4:1080" />
+          <input id="accProxyUrl" placeholder="socks5://user:pass@1.3.0.4:1080" />
         </div>
         <div class="hint">创建后自动打开豆包页面，扫码或手机号登录一次即可，登录态只保存在该环境自己的会话分区里，互不影响。</div>
       </div>
@@ -351,6 +359,7 @@
 
   <div class="toasts" id="toasts"></div>
   <script src="app.js"></script>
+  <script src="update-ui.js"></script>
   <script src="views.js"></script>
 </body>
 </html>

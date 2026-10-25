@@ -11,6 +11,7 @@ const assets = require("./assets");
 const interceptor = require("./interceptor");
 const driverMod = require("./driver");
 const accountProbe = require("./account-probe");
+const templates = require("./task-templates");
 const log = require("./logger");
 
 const events = new EventEmitter();
@@ -33,6 +34,7 @@ function newTask(input) {
     storyboardId: String(input.storyboardId || ""), shotId: String(input.shotId || ""), shotIndex: Number(input.shotIndex) || 0,
     instanceId: String(input.instanceId || ""), instanceName: "", kind: String(input.kind || "video"),
     templateId: String(input.templateId || ""), templateName: String(input.templateName || ""),
+    executionMode: input.executionMode === "work" ? "work" : "video",
     model: String(input.model || ""), duration: Number(input.duration) || 0,
     prompt: String(input.prompt || ""), refs: Array.isArray(input.refs) ? input.refs : [],
     status: "queued", stage: "waiting_account", progress: 0, waitReason: "等待分配账号",
@@ -226,10 +228,10 @@ async function runTask(task, inst, shot, sb) {
       throw Object.assign(new Error(`账号 ${inst.name} 需要登录，登录后将自动继续`), { code: "login_required" });
     }
     if (!task.submittedAt && driver.call) {
-      const prepared = await driver.call("prepareVideoGeneration", { model: task.model, duration: task.duration });
+      const prepared = await driver.call(task.executionMode === "work" ? "prepareWorkTask" : "prepareVideoGeneration", { model: task.model, duration: task.duration });
       if (!prepared?.ok) {
         if (prepared?.diagnostics) log.warn("video-prepare-failed", { taskId: task.id, instanceId: inst.id, diagnostics: prepared.diagnostics });
-        throw Object.assign(new Error(`视频生成参数未就绪：${prepared?.reason || "无法选择模型或时长"}`), {
+        throw Object.assign(new Error(`任务页面未就绪：${prepared?.reason || "无法选择任务模式或参数"}`), {
           code: (prepared?.code ? prepared.code === "model_unavailable" : /未开通|没有.*可选择|不可用|不支持|无权限|升级|会员|付费|当前账号不能使用/.test(prepared?.reason || "")) ? "model_unavailable" : "prepare_failed"
         });
       }
@@ -433,14 +435,46 @@ async function redispatch(taskId, instanceId) {
   patchTask(task.id, { preferredInstanceId: instanceId });
   return retryTask(taskId, { preferredInstances: [instanceId] });
 }
-function submitTemplate(template) {
+function templateRecords(template, executionMode = "video") {
   const label = store.MODEL_OPTIONS.find((m) => m.value === template.model)?.label || template.model;
   const prompt = `${template.prompt.trim()}\n\n生成要求：生成 ${template.duration} 秒视频，使用 ${label} 模型。`;
-  const sb = storyboard.create({ name: template.name, source: "task-template", shots: [{ title: template.name, videoPrompt: prompt, model: template.model, duration: template.duration, refs: template.attachments.map((a) => a.path) }] });
+  const sb = storyboard.normalizeStoryboard({ name: template.name, source: "task-template", shots: [{ title: template.name, videoPrompt: prompt, model: template.model, duration: template.duration, refs: template.attachments.map((a) => a.path) }] });
   const shot = sb.shots[0];
-  const task = addTask(newTask({ storyboardId: sb.id, shotId: shot.id, shotIndex: 1, templateId: template.id, templateName: template.name, model: template.model, duration: template.duration, prompt, refs: shot.refs.slice() }));
-  storyboard.updateShot(sb.id, shot.id, { taskId: task.id, status: "queued" });
-  runtime.paused = false; wakeQueue(); return { taskId: task.id, status: task.status };
+  const task = newTask({ storyboardId: sb.id, shotId: shot.id, shotIndex: 1, templateId: template.id, templateName: template.name, executionMode, model: template.model, duration: template.duration, prompt, refs: shot.refs.slice() });
+  Object.assign(shot, { taskId: task.id, status: "queued" });
+  return { sb, task };
+}
+function commitTemplates(records, draftIds = []) {
+  const data = store.get();
+  const previous = { storyboards: data.storyboards, tasks: data.tasks, taskDrafts: data.taskDrafts };
+  const previousStoryboardId = data.settings.lastStoryboardId;
+  data.storyboards = [...data.storyboards, ...records.map((r) => r.sb)];
+  data.tasks = [...data.tasks, ...records.map((r) => r.task)];
+  data.taskDrafts = data.taskDrafts.filter((d) => !draftIds.includes(d.id));
+  data.settings.lastStoryboardId = records[records.length - 1].sb.id;
+  // Queue insertion and draft removal share one durable write. No partial batch
+  // can escape to the page, and repeating the same request cannot send twice.
+  if (!store.save()) { Object.assign(data, previous); data.settings.lastStoryboardId = previousStoryboardId; throw new Error("任务保存失败，草稿已保留，请检查磁盘空间或目录权限"); }
+  records.forEach(({ task }) => emit("task", { task }));
+  runtime.paused = false;
+  wakeQueue();
+  return records.map(({ task }) => ({ taskId: task.id, status: task.status }));
+}
+function submitTemplate(template) {
+  return commitTemplates([templateRecords(templates.validateSnapshot(template))])[0];
+}
+function submitDrafts(ids) {
+  if (!Array.isArray(ids) || !ids.length) throw new Error("请先勾选要提交的草稿");
+  const selected = [...new Set(ids)];
+  const records = selected.map((id) => {
+    const draft = store.get().taskDrafts.find((d) => d.id === id);
+    if (!draft) throw new Error("部分草稿不存在或已提交，请刷新草稿箱");
+    try {
+      if (!["video", "work"].includes(draft.executionMode)) throw new Error("任务模式无效");
+      return templateRecords(templates.validateSnapshot(draft.template), draft.executionMode);
+    } catch (error) { throw new Error(`草稿「${draft.template?.name || id}」：${error.message}`); }
+  });
+  return { items: commitTemplates(records, selected), count: records.length };
 }
 function recoverTemplateTasks() {
   for (const task of store.get().tasks) {
@@ -463,4 +497,4 @@ function state() {
     running: [...runtime.running.values()].map((c) => ({ taskId: c.task.id, instanceId: c.inst.id, instanceName: c.inst.name, shotId: c.shot.id, shotIndex: c.shot.index, storyboardId: c.sb.id })),
     busy: [...runtime.busy], parallel: maxParallel(), stopped: [...runtime.stopped], lastError: runtime.lastError, stats, tasks: taskList({ limit: 50 }) };
 }
-module.exports = { init, submitTemplate, stopTask, recoverTemplateTasks, wakeQueue, events, state, start, pause, resume, stop, stopAll, pump, dispatchOne, retryTask, redispatch, taskList, getTask, patchTask, pickInstance, buildShotPayload, quota };
+module.exports = { init, submitTemplate, submitDrafts, stopTask, recoverTemplateTasks, wakeQueue, events, state, start, pause, resume, stop, stopAll, pump, dispatchOne, retryTask, redispatch, taskList, getTask, patchTask, pickInstance, buildShotPayload, quota };

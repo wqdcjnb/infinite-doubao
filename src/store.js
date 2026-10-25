@@ -121,6 +121,7 @@ function emptyStore() {
     proxies: [],
     storyboards: [],
     taskTemplates: [],
+    taskDrafts: [],
     tasks: [],
     assets: { persons: [], scenes: [], props: [], voices: [] },
     quota: {},
@@ -224,6 +225,7 @@ function migrate(raw) {
   out.proxies = Array.isArray(out.proxies) ? out.proxies : [];
   out.storyboards = Array.isArray(out.storyboards) ? out.storyboards : [];
   out.taskTemplates = Array.isArray(out.taskTemplates) ? out.taskTemplates : [];
+  out.taskDrafts = Array.isArray(out.taskDrafts) ? out.taskDrafts : [];
   out.tasks = Array.isArray(out.tasks) ? out.tasks : [];
   out.assets = out.assets && typeof out.assets === "object" ? out.assets : base.assets;
   for (const k of ["persons", "scenes", "props", "voices"]) {

@@ -253,6 +253,7 @@ function nextDispatchable(sbId, opts = {}) {
 module.exports = {
   STATUSES,
   normalizeShot,
+  normalizeStoryboard,
   list,
   get,
   raw,

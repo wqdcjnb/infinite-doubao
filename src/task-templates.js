@@ -109,8 +109,7 @@ function removeAttachment(id, fileId) {
   return item;
 }
 
-function snapshot(id) {
-  const item = get(id);
+function validateSnapshot(item) {
   if (!item.prompt.trim()) throw new Error("请先填写提示词");
   values(item);
   for (const file of item.attachments) {
@@ -118,6 +117,8 @@ function snapshot(id) {
   }
   return JSON.parse(JSON.stringify(item));
 }
+
+function snapshot(id) { return validateSnapshot(get(id)); }
 
 async function migrateLegacy() {
   const data = store.get();
@@ -143,4 +144,4 @@ async function migrateLegacy() {
   if (!store.save()) { data.taskTemplatesMigrated = false; throw new Error("模板迁移保存失败"); }
 }
 
-module.exports = { MIME, extensions, options, list, get, create, update, remove, importAttachments, removeAttachment, snapshot, migrateLegacy };
+module.exports = { MIME, extensions, options, list, get, create, update, remove, importAttachments, removeAttachment, snapshot, validateSnapshot, migrateLegacy };

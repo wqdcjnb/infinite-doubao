@@ -1,120 +1,160 @@
 "use strict";
 
-/**
- * 更新检查
- *
- * 对标产品的更新流程有两个洞：latest_version.json 与包哈希来自同一个源、且不验 Authenticode，
- * 中间人换掉 json 和包就能推任意程序。这里的规矩：
- *   1) 清单必须带 Ed25519 签名，用内置公钥验，签不过直接拒；
- *   2) 包哈希写在**已签名**的清单里，下载完先比大小再比 sha256；
- *   3) 只落盘到 updates/ 目录，不自动执行；交给用户点「安装」。
- */
-
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { EventEmitter } = require("node:events");
+const { Readable, Transform } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const P = require("./paths");
-const log = require("./logger");
 
-const DEFAULT_MANIFEST = "https://example.invalid/infinite-doubao/latest.json";
+const DEFAULT_MANIFEST = "http://10.1.11.88:17824/latest.json";
+const PUBLIC_KEY = fs.readFileSync(path.join(__dirname, "update-public-key.pem"), "utf8");
+const VERSION = /^\d+\.\d+\.\d+$/;
 
-/** 更新清单验签公钥（私钥只留在发布机上，永不进客户端） */
-const MANIFEST_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAGZ0Xo3Yv0fQ0mJ3o8v9w2T1p4zK7lLq2n3r5s6u7v8A=
------END PUBLIC KEY-----`;
-
-function verifyManifest(manifest, publicKeyPem) {
-  if (!manifest || typeof manifest !== "object") return { ok: false, reason: "清单为空" };
+function verifyManifest(manifest, publicKey = PUBLIC_KEY) {
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return { ok: false, reason: "版本信息为空" };
   const { sig, ...rest } = manifest;
-  if (!sig) return { ok: false, reason: "清单没有签名" };
   try {
-    const ok = crypto.verify(null, Buffer.from(JSON.stringify(rest)), publicKeyPem || MANIFEST_PUBLIC_KEY_PEM, Buffer.from(sig, "base64"));
-    if (!ok) return { ok: false, reason: "清单签名不匹配" };
-  } catch (error) {
-    return { ok: false, reason: `验签异常：${String(error && error.message)}` };
-  }
+    if (!sig || !crypto.verify(null, Buffer.from(JSON.stringify(rest)), publicKey, Buffer.from(sig, "base64"))) {
+      return { ok: false, reason: "版本信息签名不匹配，已拒绝更新" };
+    }
+  } catch { return { ok: false, reason: "版本信息签名无效，已拒绝更新" }; }
   return { ok: true, manifest: rest };
 }
 
 function cmpVersion(a, b) {
-  const pa = String(a || "0").split(/[.\-+]/).map((x) => parseInt(x, 10) || 0);
-  const pb = String(b || "0").split(/[.\-+]/).map((x) => parseInt(x, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
-    const d = (pa[i] || 0) - (pb[i] || 0);
-    if (d !== 0) return d > 0 ? 1 : -1;
+  const pa = String(a).split(".").map(Number);
+  const pb = String(b).split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] > pb[i] ? 1 : -1;
   }
   return 0;
 }
 
-async function fetchManifest(url) {
-  const target = String(url || DEFAULT_MANIFEST);
-  const res = await fetch(target, { headers: { "cache-control": "no-cache" } });
-  if (!res.ok) throw new Error(`清单拉取失败 HTTP ${res.status}`);
-  return await res.json();
+function sourceUrl() {
+  const saved = String((require("./store").get().settings || {}).updateUrl || "").trim();
+  return process.env.DOLAMOD_UPDATE_URL || (saved && !saved.includes("example.invalid") ? saved : DEFAULT_MANIFEST);
+}
+
+function httpUrl(value, base) {
+  const url = new URL(value, base);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("更新地址必须为 HTTP 或 HTTPS 地址");
+  return url.href;
+}
+
+function errorMessage(error) {
+  if (["TimeoutError", "AbortError"].includes(error?.name)) return "更新服务器响应超时，请检查局域网连接后重试";
+  if (error?.message === "fetch failed") return "无法连接更新服务器，请确认已连接局域网，且服务器已开机";
+  return String(error?.message || error);
 }
 
 async function check(opts = {}) {
-  const currentVersion = require("./brand").version;
-  const store = require("./store");
-  const url = opts.url || (store.get().settings || {}).updateUrl || process.env.DOLAMOD_UPDATE_URL || DEFAULT_MANIFEST;
-  // 没配更新源时不要真的去连 example.invalid，直接把结论说清楚
-  if (!url || /example\.invalid|^https?:\/\/(localhost|127\.0\.0\.1)\/?$/i.test(url)) {
-    return { ok: false, reason: "还没有配置更新源（设置 → 更新源填一个签名清单地址）", stage: "config", current: currentVersion };
-  }
+  const current = opts.currentVersion || require("../package.json").version;
+  const source = opts.url || sourceUrl();
   try {
-    const raw = await fetchManifest(url);
-    const v = verifyManifest(raw, opts.publicKey);
-    if (!v.ok) {
-      log.warn("update-manifest-invalid", { reason: v.reason });
-      return { ok: false, reason: v.reason, stage: "verify" };
+    const res = await fetch(httpUrl(source), { signal: AbortSignal.timeout(opts.timeoutMs || 15000), headers: { "cache-control": "no-cache" } });
+    if (!res.ok) throw new Error(`读取版本信息失败（HTTP ${res.status}）`);
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of res.body) {
+      size += chunk.length;
+      if (size > 256 * 1024) throw new Error("版本信息过大，已拒绝更新");
+      chunks.push(chunk);
     }
-    const m = v.manifest;
-    const latest = String(m.version || "0.0.0");
-    const hasUpdate = cmpVersion(latest, currentVersion) > 0;
-    return {
-      ok: true,
-      current: currentVersion,
-      latest,
-      hasUpdate,
-      notes: String(m.notes || ""),
-      publishedAt: String(m.publishedAt || ""),
-      file: m.file ? { url: String(m.file.url || ""), sha256: String(m.file.sha256 || ""), size: Number(m.file.size) || 0 } : null,
-      mandatory: !!m.mandatory
-    };
-  } catch (error) {
-    return { ok: false, reason: String(error && error.message), stage: "fetch" };
-  }
+    const verified = verifyManifest(JSON.parse(Buffer.concat(chunks).toString("utf8")), opts.publicKey);
+    if (!verified.ok) throw new Error(verified.reason);
+    const m = verified.manifest;
+    if (!VERSION.test(m.version) || m.platform !== "win32" || m.arch !== "x64") throw new Error("版本信息不适用于 Windows x64");
+    const file = m.file || {};
+    if (!/^[a-f0-9]{64}$/i.test(file.sha256) || !Number.isSafeInteger(file.size) || file.size <= 0) throw new Error("安装包缺少有效的大小或校验信息");
+    const fileUrl = httpUrl(file.url, source);
+    if (!new URL(fileUrl).pathname.toLowerCase().endsWith(".exe")) throw new Error("更新文件不是 Windows 安装包");
+    return { ok: true, current, source, latest: m.version, hasUpdate: cmpVersion(m.version, current) > 0,
+      notes: String(m.notes || ""), publishedAt: String(m.publishedAt || ""), file: { url: fileUrl, sha256: file.sha256.toLowerCase(), size: file.size } };
+  } catch (error) { return { ok: false, current, source, reason: errorMessage(error) }; }
 }
 
-async function download(info, onProgress) {
-  if (!info || !info.file || !info.file.url) return { ok: false, reason: "清单里没有可用安装包" };
-  const dir = path.join(P.dir("updates"));
-  fs.mkdirSync(dir, { recursive: true });
-  const name = path.basename(new URL(info.file.url).pathname) || `infinite-doubao-${info.latest}.zip`;
-  const target = path.join(dir, name);
-
-  const res = await fetch(info.file.url);
-  if (!res.ok) return { ok: false, reason: `下载失败 HTTP ${res.status}` };
-  const total = Number(res.headers.get("content-length")) || info.file.size || 0;
+async function verifyFile(file, expected) {
+  if (fs.statSync(file).size !== expected.size) throw new Error("安装包大小不符，请重新下载");
   const hash = crypto.createHash("sha256");
-  const chunks = [];
-  let received = 0;
-  for await (const chunk of res.body) {
-    chunks.push(chunk);
-    hash.update(chunk);
-    received += chunk.length;
-    if (info.file.size && received > info.file.size * 1.05) return { ok: false, reason: "包体积超预期，疑似被替换" };
-    if (typeof onProgress === "function") onProgress({ received, total });
-  }
-  const buf = Buffer.concat(chunks);
-  if (info.file.size && buf.length !== info.file.size) return { ok: false, reason: `包大小不符（${buf.length} != ${info.file.size}）` };
-  const digest = hash.digest("hex");
-  if (info.file.sha256 && digest.toLowerCase() !== String(info.file.sha256).toLowerCase()) {
-    return { ok: false, reason: "sha256 不符，已丢弃" };
-  }
-  fs.writeFileSync(target, buf);
-  log.info("update-downloaded", { target, size: buf.length });
-  return { ok: true, file: target, size: buf.length, sha256: digest };
+  for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
+  if (hash.digest("hex") !== expected.sha256) throw new Error("安装包校验失败，请重新下载");
 }
 
-module.exports = { check, download, verifyManifest, cmpVersion };
+// 下载和安装只使用主进程检查过的清单；渲染进程不能指定 URL、哈希或执行路径。
+function createUpdater(opts = {}) {
+  const events = new EventEmitter();
+  let state = { phase: "idle", current: opts.currentVersion || require("../package.json").version };
+  let checked = null;
+  let downloaded = null;
+  let busy = false;
+  const status = () => ({ ...state, source: state.source || opts.url || sourceUrl() });
+  const set = (patch) => { state = { ...state, ...patch }; events.emit("change", status()); return status(); };
+  const fail = (error) => set({ phase: "error", reason: errorMessage(error) });
+
+  return {
+    events, status,
+    async check() {
+      if (busy) return status();
+      busy = true;
+      checked = null; downloaded = null;
+      state = { phase: "checking", current: state.current, source: opts.url || sourceUrl() };
+      set({});
+      try {
+        const info = await check({ ...opts, url: state.source });
+        if (!info.ok) return fail(new Error(info.reason));
+        checked = info;
+        return set({ phase: info.hasUpdate ? "available" : "current", latest: info.latest, notes: info.notes, publishedAt: info.publishedAt, total: info.file.size, received: 0 });
+      } finally { busy = false; }
+    },
+    async download() {
+      if (busy) return status();
+      if (!checked?.hasUpdate) return fail(new Error("请先检查是否有新版本"));
+      busy = true; downloaded = null;
+      const dir = opts.downloadDir || P.dir("updates");
+      const target = path.join(dir, `DoubaoWorkshop-${checked.latest}-Setup.exe`);
+      const part = target + ".part";
+      set({ phase: "downloading", received: 0, total: checked.file.size, reason: "" });
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        if (fs.existsSync(target)) {
+          try { await verifyFile(target, checked.file); downloaded = target; return set({ phase: "ready", received: checked.file.size }); }
+          catch { fs.unlinkSync(target); }
+        }
+        const res = await fetch(checked.file.url, { signal: AbortSignal.timeout(opts.downloadTimeoutMs || 30 * 60 * 1000) });
+        if (!res.ok || !res.body) throw new Error(`下载安装包失败（HTTP ${res.status}）`);
+        let received = 0;
+        let lastProgress = 0;
+        const meter = new Transform({ transform(chunk, _encoding, cb) {
+          received += chunk.length;
+          if (received > checked.file.size) return cb(new Error("安装包体积超出版本信息，已拒绝更新"));
+          if (Date.now() - lastProgress > 150 || received === checked.file.size) {
+            lastProgress = Date.now(); set({ received });
+          }
+          cb(null, chunk);
+        } });
+        await pipeline(Readable.fromWeb(res.body), meter, fs.createWriteStream(part));
+        await verifyFile(part, checked.file);
+        fs.renameSync(part, target);
+        downloaded = target;
+        return set({ phase: "ready", received: checked.file.size });
+      } catch (error) { return fail(error); }
+      finally { fs.rmSync(part, { force: true }); busy = false; }
+    },
+    async install(launch) {
+      if (busy) return status();
+      if (!downloaded || !checked?.hasUpdate || state.phase !== "ready") throw new Error("请先下载并校验安装包");
+      busy = true;
+      set({ phase: "installing", reason: "" });
+      try {
+        await verifyFile(downloaded, checked.file);
+        await launch(downloaded);
+        return status();
+      } catch (error) { downloaded = null; return fail(error); }
+      finally { busy = false; }
+    }
+  };
+}
+
+module.exports = { DEFAULT_MANIFEST, check, createUpdater, verifyManifest, cmpVersion, verifyFile };

@@ -15,6 +15,10 @@
 /build/*
 !/build/build.mjs
 !/build/installer.mjs
+!/build/publish-update.mjs
+!/build/update-server.cjs
+!/build/activate-update.cjs
+!/build/install-update-server.ps1
 
 !/_test/
 /_test/*
@@ -37,6 +41,7 @@
 .env.*
 api-token.txt
 secrets.json
+*private*.pem
 store.json
 Cookies
 Cookies-journal

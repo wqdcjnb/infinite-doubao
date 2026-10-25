@@ -18,6 +18,9 @@ const V = {
   activeTemplate: "",
   templateOptions: null,
   templateDirty: false,
+  drafts: [],
+  selectedDrafts: new Set(),
+  draftBusy: false,
   tasks: [],
   taskFilter: "",
   apiTab: "rest",
@@ -219,6 +222,7 @@ async function refreshTemplates() {
   if (!V.templates.some((t) => t.id === V.activeTemplate)) V.activeTemplate = V.templates[0]?.id || "";
   renderTemplateList();
   if (!V.templateDirty) renderTemplateEditor();
+  await refreshDrafts();
 }
 
 function renderTemplateList() {
@@ -351,6 +355,7 @@ async function attachTemplateFiles() {
   if (!files.length) return;
   q("#templateAddFiles").disabled = true;
   q("#templateSubmit").disabled = true;
+  q("#templateAddDraft").disabled = true;
   try {
     const template = await saveTemplate();
     await call("dm:template:attach", template.id, files);
@@ -359,6 +364,7 @@ async function attachTemplateFiles() {
   } finally {
     q("#templateAddFiles").disabled = false;
     q("#templateSubmit").disabled = false;
+    q("#templateAddDraft").disabled = false;
   }
 }
 
@@ -375,6 +381,14 @@ async function submitTemplate() {
 }
 
 function bindTemplateEvents() {
+  q("#templateAddDraft").addEventListener("click", () => guard(addTemplateDraft));
+  q("#templateShowDrafts").addEventListener("click", () => q("#draftBox").scrollIntoView({ behavior: "smooth", block: "start" }));
+  q("#draftRefresh").addEventListener("click", () => guard(refreshDrafts));
+  q("#draftSubmit").addEventListener("click", () => guard(submitSelectedDrafts));
+  q("#draftSelectAll").addEventListener("change", (event) => {
+    V.selectedDrafts = new Set(event.target.checked ? V.drafts.map((d) => d.id) : []);
+    renderDrafts();
+  });
   q("#templateNew").addEventListener("click", () => guard(newTemplate));
   q("#templateEmptyNew").addEventListener("click", () => guard(newTemplate));
   q("#templateSave").addEventListener("click", () => guard(async () => { await saveTemplate(); say("模板已保存"); }));
@@ -386,6 +400,79 @@ function bindTemplateEvents() {
   q("#templateOpenDir").addEventListener("click", () => DM.openPath(V.templateOptions.directory));
   for (const selector of ["#templateName", "#templatePrompt", "#templateDuration"]) q(selector).addEventListener("input", markTemplateDirty);
   q("#templateModel").addEventListener("change", () => { renderDuration(q("#templateDuration").value); markTemplateDirty(); });
+}
+
+async function refreshDrafts() {
+  V.drafts = await call("dm:drafts");
+  V.selectedDrafts = new Set([...V.selectedDrafts].filter((id) => V.drafts.some((d) => d.id === id)));
+  renderDrafts();
+}
+
+function renderDrafts() {
+  q("#draftCount").textContent = String(V.drafts.length);
+  q("#draftSelection").textContent = `已选 ${V.selectedDrafts.size} / ${V.drafts.length} 条`;
+  q("#draftSubmit").disabled = V.draftBusy || !V.selectedDrafts.size;
+  const all = q("#draftSelectAll");
+  all.checked = !!V.drafts.length && V.selectedDrafts.size === V.drafts.length;
+  all.indeterminate = V.selectedDrafts.size > 0 && V.selectedDrafts.size < V.drafts.length;
+  all.disabled = V.draftBusy || !V.drafts.length;
+  const box = q("#draftList");
+  box.replaceChildren();
+  if (!V.drafts.length) box.appendChild(node("div", "empty-hint", "还没有待发送草稿。选择工作任务 · 云电脑，填写提示词后点击「存入草稿箱」。"));
+  for (const draft of V.drafts) {
+    const t = draft.template;
+    const row = node("div", "draft-row");
+    const check = node("input");
+    check.type = "checkbox";
+    check.checked = V.selectedDrafts.has(draft.id);
+    check.disabled = V.draftBusy;
+    check.setAttribute("aria-label", `选择草稿「${t.name}」`);
+    check.addEventListener("change", () => { check.checked ? V.selectedDrafts.add(draft.id) : V.selectedDrafts.delete(draft.id); renderDrafts(); });
+    const info = node("div", "draft-info");
+    info.appendChild(node("strong", "", t.name));
+    info.appendChild(node("p", "", t.prompt));
+    info.appendChild(node("small", "", `${draft.executionMode === "work" ? "工作任务 · 云电脑" : "对话 · 视频生成"} · ${modelLabel(t.model)} · ${t.duration} 秒 · ${t.attachments.length} 附件 · ${fmtTime(draft.createdAt)}`));
+    row.append(check, info);
+    const remove = trashButton(`移除草稿「${t.name}」`, () => {
+      openModal("移除草稿", node("div", "hint", `移除「${t.name}」？原模板和本地附件会保留。`), [
+        { label: "取消" }, { label: "移除", close: false, onClick: () => guard(async () => { await call("dm:draft:remove", draft.id); closeModal(); await refreshDrafts(); }) }
+      ]);
+    });
+    remove.disabled = V.draftBusy;
+    row.appendChild(remove);
+    box.appendChild(row);
+  }
+}
+
+async function addTemplateDraft() {
+  const button = q("#templateAddDraft");
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    const mode = q("#draftMode").value;
+    const template = await saveTemplate();
+    const draft = await call("dm:draft:create", template.id, mode);
+    V.selectedDrafts.add(draft.id);
+    await refreshDrafts();
+    say("已存入草稿箱，可继续填写下一条提示词");
+  } finally { button.disabled = false; }
+}
+
+async function submitSelectedDrafts() {
+  if (V.draftBusy || !V.selectedDrafts.size) return;
+  const ids = [...V.selectedDrafts];
+  V.draftBusy = true;
+  renderDrafts();
+  let result;
+  try {
+    result = await call("dm:drafts:submit", ids);
+    ids.forEach((id) => V.selectedDrafts.delete(id));
+    say(`${result.count} 条草稿已加入任务队列`);
+  } finally {
+    V.draftBusy = false;
+    await refreshDrafts();
+  }
+  if (result) await setView("tasks");
 }
 
 
@@ -451,6 +538,7 @@ function renderTaskTable() {
     const nameValue = node("span", "task-pill task-truncate", t.templateName || t.prompt || "历史任务");
     nameValue.title = nameValue.textContent;
     name.appendChild(nameValue);
+    if (t.executionMode === "work") nameValue.title += " · 工作任务 · 云电脑";
     tr.appendChild(name);
     const model = node("td", "task-model");
     const modelValues = node("div", "task-model-values");
@@ -899,20 +987,10 @@ async function refreshSettings() {
   const aboutGroup = group("关于", [
     kvRow("版本", (state && state.brand && state.brand.version) || "1.2.0"),
     kvRow("配置与缓存目录", (V.paths && V.paths.home) || ""),
-    textRow("更新源", s.updateUrl || "", "签名清单地址；留空时不检查在线更新", (v) => patchSetting(["updateUrl"], v))
+    textRow("更新源", s.updateUrl || "", "留空使用局域网 10.1.11.88:17824；更换地址后重新检查更新", (v) => patchSetting(["updateUrl"], v.trim()))
   ]);
   const upd = node("button", "ghost tiny", "检查更新");
-  upd.addEventListener("click", async () => {
-    upd.disabled = true;
-    upd.textContent = "检查中…";
-    const r = await guard(() => call("dm:update:check"), null);
-    upd.disabled = false;
-    upd.textContent = "检查更新";
-    if (!r) return;
-    // 后端成功时给的是 latest（不是 version），失败时带 reason，两种都要说清楚
-    if (r.ok === false) return say(r.reason || "检查更新失败", true);
-    say(r.hasUpdate ? `发现新版本 ${r.latest}，安装包尚未下载` : `已是最新（${r.current}）`);
-  });
+  upd.addEventListener("click", () => window.DMUpdates.open());
   aboutGroup.appendChild(upd);
   box.appendChild(aboutGroup);
 }
@@ -1037,6 +1115,7 @@ async function patchServer(key, value) {
 /* ============================================================ 事件与启动 */
 
 function bindEvents() {
+  window.DMUpdates.beforeInstall = async () => { if (V.templateDirty) await saveTemplate(); };
   qa(".vtab").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
   qa("[data-home-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.homeView)));
   qa("[data-home-action]").forEach((b) => b.addEventListener("click", () => {

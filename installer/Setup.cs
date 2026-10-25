@@ -14,6 +14,7 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -31,6 +32,8 @@ namespace DolaModSetup
         public bool Uninstall;
         public bool Cleanup;
         public bool PurgeData;
+        public bool Update;
+        public int WaitPid;
     }
 
     internal static class Program
@@ -38,7 +41,7 @@ namespace DolaModSetup
         internal const string AppName = "豆包工坊";
         internal const string AppExeName = "豆包工坊.exe";
         internal const string LegacyName = "无限豆包";
-        internal const string AppVersion = "1.2.2";
+        internal const string AppVersion = "1.3.0";
         internal const string Publisher = "豆包工坊";
         internal const string RegKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\InfiniteDoubao";
         internal const string Magic = "DMINST01";
@@ -82,6 +85,8 @@ namespace DolaModSetup
                     || a.Equals("/quiet", StringComparison.OrdinalIgnoreCase) || a.Equals("/verysilent", StringComparison.OrdinalIgnoreCase)
                     || a.Equals("--silent", StringComparison.OrdinalIgnoreCase)) o.Silent = true;
                 else if (a.StartsWith("/D=", StringComparison.OrdinalIgnoreCase)) o.Dir = a.Substring(3).Trim('"');
+                else if (a.Equals("/UPDATE", StringComparison.OrdinalIgnoreCase)) o.Update = true;
+                else if (a.StartsWith("/WAITPID=", StringComparison.OrdinalIgnoreCase)) int.TryParse(a.Substring(9), out o.WaitPid);
                 else if (a.Equals("/NODESKTOP", StringComparison.OrdinalIgnoreCase) || a.Equals("--no-desktop", StringComparison.OrdinalIgnoreCase)) o.Desktop = false;
                 else if (a.Equals("/NORUN", StringComparison.OrdinalIgnoreCase) || a.Equals("--no-run", StringComparison.OrdinalIgnoreCase)) o.Run = false;
                 else if (a.Equals("/uninstall", StringComparison.OrdinalIgnoreCase) || a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase)) o.Uninstall = true;
@@ -128,6 +133,17 @@ namespace DolaModSetup
 
         internal static void Install(Options o, Action<int, string> progress, Action<string> status)
         {
+            if (o.WaitPid > 0 && o.WaitPid != Process.GetCurrentProcess().Id)
+            {
+                if (status != null) status("正在等待应用保存数据并退出…");
+                Process previous = null;
+                try { previous = Process.GetProcessById(o.WaitPid); } catch (ArgumentException) { }
+                if (previous != null)
+                {
+                    using (previous)
+                        if (!previous.WaitForExit(30000)) throw new IOException("应用尚未退出，请关闭应用后重试更新。");
+                }
+            }
             string dir = Path.GetFullPath(o.Dir);
             if (dir.Length < 4) throw new InvalidOperationException("安装目录不合法。");
             // 与目标目录同卷，解压后可直接移动文件，避免再次读写整套运行时。
@@ -141,10 +157,10 @@ namespace DolaModSetup
                 if (status != null) status("正在检查并释放安装文件…");
                 Directory.CreateDirectory(stage);
                 using (Stream payload = OpenPayload())
-                    Extract(payload, stage, progress == null ? null : new Action<int, string>(delegate(int p, string name) { progress(p * 85 / 100, name); }));
+                    ExtractPayload(payload, stage, dir, progress == null ? null : new Action<int, string>(delegate(int p, string name) { progress(p * 85 / 100, name); }));
                 TryLog("extract_ms=" + timer.ElapsedMilliseconds);
-                if (!File.Exists(Path.Combine(stage, AppExeName)) ||
-                    !File.Exists(Path.Combine(stage, "resources", "app.asar")))
+                if ((!File.Exists(Path.Combine(stage, AppExeName)) && !File.Exists(Path.Combine(dir, AppExeName))) ||
+                    (!File.Exists(Path.Combine(stage, "resources", "app.asar")) && !File.Exists(Path.Combine(dir, "resources", "app.asar"))))
                     throw new InvalidOperationException("安装包缺少主程序或应用资源，请重新下载安装包。");
                 WriteUninstaller(stage);
 
@@ -276,19 +292,51 @@ namespace DolaModSetup
         /** 解压 zip 到目录，逐块报进度 */
         private static void Extract(Stream payload, string dir, Action<int, string> progress)
         {
+            ExtractPayload(payload, dir, null, progress);
+        }
+
+        private static bool MatchesInstalledFile(string file, long length, string expected)
+        {
+            try
+            {
+                if (!File.Exists(file) || new FileInfo(file).Length != length) return false;
+                using (FileStream stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 20, FileOptions.SequentialScan))
+                using (SHA256 sha = new SHA256Cng())
+                    return string.Equals(BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", ""), expected, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+
+        private static void ExtractPayload(Stream payload, string dir, string installed, Action<int, string> progress)
+        {
             string root = Path.GetFullPath(dir);
             if (!root.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)) root += Path.DirectorySeparatorChar;
 
             using (ZipArchive zip = new ZipArchive(payload, ZipArchiveMode.Read, false))
             {
+                if (installed != null && (zip.GetEntry(AppExeName) == null || zip.GetEntry("resources/app.asar") == null))
+                    throw new InvalidOperationException("安装包缺少主程序或应用资源，请重新下载安装包。");
+                const string manifestName = ".doubao-files.sha256";
+                Dictionary<string, string> hashes = new Dictionary<string, string>(StringComparer.Ordinal);
+                ZipArchiveEntry manifest = zip.GetEntry(manifestName);
+                if (installed != null && manifest != null)
+                    using (StreamReader reader = new StreamReader(manifest.Open(), Encoding.UTF8))
+                    {
+                        string line;
+                        while ((line = reader.ReadLine()) != null)
+                            if (line.Length > 65 && line[64] == ' ') hashes[line.Substring(65)] = line.Substring(0, 64);
+                    }
                 long total = 0;
-                foreach (ZipArchiveEntry e in zip.Entries) total += e.Length;
+                foreach (ZipArchiveEntry e in zip.Entries) if (e.FullName != manifestName) total += e.Length;
                 if (total <= 0) total = 1;
 
                 long done = 0;
+                int reused = 0;
                 byte[] buf = new byte[1 << 16];
                 foreach (ZipArchiveEntry e in zip.Entries)
                 {
+                    if (e.FullName == manifestName) continue;
                     string rel = e.FullName.Replace('/', Path.DirectorySeparatorChar);
                     string dest = Path.GetFullPath(Path.Combine(dir, rel));
                     // 防目录穿越：只允许落在安装目录内部
@@ -299,6 +347,16 @@ namespace DolaModSetup
                     if (rel.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal))
                     {
                         Directory.CreateDirectory(dest);
+                        continue;
+                    }
+
+                    string expected;
+                    if (installed != null && hashes.TryGetValue(e.FullName, out expected) &&
+                        MatchesInstalledFile(Path.Combine(installed, rel), e.Length, expected))
+                    {
+                        reused++;
+                        done += e.Length;
+                        if (progress != null) progress((int)(done * 100 / total), rel);
                         continue;
                     }
 
@@ -323,6 +381,7 @@ namespace DolaModSetup
                     }
                     try { File.SetLastWriteTime(dest, e.LastWriteTime.DateTime); } catch { }
                 }
+                TryLog("reused_files=" + reused);
             }
         }
 
@@ -892,6 +951,7 @@ namespace DolaModSetup
             Controls.Add(btnClose);
 
             AcceptButton = btnInstall;
+            if (opts.Update) Shown += delegate { OnInstall(this, EventArgs.Empty); };
         }
 
         private void OnBrowse(object sender, EventArgs e)
@@ -953,7 +1013,7 @@ namespace DolaModSetup
                     busy = false;
                     string msg = Program.AppName + " 已安装到：\n" + opts.Dir +
                                  "\n\n快捷方式：" + (opts.Desktop ? "桌面 + 开始菜单" : "开始菜单");
-                    MessageBox.Show(this, msg, "安装完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    if (!opts.Update) MessageBox.Show(this, msg, "安装完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     if (opts.Run) Program.LaunchApp(opts.Dir);
                     Close();
                 }));

@@ -2,11 +2,21 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Threading;
+using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text;
 using DolaModSetup;
 
 internal static class InstallerRegression
 {
     private static int checks;
+
+    private sealed class SeekCounter : MemoryStream
+    {
+        internal int Seeks;
+        internal SeekCounter(byte[] bytes) : base(bytes) { }
+        public override long Seek(long offset, SeekOrigin origin) { Seeks++; return base.Seek(offset, origin); }
+    }
 
     private static object Call(Type type, string method, params object[] args)
     {
@@ -21,6 +31,26 @@ internal static class InstallerRegression
         Console.WriteLine("PASS " + message);
     }
 
+    private static MemoryStream Payload(bool manifest)
+    {
+        MemoryStream stream = new MemoryStream();
+        using (ZipArchive zip = new ZipArchive(stream, ZipArchiveMode.Create, true))
+        {
+            StringBuilder hashes = new StringBuilder();
+            string[] names = { Program.AppExeName, "resources/app.asar", "changed.txt", "new.txt" };
+            foreach (string name in names)
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes("new-" + name);
+                using (Stream entry = zip.CreateEntry(name).Open()) entry.Write(bytes, 0, bytes.Length);
+                using (SHA256 hash = SHA256.Create()) hashes.Append(BitConverter.ToString(hash.ComputeHash(bytes)).Replace("-", "")).Append(' ').Append(name).Append('\n');
+            }
+            if (manifest)
+                using (StreamWriter writer = new StreamWriter(zip.CreateEntry(".doubao-files.sha256").Open(), new UTF8Encoding(false))) writer.Write(hashes);
+        }
+        stream.Position = 0;
+        return stream;
+    }
+
     public static int Main(string[] args)
     {
         string root = Path.Combine(Path.GetTempPath(), "dm_installer_regression_" + Guid.NewGuid().ToString("N"));
@@ -28,6 +58,8 @@ internal static class InstallerRegression
         try
         {
             Type current = typeof(Program);
+            Options update = (Options)Call(current, "Parse", (object)new string[] { "/UPDATE", "/WAITPID=12345", "/D=" + root });
+            Check(update.Update && update.WaitPid == 12345 && update.Dir == root && update.Run && !update.Silent, "in-app update waits for the old process and restarts after visible installation");
             Check(Program.AppName == "豆包工坊" && Program.AppExeName == "豆包工坊.exe", "installer and executable use the new brand");
             Check(Path.GetFileName(Program.DataDir()) == "无限豆包", "renamed application retains its existing data directory");
             string legacyInstall = Path.Combine(root, "legacy-install");
@@ -79,6 +111,50 @@ internal static class InstallerRegression
             Call(current, "CopyStagedFiles", stage, target);
             releaser.Join();
             Check(File.ReadAllText(targetExe) == "new-exe" && File.ReadAllText(Path.Combine(target, "first.txt")) == "new-first", "temporary lock release permits complete staged copy");
+            Check(!File.Exists(Path.Combine(stage, Program.AppExeName)), "upgrade moves staged files without copying their contents again");
+
+            string extra = Path.Combine(target, "user-extra.txt");
+            File.WriteAllText(extra, "keep");
+            File.WriteAllText(Path.Combine(stage, "first.txt"), "next-version");
+            Call(current, "CopyStagedFiles", stage, target);
+            Check(File.ReadAllText(extra) == "keep" && File.ReadAllText(Path.Combine(target, "first.txt")) == "next-version", "upgrade retains files outside the payload");
+
+            string freshStage = Path.Combine(root, "fresh-stage");
+            string freshTarget = Path.Combine(root, "fresh-target");
+            Directory.CreateDirectory(Path.Combine(freshStage, "resources"));
+            File.WriteAllText(Path.Combine(freshStage, "resources", "app.asar"), "fresh-content");
+            Call(current, "CopyStagedFiles", freshStage, freshTarget);
+            Check(!Directory.Exists(freshStage) && File.ReadAllText(Path.Combine(freshTarget, "resources", "app.asar")) == "fresh-content", "fresh installation moves the complete directory");
+
+            byte[] bytes = new byte[64];
+            for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)i;
+            SeekCounter counter = new SeekCounter(bytes);
+            using (SubStream payload = new SubStream(counter, 10, 20))
+            {
+                byte[] part = new byte[4];
+                for (int i = 0; i < 5; i++)
+                    Check(payload.Read(part, 0, part.Length) == 4 && part[0] == 10 + i * 4, "payload sequential read preserves offset " + i);
+                Check(counter.Seeks == 1 && payload.Read(part, 0, part.Length) == 0, "sequential reads avoid redundant seeks and stop at payload boundary");
+                payload.Seek(2, SeekOrigin.Begin);
+                Check(payload.Read(part, 0, part.Length) == 4 && part[0] == 12 && counter.Seeks == 2, "ZIP backward seek still reads the requested payload bytes");
+            }
+
+            string reuseTarget = Path.Combine(root, "reuse-target");
+            string reuseStage = Path.Combine(root, "reuse-stage");
+            Directory.CreateDirectory(Path.Combine(reuseTarget, "resources"));
+            File.WriteAllText(Path.Combine(reuseTarget, Program.AppExeName), "new-" + Program.AppExeName);
+            File.WriteAllText(Path.Combine(reuseTarget, "resources", "app.asar"), "new-resources/app.asar");
+            File.WriteAllText(Path.Combine(reuseTarget, "changed.txt"), "old-changed.txt");
+            using (Stream payload = Payload(true)) Call(current, "ExtractPayload", payload, reuseStage, reuseTarget, null);
+            Check(!File.Exists(Path.Combine(reuseStage, Program.AppExeName)) && !File.Exists(Path.Combine(reuseStage, "resources", "app.asar")), "matching installed files are not decompressed or staged");
+            Check(File.ReadAllText(Path.Combine(reuseStage, "changed.txt")) == "new-changed.txt", "same-size modified file is detected by SHA256 and restored");
+            Check(File.ReadAllText(Path.Combine(reuseStage, "new.txt")) == "new-new.txt", "missing file is extracted on upgrade");
+            Call(current, "CopyStagedFiles", reuseStage, reuseTarget);
+            Check(File.ReadAllText(Path.Combine(reuseTarget, "changed.txt")) == "new-changed.txt" && File.ReadAllText(Path.Combine(reuseTarget, Program.AppExeName)) == "new-" + Program.AppExeName, "incremental update retains verified runtime and installs changed files");
+
+            string noManifest = Path.Combine(root, "no-manifest");
+            using (Stream payload = Payload(false)) Call(current, "ExtractPayload", payload, noManifest, reuseTarget, null);
+            Check(File.Exists(Path.Combine(noManifest, Program.AppExeName)), "payloads without a manifest fall back to full extraction");
 
             if (args.Length > 0)
             {

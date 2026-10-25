@@ -17,6 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
+import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -133,6 +134,10 @@ function listFiles(dir) {
 function writeZip(dir, target) {
   const files = listFiles(dir);
   if (!files.length) throw new Error(`没有可打包的文件：${dir}`);
+  const manifestName = ".doubao-files.sha256";
+  if (files.some((f) => f.name === manifestName)) throw new Error("应用目录包含安装器保留的校验文件");
+  const manifest = Buffer.from(files.map((f) => `${crypto.createHash("sha256").update(fs.readFileSync(f.abs)).digest("hex")} ${f.name}\n`).join(""));
+  files.push({ name: manifestName, data: manifest, size: manifest.length, mtime: new Date() });
 
   const fd = fs.openSync(target, "w");
   const central = [];
@@ -142,7 +147,7 @@ function writeZip(dir, target) {
 
   try {
     for (const f of files) {
-      const raw = fs.readFileSync(f.abs);
+      const raw = f.data || fs.readFileSync(f.abs);
       const sum = crc32(raw);
       const def = zlib.deflateRawSync(raw, { level: 6 });
       const method = def.length < raw.length ? 8 : 0;
