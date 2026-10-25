@@ -77,7 +77,10 @@ const pyArch = arch === "arm64" ? "aarch64" : "x86_64";
 const pythonTar = await download(`https://github.com/astral-sh/python-build-standalone/releases/download/${deps.pythonRelease}/cpython-${deps.python}+${deps.pythonRelease}-${pyArch}-apple-darwin-install_only_stripped.tar.gz`, deps[arch].python);
 run("tar", ["-xzf", pythonTar, "-C", res]);
 const python = path.join(res, "python", "bin", "python3");
-run(python, ["-I", "-m", "pip", "install", "--only-binary=:all:", "--no-cache-dir", `opencv-python-headless==${deps.opencv}`, `numpy==${deps.numpy}`]);
+// Pin wheel files as well as versions: pip on a newer build host otherwise picks a macOS 14-only NumPy.
+const wheels = [];
+for (const wheel of deps[arch].wheels) wheels.push(await download(wheel.url, wheel.sha256));
+run(python, ["-I", "-m", "pip", "install", "--no-index", "--no-deps", "--no-cache-dir", ...wheels]);
 run(python, ["-B", "-I", "-c", "import cv2,numpy;print('Bundled:',cv2.__version__,numpy.__version__)"]);
 const tools = path.join(res, "tools");
 fs.mkdirSync(tools);
