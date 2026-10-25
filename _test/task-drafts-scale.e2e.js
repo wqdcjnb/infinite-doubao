@@ -14,7 +14,7 @@ if (process.argv.includes("--prepare")) {
   const store = require("../src/store"), templates = require("../src/task-templates"), drafts = require("../src/task-drafts");
   store.load(); store.get().settings.server.enabled = false;
   store.get().settings.web = { enabled: false };
-  Object.assign(store.get().settings.orchestrator, { maxParallel: 1, pollInterval: 1500, autoDownload: false, retryLimit: 0, taskTimeoutMs: 30000 });
+  Object.assign(store.get().settings.orchestrator, { maxParallel: 1, pollInterval: 1500, autoDownload: false, retryLimit: 0, taskTimeoutMs: Number(process.env.DM_TEST_TASK_TIMEOUT_MS) || 30000 });
   const account = store.add({ id: accountId, name: "50条草稿隔离测试", url: `http://127.0.0.1:${port}/chat` });
   const template = templates.create({ name: "相同提示词批量测试", prompt: "仅本地验证，不调用真实豆包生成", duration: 5 });
   const items = Array.from({ length: count }, () => drafts.create(template.id));
@@ -99,6 +99,7 @@ if (process.argv.includes("--prepare")) {
       report.peakPages = peakPages;
       const finalStore = JSON.parse(fs.readFileSync(path.join(home, "store.json"), "utf8"));
       report.confirmed = finalStore.tasks.length;
+      report.confirmationErrors = finalStore.tasks.flatMap(t => t.log || []).filter(entry => /生成确认未完成/.test(entry.message)).map(entry => entry.message);
       report.remaining = finalStore.taskDrafts.map(d => ({ id: d.id, error: d.nativeError, uncertain: !!d.submissionRecord?.task.submissionUncertain }));
       report.logs = (await c.eval("DM.call('dm:logs',30)")).data;
       fs.writeFileSync(path.join(home, "scale-result.png"), Buffer.from((await c.send("Page.captureScreenshot")).data, "base64"));
@@ -111,7 +112,7 @@ if (process.argv.includes("--prepare")) {
         console.log("PASS: stalled page times out, subsequent drafts still sent, failed draft retained", report.elapsedMs); return;
       }
       assert.equal(sent.length, fixture.ids.length, "Every selected draft must be dispatched");
-      assert.ok(report.samples.some(s => s.sent > 4 && /已发起 \d+\//.test(s.message)), "Submission progress remains visible");
+      assert.ok(report.samples.some(s => s.sent > 4 && /(?:已发起|本次发起) \d+\//.test(s.message)), "Submission progress remains visible");
       assert.equal(new Set(sent.map(s => s.prompt.match(/^【草稿编号：([^】]+)】/)[1])).size, fixture.ids.length);
       assert.ok(sent.every(s => s.mode === "云电脑"));
       if (delayedReceipts) {
@@ -123,6 +124,7 @@ if (process.argv.includes("--prepare")) {
       if (process.env.DM_TEST_MAX_DISPATCH_MS) {
         assert.ok(report.dispatchMs < Number(process.env.DM_TEST_MAX_DISPATCH_MS), `Dispatch too slow: ${report.dispatchMs}ms`);
         assert.equal(report.confirmed, fixture.ids.length, "all receipts arrive within their independent timeouts");
+        assert.deepEqual(report.confirmationErrors, [], "accepted pages must not time out while checking generation");
       }
       assert.equal(completed, true, "Operation must finish");
       console.log("PASS", JSON.stringify({ count: report.sent, elapsedMs: report.elapsedMs, spreadMs: report.spreadMs }));

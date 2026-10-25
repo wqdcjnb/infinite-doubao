@@ -26,7 +26,7 @@ beforeEach(() => {
         calls.push({ method, options, instanceId: inst.id });
         const override = await hook(method, options, { draftId, taskId }); if (override) return override;
         if (method === "saveNativeDraft") { native.push(options.id); return { ok: true, bindings: bindings() }; }
-        if (method === "waitNativeDraftAccepted") { native = native.filter((id) => id !== options.id); return { ok: true, conversationUrl: `https://www.doubao.com/chat/${options.id}`, bindings: bindings() }; }
+        if (method === "waitNativeDraftAccepted") { native = native.filter((id) => id !== options.id); currentUrl = `https://www.doubao.com/chat/${options.id}`; return { ok: true, conversationUrl: currentUrl, bindings: bindings() }; }
         if (method === "readProgress") return { state: "running", generationStarted: true };
         return { ok: true, conversationIds: [] };
       },
@@ -56,11 +56,11 @@ async function waitFor(check) {
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
 
-test("接收后自动打开每条已有对话并重置旧路由基线，随后才检测生成确认", async () => {
+test("接收后在已核对的新对话重置基线，直接检测生成确认而不重复加载", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   hook = (method, options, context) => {
     if (method === "peekGenerationConfirmation" && context.draftId) {
-      assert.ok(calls.some(c => c.method === "navigate" && c.draftId === context.draftId));
+      assert.equal(calls.some(c => c.method === "navigate" && c.draftId === context.draftId), false, "verified conversation should not reload");
       const tracking = calls.filter(c => c.method === "beginTask" && c.draftId === context.draftId).at(-1).input;
       assert.equal(tracking.resume, true); assert.equal(tracking.reset, true); assert.deepEqual(tracking.baselineMessageIds, []);
     }
@@ -68,6 +68,14 @@ test("接收后自动打开每条已有对话并重置旧路由基线，随后�
   assert.equal((await queue.submitDrafts(ids)).count, 2);
   assert.equal(sends().length, 2);
   assert.ok(store.get().tasks.every(t => t.baselineMessageIds.length === 0));
+});
+
+test("回执后页面离开已接收对话时，恢复正确会话再核对生成确认", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  hook = (method, options) => method === "waitNativeDraftAccepted"
+    ? { ok: true, conversationUrl: `https://www.doubao.com/chat/${options.id}` } : null;
+  assert.equal((await queue.submitDrafts(ids)).count, 2);
+  assert.deepEqual(calls.filter(c => c.method === "navigate" && c.draftId).map(c => c.url).sort(), ids.map(id => `https://www.doubao.com/chat/${id}`).sort());
 });
 
 test("同账号的确认提醒乱序到达，独立回复按要求生成且先落盘，不等第一条完成", async () => {

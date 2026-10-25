@@ -699,14 +699,22 @@ async function submitDrafts(ids, options = {}) {
             const settings = store.get().settings.orchestrator;
             // The accepted conversation has its own message history. The draft
             // composer's baseline may belong to the previous route entirely.
+            const trackAccepted = async () => {
+              checkDraft();
+              requirePage(await driver.beginTask({ taskId: record.task.id, prompt: record.task.prompt, resume: true, reset: true, baselineMessageIds: [], baselineUrls: record.task.baselineUrls || [], confirmedKeys: Object.keys(record.task.confirmationIntents || {}) }));
+              checkDraft();
+            };
             const reopen = async () => {
               if (!driver.navigate) return;
               await driver.navigate(record.task.conversationUrl);
               checkDraft();
               if (driver.ready && !await driver.ready()) throw new Error("已接收对话尚未加载完成");
-              requirePage(await driver.beginTask({ taskId: record.task.id, prompt: record.task.prompt, resume: true, reset: true, baselineMessageIds: [], baselineUrls: record.task.baselineUrls || [], confirmedKeys: Object.keys(record.task.confirmationIntents || {}) }));
+              await trackAccepted();
             };
-            await reopen();
+            // The receipt already matched this conversation's numbered user
+            // message. Keep it alive instead of reloading every accepted page.
+            if (driver.url && await driver.url() !== record.task.conversationUrl) await reopen();
+            else await trackAccepted();
             let refreshedAt = Date.now();
             const persist = values => {
               const snapshot = JSON.parse(JSON.stringify({ ...record, task: { ...record.task, ...values } }));
