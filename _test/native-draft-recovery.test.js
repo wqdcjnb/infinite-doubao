@@ -17,7 +17,7 @@ function page(items, delayed, loading) {
   const heading = { innerText: "草稿 对话列表设置", disabled: false, getAttribute: () => null, click() { expands++; current = items.slice(0, 5); } };
   const more = { innerText: "展开更多草稿", disabled: false, getAttribute: () => null, click() { expands++; current = items; } };
   const section = { parentElement: null, clientHeight: 100, scrollHeight: ["scroll", "slow-scroll"].includes(loading) ? 500 : 100, scrollTop: 0,
-    querySelectorAll: () => ["expand", "collapsed"].includes(loading) && current.length < items.length ? [more] : [],
+    querySelector: () => null, querySelectorAll: () => ["expand", "collapsed"].includes(loading) && current.length < items.length ? [more] : [],
     scrollTo({ top }) {
       this.scrollTop = Math.min(top, this.scrollHeight - this.clientHeight); scrolls++;
       if (loading !== "slow-scroll") current = items.slice(0, Math.min(items.length, current.length + 5));

@@ -29,7 +29,8 @@ if (process.argv.includes("--prepare")) {
   const delayedReceipts = Number(process.env.DM_TEST_DELAY_RECEIPTS || 0);
   let pageLoads = 0, peakPages = 0;
   const serviceState = { drafts: fixture.native, conversations: [], version: 0 };
-  const seed = `<script>if(!localStorage.getItem('fixture'))localStorage.setItem('fixture',${JSON.stringify(JSON.stringify({ drafts: fixture.native, conversations: [] }))});</script>`;
+  const indexed = process.env.DM_TEST_NATIVE_STORE === "1";
+  const seed = `<script>if(!localStorage.getItem('fixture'))localStorage.setItem('fixture',${JSON.stringify(JSON.stringify({ drafts: fixture.native, conversations: [] }))});${indexed ? fs.readFileSync(path.join(__dirname, "native-drafts-indexeddb.js"), "utf8") : ""}</script>`;
   const html = fs.readFileSync(path.join(__dirname, "native-drafts-fixture.html"), "utf8")
     .replace("<script>", seed + "<script>").replace("d.prompt.slice(0,8)", `d.prompt.slice(0,${fixture.labelChars})`)
     // Real drafts are stored atomically by the service. Do not let concurrent
@@ -58,7 +59,7 @@ if (process.argv.includes("--prepare")) {
   (async () => {
     await new Promise(r => server.listen(port, "127.0.0.1", r));
     const c = await CDP.attach(), started = Date.now();
-    const report = { count: fixture.ids.length, labelChars: fixture.labelChars, samples: [] };
+    const report = { count: fixture.ids.length, labelChars: fixture.labelChars, indexedDraftStore: indexed, initialVisibleDrafts: indexed ? 5 : fixture.ids.length, samples: [] };
     const pause = ms => new Promise(r => setTimeout(r, ms));
     try {
       assert.equal(path.resolve((await c.eval("DM.paths()")).home), home);

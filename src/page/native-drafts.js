@@ -3,6 +3,7 @@
   var api = window[CFG.autoKey];
   if (!api) return;
   var beforeSave = [];
+  var storedBindings = new Map();
   function text(el) { return String(el && (/^(TEXTAREA|INPUT)$/.test(el.tagName) ? el.value : el.innerText || el.textContent) || "").replace(/\s+/g, " ").trim(); }
   function editor() { return document.querySelector('#input-engine-container .tiptap[contenteditable="true"], #input-engine-container textarea, .tiptap.ProseMirror[contenteditable="true"]'); }
   function title(row) { return text(row.querySelector(":scope > span > span")); }
@@ -12,6 +13,76 @@
   function enabled(button) { return button && !button.disabled && !["aria-disabled", "aria-busy", "data-disabled", "data-loading"].some(function (attr) { return button.getAttribute(attr) === "true"; }); }
   function normalize(value) { return String(value || "").replace(/\s+/g, " ").trim(); }
   function numberIn(value) { var match = normalize(value).match(/^【草稿编号：(DB-[0-9A-F]{24})】/); return match && match[1]; }
+  function rowDraft(row) {
+    // The native row keeps the complete record even when its label is ellipsized.
+    var fiber = row && row[Object.keys(row).find(function (key) { return key.startsWith("__reactFiber$"); })];
+    for (var i = 0; fiber && i < 6; i++, fiber = fiber.return) {
+      var props = fiber.memoizedProps;
+      if (props && props.draft && props.draft.inputDraftIndex) return props.draft;
+    }
+    return null;
+  }
+  async function expandDrafts() {
+    var section = document.querySelector('[data-testid="draft-conversation-section"]');
+    if (!section) return;
+    if (!rows().length) {
+      var header = section.querySelector(':scope > [role="button"][class~="group/section-header"]');
+      if (header) { header.click(); await wait(function () { return rows().length; }, "豆包草稿列表尚未展开"); }
+    }
+    var more = section.querySelector(':scope > button[aria-expanded="false"]');
+    if (more) {
+      var count = rows().length;
+      more.click();
+      await wait(function () { return !more.isConnected || rows().length > count; }, "豆包隐藏草稿尚未展开");
+    }
+  }
+  async function readStore(database, storeName, key) {
+    return new Promise(function (resolve, reject) {
+      var request = indexedDB.open(database), db, settled = false;
+      var timer = setTimeout(function () { finish(new Error("读取豆包完整草稿数据超时")); }, 5000);
+      function finish(error, value) {
+        if (settled) return; settled = true; clearTimeout(timer);
+        if (db) db.close();
+        error ? reject(error) : resolve(value);
+      }
+      request.onupgradeneeded = function () { request.transaction.abort(); };
+      request.onerror = function () { finish(new Error("无法读取豆包草稿数据库，请刷新账号页面")); };
+      request.onblocked = function () { finish(new Error("豆包草稿数据库正被占用，请稍后重试")); };
+      request.onsuccess = function () {
+        db = request.result;
+        if (settled) { db.close(); return; }
+        try {
+          var tx = db.transaction(storeName, "readonly"), store = tx.objectStore(storeName);
+          var read = key === undefined ? store.getAll() : store.get(key), value;
+          read.onsuccess = function () { value = read.result; };
+          tx.oncomplete = function () { finish(null, value); };
+          tx.onabort = tx.onerror = function () { finish(new Error("豆包草稿数据读取失败")); };
+        } catch (error) { finish(error); }
+      };
+    });
+  }
+  async function catalog() {
+    // Older pages may not use this store. Never create or modify a website DB.
+    if (typeof indexedDB === "undefined" || !indexedDB.databases) return null;
+    var databases = await indexedDB.databases();
+    if (!databases.some(function (db) { return db.name === "flow-draft-conversations-v2"; })) return null;
+    await wait(function () { return document.querySelector('[data-testid="draft-conversation-section"]'); }, "豆包草稿列表尚未加载");
+    await expandDrafts();
+    await wait(function () { return rows().some(function (row) { return rowDraft(row); }); }, "当前账号草稿记录尚未加载");
+    var scopes = new Set(rows().map(rowDraft).filter(Boolean).map(function (d) { return d.inputDraftIndex.accountScope; }));
+    if (scopes.size !== 1) throw new Error("无法确认当前豆包账号的草稿数据，请打开账号草稿列表后重试");
+    var scope = Array.from(scopes)[0];
+    var records = await readStore("flow-draft-conversations-v2", "drafts");
+    var input = await readStore("samantha-web", "store", "input-engine-draft:v3:account:" + encodeURIComponent(scope));
+    if (!input || !input.state || input.state.accountScope !== scope || !Array.isArray(input.state.records)) throw new Error("豆包完整草稿正文尚未加载，请刷新账号页面后重试");
+    return records.filter(function (r) { return !r.deleted && r.accountScope === scope && r.data && r.data.id === r.id && r.data.inputDraftIndex && r.data.inputDraftIndex.accountScope === scope; }).map(function (r) {
+      var index = r.data.inputDraftIndex;
+      var document = input.state.records.find(function (p) { return p.address && p.address.accountScope === scope && p.address.conversationScope === index.conversationScope && p.address.inputId === index.inputId; });
+      var unit = document && document.units && document.units["input.document"], payload = unit && !unit.tombstone && unit.payload;
+      var prompt = payload && (payload.format === "plain-text" ? payload.text : payload.plainTextFallback);
+      return { nativeId: r.id, accountScope: scope, title: r.data.title, prompt: typeof prompt === "string" ? prompt : null, executionMode: r.data.scene === "new-office-task" ? "work" : "chat" };
+    });
+  }
   function candidatesFor(binding) {
     return rows().filter(function (row) {
       var label = title(row);
@@ -37,9 +108,21 @@
   }
   function snapshot() {
     var current = rows(), titles = current.map(title);
-    return current.filter(function (r) { return r.dataset.dmDraftId; }).map(function (r) { return { id: r.dataset.dmDraftId, index: current.indexOf(r), title: title(r), titles: titles }; });
+    current.filter(function (r) { return r.dataset.dmDraftId; }).forEach(function (r) {
+      var native = rowDraft(r), binding = { id: r.dataset.dmDraftId, index: current.indexOf(r), title: title(r), titles: titles };
+      if (native) Object.assign(binding, { nativeId: native.id, accountScope: native.inputDraftIndex.accountScope });
+      storedBindings.set(binding.id, binding);
+    });
+    return Array.from(storedBindings.values()).filter(function (binding) { return rowFor(binding.id); });
   }
-  function rowFor(id) { return rows().find(function (r) { return r.dataset.dmDraftId === id; }); }
+  function rowFor(id) {
+    var binding = storedBindings.get(id);
+    return rows().find(function (r) {
+      if (!binding || !binding.nativeId) return r.dataset.dmDraftId === id;
+      var native = rowDraft(r);
+      return native && native.id === binding.nativeId && native.inputDraftIndex.accountScope === binding.accountScope;
+    });
+  }
   function revealDrafts(clicked) {
     // The Drafts heading can be collapsed; its expanded list initially shows
     // only five rows. Never click a conversation or its menu to reveal more.
@@ -62,9 +145,31 @@
     return false;
   }
   function result(fn) { return async function () { try { return await fn.apply(null, arguments); } catch (e) { return { ok: false, reason: String(e.message || e) }; } }; }
+  api.readNativeDrafts = result(async function () {
+    await wait(editor, "豆包输入区尚未加载");
+    var items = await catalog();
+    return { ok: true, source: items ? "indexeddb" : "sidebar", items: items || [], total: items ? items.length : rows().length };
+  });
   api.restoreNativeDrafts = result(async function (bindings) {
     await wait(editor, "豆包输入区尚未加载", Date.now() + 60000);
     bindings = bindings || [];
+    await expandDrafts();
+    var full = bindings.length ? await catalog() : null;
+    if (full) {
+      var resolved = [], usedIds = new Set(), titles = full.map(function (d) { return d.title; });
+      for (var binding of bindings) {
+        var matches = full.filter(function (d) { return binding.draftNumber ? numberIn(d.prompt) === binding.draftNumber : normalize(d.prompt) === normalize(binding.prompt); });
+        if (binding.draftNumber && matches.length > 1) throw new Error("发现重复草稿编号 " + binding.draftNumber + "，未触发发送，请核对网页草稿");
+        if (binding.nativeId) matches = matches.filter(function (d) { return d.nativeId === binding.nativeId && d.accountScope === binding.accountScope; });
+        if (matches.length !== 1) throw new Error("完整草稿数据中未找到唯一对应的任务，请核对编号或原生草稿 ID，未触发发送");
+        var match = matches[0];
+        if (!match.prompt || normalize(match.prompt) !== normalize(binding.prompt) || match.executionMode !== binding.executionMode || usedIds.has(match.nativeId)) throw new Error("豆包草稿完整正文或模式与本地记录不一致，未触发发送");
+        usedIds.add(match.nativeId);
+        resolved.push({ id: binding.id, nativeId: match.nativeId, accountScope: match.accountScope, title: match.title, index: full.indexOf(match), titles: titles });
+      }
+      resolved.forEach(function (b) { storedBindings.set(b.id, b); });
+      return { ok: true, source: "indexeddb", total: full.length, bindings: snapshot() };
+    }
     // Truncated labels require checking each full prompt (600ms stable per row).
     // Keep the list-load limit at 20s, but allow the existing 60s preparation
     // budget for large candidate sets instead of cutting off after 33 rows.
@@ -125,6 +230,7 @@
   });
   api.prepareNativeDraft = result(async function (options) {
     await wait(editor, "豆包输入区尚未加载");
+    await expandDrafts();
     // Re-clicking New work on an unsent work composer does not save it.
     // Leaving for the opposite composer does, including the user's current text.
     if (text(editor())) {
@@ -166,6 +272,7 @@
     return { ok: true, bindings: snapshot() };
   });
   api.openNativeDraft = result(async function (options) {
+    await expandDrafts();
     var row = rowFor(options.id);
     if (!row) throw new Error("未找到这条豆包草稿，请刷新账号页面后重试");
     row.click();
