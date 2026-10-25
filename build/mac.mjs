@@ -98,7 +98,7 @@ process.env.MACOSX_DEPLOYMENT_TARGET = "13.0";
 process.env.PKG_CONFIG_PATH = path.join(prefix, "lib", "pkgconfig");
 run("./configure", [`--prefix=${prefix}`, "--enable-static", "--enable-pic", "--disable-cli", "--disable-opencl", "--extra-cflags=-mmacosx-version-min=13.0"], x264);
 run("make", ["-j4"], x264); run("make", ["install"], x264);
-run("./configure", [`--prefix=${prefix}`, "--enable-gpl", "--enable-libx264", "--disable-shared", "--enable-static", "--disable-autodetect", "--disable-doc", "--disable-debug", "--disable-ffplay", "--pkg-config-flags=--static", `--extra-cflags=-I${prefix}/include -mmacosx-version-min=13.0`, `--extra-ldflags=-L${prefix}/lib -mmacosx-version-min=13.0`], ffmpeg);
+run("./configure", [`--prefix=${prefix}`, "--enable-gpl", "--enable-libx264", "--enable-zlib", "--disable-shared", "--enable-static", "--disable-autodetect", "--disable-doc", "--disable-debug", "--disable-ffplay", "--pkg-config-flags=--static", `--extra-cflags=-I${prefix}/include -mmacosx-version-min=13.0`, `--extra-ldflags=-L${prefix}/lib -mmacosx-version-min=13.0`], ffmpeg);
 run("make", ["-j4"], ffmpeg);
 for (const tool of ["ffmpeg", "ffprobe"]) {
   const dest = path.join(tools, tool);
