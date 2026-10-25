@@ -628,9 +628,19 @@ function registerIpc() {
   ipcMain.handle("dm:template:detach", wrap(async (id, fileId) => taskTemplates.removeAttachment(id, fileId)));
   ipcMain.handle("dm:template:submit", wrap(async (id) => orchestrator.submitTemplate(taskTemplates.snapshot(id))));
   ipcMain.handle("dm:drafts", wrap(async () => taskDrafts.list()));
-  ipcMain.handle("dm:draft:create", wrap(async (id, mode) => taskDrafts.create(id, mode)));
+  ipcMain.handle("dm:draft:create", wrap(async (id, mode, options) => {
+    const draft = taskDrafts.create(id, mode);
+    await orchestrator.saveDrafts([draft.id], options);
+    return taskDrafts.list().find((d) => d.id === draft.id);
+  }));
+  ipcMain.handle("dm:drafts:create-many", wrap(async (ids, mode, options) => {
+    const added = taskDrafts.createMany(ids, mode);
+    const result = await orchestrator.saveDrafts(added.map((d) => d.id), options);
+    return { ...result, ids: added.map((d) => d.id) };
+  }));
+  ipcMain.handle("dm:drafts:save", wrap(async (ids, options) => orchestrator.saveDrafts(ids, options)));
   ipcMain.handle("dm:draft:remove", wrap(async (id) => taskDrafts.remove(id)));
-  ipcMain.handle("dm:drafts:submit", wrap(async (ids) => orchestrator.submitDrafts(ids)));
+  ipcMain.handle("dm:drafts:submit", wrap(async (ids, options) => orchestrator.submitDrafts(ids, options)));
   ipcMain.handle("dm:task:stop", wrap(async (id) => orchestrator.stopTask(id)));
 
   ipcMain.handle("dm:storyboards", wrap(async () => storyboard.list()));

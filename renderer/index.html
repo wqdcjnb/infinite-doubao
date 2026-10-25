@@ -21,7 +21,7 @@
       <div class="brand">
         <div class="brand-text">
           <strong>豆包工坊</strong>
-          <span class="brand-sub"><i class="pulse"></i>DOUBAO WORKSHOP <em id="verText">v1.3.2</em></span>
+          <span class="brand-sub"><i class="pulse"></i>DOUBAO WORKSHOP <em id="verText">v1.3.3</em></span>
         </div>
       </div>
 
@@ -154,10 +154,13 @@
             <div class="template-library-head"><strong>我的模板</strong><span id="templateCount">0</span></div>
             <button class="primary" id="templateNew">＋ 新建模板</button>
             <div class="template-list" id="templateList"></div>
+            <span class="hint" id="templateSelection">已选 0 个模板</span>
+            <button class="primary" id="templatesAddDrafts" disabled>所选模板存入豆包草稿</button>
             <p class="hint">模板和附件保存在本机，可重复提交。</p>
           </aside>
           <div class="template-main">
             <div class="template-page-head"><h1>任务提交</h1><p>填写提示词和参考素材，存入草稿箱后勾选多条一起提交。</p><button class="ghost tiny" id="templateShowDrafts">查看草稿箱 <span id="draftCount">0</span></button></div>
+            <div class="field"><label for="draftAccount">草稿使用账号</label><select id="draftAccount"><option value="">自动选择空闲账号（已存草稿使用原账号）</option></select><p class="hint">指定一个豆包号保存和发送整批草稿。已经存入豆包网页的草稿使用其所属账号发送。</p></div>
             <div id="templateEmpty" class="template-empty">
               <strong>从第一个任务模板开始</strong>
               <p>写好提示词，选择模型和时长，再添加图片或视频附件。</p>
@@ -182,13 +185,13 @@
               <div class="template-submit-bar">
                 <div><span id="templateSaveState" role="status"></span><p>使用已打开的账号提交，进度与成片在「任务队列」查看。</p></div>
                 <button class="ghost" id="templateSave">保存模板</button>
-                <button class="primary" id="templateAddDraft">存入草稿箱</button>
+                <button class="primary" id="templateAddDraft">当前模板存入豆包草稿</button>
                 <button class="ghost" id="templateSubmit" title="直接使用对话的视频生成入口提交当前模板">直接生成视频 ↗</button>
               </div>
             </div>
             <section class="draft-box" id="draftBox" aria-label="草稿箱">
-              <div class="draft-box-head"><div><h2>草稿箱</h2><p class="hint">可勾选不同模板的草稿一起提交。每批自动选择一个可用豆包号，整批由它依次发送；账号暂不可用时等待恢复。其他正常提交按原规则分配账号。</p></div><button class="ghost tiny" id="draftRefresh">刷新</button></div>
-              <div class="draft-actions"><label class="switch"><input type="checkbox" id="draftSelectAll" /> 全选</label><span id="draftSelection" role="status">已选 0 条</span><button class="primary" id="draftSubmit" disabled>提交所选草稿</button></div>
+              <div class="draft-box-head"><div><h2>豆包草稿箱</h2><p class="hint">多个模板先存入同一个豆包号网页左侧的「草稿」，再勾选一起发送。确认豆包接收一条后立即发送下一条，不等待视频生成完成。</p></div><button class="ghost tiny" id="draftRefresh">刷新</button></div>
+              <div class="draft-actions"><label class="switch"><input type="checkbox" id="draftSelectAll" /> 全选</label><span id="draftSelection" role="status">已选 0 条</span><button class="ghost" id="draftSave" disabled>所选草稿存入豆包</button><button class="primary" id="draftSubmit" disabled>发送所选豆包草稿</button></div>
               <div id="draftList"></div>
             </section>
           </div>

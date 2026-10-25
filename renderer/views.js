@@ -16,6 +16,7 @@ const V = {
   view: "accounts",
   templates: [],
   activeTemplate: "",
+  selectedTemplates: new Set(),
   templateOptions: null,
   templateDirty: false,
   drafts: [],
@@ -241,6 +242,7 @@ async function updateBadges() {
 async function refreshTemplates() {
   const result = await call("dm:templates");
   V.templates = result.items;
+  V.selectedTemplates = new Set([...V.selectedTemplates].filter((id) => V.templates.some((t) => t.id === id)));
   V.templateOptions = result.options;
   V.models = result.options.models;
   if (!V.templates.some((t) => t.id === V.activeTemplate)) V.activeTemplate = V.templates[0]?.id || "";
@@ -253,8 +255,17 @@ function renderTemplateList() {
   const box = q("#templateList");
   box.replaceChildren();
   q("#templateCount").textContent = String(V.templates.length);
+  q("#templatesAddDrafts").disabled = V.draftBusy || !V.selectedTemplates.size;
+  q("#templateSelection").textContent = `已选 ${V.selectedTemplates.size} 个模板`;
   if (!V.templates.length) box.appendChild(node("div", "empty-hint", "还没有模板，点击「新建模板」开始。"));
   for (const template of V.templates) {
+    const row = node("div", "template-select-row");
+    const check = node("input");
+    check.type = "checkbox";
+    check.checked = V.selectedTemplates.has(template.id);
+    check.disabled = V.draftBusy;
+    check.setAttribute("aria-label", `选择模板「${template.name}」`);
+    check.addEventListener("change", () => { check.checked ? V.selectedTemplates.add(template.id) : V.selectedTemplates.delete(template.id); renderTemplateList(); });
     const button = node("button", "template-item" + (template.id === V.activeTemplate ? " active" : ""));
     button.appendChild(node("strong", "", template.name));
     button.appendChild(node("span", "", `${modelLabel(template.model)} · ${template.duration}s · ${template.attachments.length} 附件`));
@@ -264,7 +275,8 @@ function renderTemplateList() {
       renderTemplateList();
       renderTemplateEditor();
     }));
-    box.appendChild(button);
+    row.append(check, button);
+    box.appendChild(row);
   }
 }
 
@@ -406,9 +418,18 @@ async function submitTemplate() {
 
 function bindTemplateEvents() {
   q("#templateAddDraft").addEventListener("click", () => guard(addTemplateDraft));
+  q("#templatesAddDrafts").addEventListener("click", () => guard(() => addTemplateDraft(true)));
   q("#templateShowDrafts").addEventListener("click", () => q("#draftBox").scrollIntoView({ behavior: "smooth", block: "start" }));
   q("#draftRefresh").addEventListener("click", () => guard(refreshDrafts));
   q("#draftSubmit").addEventListener("click", () => guard(submitSelectedDrafts));
+  q("#draftSave").addEventListener("click", () => guard(async () => {
+    if (V.draftBusy || !V.selectedDrafts.size) return;
+    V.draftBusy = true; renderDrafts(); renderTemplateList();
+    try {
+      const result = await call("dm:drafts:save", [...V.selectedDrafts], { instanceId: q("#draftAccount").value });
+      say(`${result.count} 条已存入 ${result.instanceName} 的豆包草稿`);
+    } finally { V.draftBusy = false; await refreshDrafts(); renderTemplateList(); }
+  }));
   q("#draftSelectAll").addEventListener("change", (event) => {
     V.selectedDrafts = new Set(event.target.checked ? V.drafts.map((d) => d.id) : []);
     renderDrafts();
@@ -428,6 +449,12 @@ function bindTemplateEvents() {
 
 async function refreshDrafts() {
   V.drafts = await call("dm:drafts");
+  const account = q("#draftAccount"), chosen = account.value;
+  V.instances = await call("dm:instances");
+  account.replaceChildren(node("option", "", "自动选择空闲账号（已存草稿使用原账号）"));
+  account.firstElementChild.value = "";
+  for (const inst of V.instances) { const option = node("option", "", inst.name); option.value = inst.id; account.appendChild(option); }
+  account.value = V.instances.some((i) => i.id === chosen) ? chosen : "";
   V.selectedDrafts = new Set([...V.selectedDrafts].filter((id) => V.drafts.some((d) => d.id === id)));
   renderDrafts();
 }
@@ -436,13 +463,16 @@ function renderDrafts() {
   q("#draftCount").textContent = String(V.drafts.length);
   q("#draftSelection").textContent = `已选 ${V.selectedDrafts.size} / ${V.drafts.length} 条`;
   q("#draftSubmit").disabled = V.draftBusy || !V.selectedDrafts.size;
+  q("#draftSave").disabled = V.draftBusy || !V.selectedDrafts.size;
+  q("#templateAddDraft").disabled = V.draftBusy;
+  q("#draftAccount").disabled = V.draftBusy;
   const all = q("#draftSelectAll");
   all.checked = !!V.drafts.length && V.selectedDrafts.size === V.drafts.length;
   all.indeterminate = V.selectedDrafts.size > 0 && V.selectedDrafts.size < V.drafts.length;
   all.disabled = V.draftBusy || !V.drafts.length;
   const box = q("#draftList");
   box.replaceChildren();
-  if (!V.drafts.length) box.appendChild(node("div", "empty-hint", "还没有待发送草稿。选择工作任务 · 云电脑，填写提示词后点击「存入草稿箱」。"));
+  if (!V.drafts.length) box.appendChild(node("div", "empty-hint", "勾选左侧多个模板，点击「所选模板存入豆包草稿」，再在这里一起发送。"));
   for (const draft of V.drafts) {
     const t = draft.template;
     const row = node("div", "draft-row");
@@ -454,11 +484,14 @@ function renderDrafts() {
     check.addEventListener("change", () => { check.checked ? V.selectedDrafts.add(draft.id) : V.selectedDrafts.delete(draft.id); renderDrafts(); });
     const info = node("div", "draft-info");
     info.appendChild(node("strong", "", t.name));
+    const state = draft.submissionRecord?.task.submissionUncertain ? "发送结果待核对" : draft.nativeState === "sent" ? "已发送，待取回结果" : draft.nativeState === "saved" ? "已存入豆包草稿" : draft.nativeState === "saving" ? "保存结果待核对" : "待存入豆包";
+    info.appendChild(node("small", "", `${state}${draft.instanceName ? ` · ${draft.instanceName}` : ""}`));
+    if (draft.nativeError) info.appendChild(node("small", "attachment-missing", draft.nativeError));
     info.appendChild(node("p", "", t.prompt));
     info.appendChild(node("small", "", `${draft.executionMode === "work" ? "工作任务 · 云电脑" : "对话 · 视频生成"} · ${modelLabel(t.model)} · ${t.duration} 秒 · ${t.attachments.length} 附件 · ${fmtTime(draft.createdAt)}`));
     row.append(check, info);
     const remove = trashButton(`移除草稿「${t.name}」`, () => {
-      openModal("移除草稿", node("div", "hint", `移除「${t.name}」？原模板和本地附件会保留。`), [
+      openModal("移除草稿记录", node("div", "hint", `移除「${t.name}」的软件记录？豆包网页中的草稿、原模板和本地附件会保留。`), [
         { label: "取消" }, { label: "移除", close: false, onClick: () => guard(async () => { await call("dm:draft:remove", draft.id); closeModal(); await refreshDrafts(); }) }
       ]);
     });
@@ -468,33 +501,32 @@ function renderDrafts() {
   }
 }
 
-async function addTemplateDraft() {
-  const button = q("#templateAddDraft");
-  if (button.disabled) return;
-  button.disabled = true;
+async function addTemplateDraft(multiple = false) {
+  if (V.draftBusy) return;
+  V.draftBusy = true; renderDrafts(); renderTemplateList();
   try {
     const mode = q("#draftMode").value;
     const template = await saveTemplate();
-    const draft = await call("dm:draft:create", template.id, mode);
-    V.selectedDrafts.add(draft.id);
-    await refreshDrafts();
-    say("已存入草稿箱，可继续填写下一条提示词");
-  } finally { button.disabled = false; }
+    const result = await call("dm:drafts:create-many", multiple ? [...V.selectedTemplates] : [template.id], mode, { instanceId: q("#draftAccount").value });
+    result.ids.forEach((id) => V.selectedDrafts.add(id));
+    say(`${result.count} 条已存入 ${result.instanceName} 网页左侧的「草稿」，可勾选一起发送`);
+  } finally { V.draftBusy = false; await refreshDrafts(); renderTemplateList(); }
 }
 
 async function submitSelectedDrafts() {
   if (V.draftBusy || !V.selectedDrafts.size) return;
   const ids = [...V.selectedDrafts];
   V.draftBusy = true;
-  renderDrafts();
+  renderDrafts(); renderTemplateList();
   let result;
   try {
-    result = await call("dm:drafts:submit", ids);
+    result = await call("dm:drafts:submit", ids, { instanceId: q("#draftAccount").value });
     ids.forEach((id) => V.selectedDrafts.delete(id));
-    say(`${result.count} 条草稿已加入任务队列，将由同一个豆包号依次发送`);
+    say(`${result.count} 条草稿已由 ${result.instanceName} 全部发送，正在取回视频结果`);
   } finally {
     V.draftBusy = false;
     await refreshDrafts();
+    renderTemplateList();
   }
   if (result) await setView("tasks");
 }
@@ -1239,6 +1271,7 @@ function bindEvents() {
   // 主进程事件 → 界面
   DM.onEvent((e) => {
     if (!e || e.type === "log") return;
+    if (e.type === "draft") { say(e.message); if (V.view === "templates") refreshDrafts(); }
     scheduleRefresh("badges", refreshBadges);
     if (V.view === "tasks") scheduleRefresh("tasks", refreshTasks, "tasks");
     if (V.view === "assets" && e.type === "task" && e.task?.status === "succeeded") scheduleRefresh("assets", refreshAssets, "assets");

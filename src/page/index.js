@@ -58,6 +58,7 @@ function buildPageScript(opts) {
   const enhancer = read("enhancer.js");
   const automation = read("automation.js");
   const generationOptions = read("generation-options.js");
+  const nativeDrafts = read("native-drafts.js");
   return `(function(){
 var CFG = ${JSON.stringify(payload)};
 try {
@@ -72,6 +73,9 @@ ${automation}
 } catch (e) {}
 try {
 ${generationOptions}
+} catch (e) {}
+try {
+${nativeDrafts}
 } catch (e) {}
 })();`;
 }

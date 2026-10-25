@@ -7,11 +7,23 @@ const templates = require("./task-templates");
 function list() { return store.get().taskDrafts; }
 
 function create(templateId, executionMode = "work") {
+  return createMany([templateId], executionMode)[0];
+}
+
+function createMany(templateIds, executionMode = "work") {
   if (!["video", "work"].includes(executionMode)) throw new Error("请选择对话视频生成或工作任务 · 云电脑");
-  const draft = { id: crypto.randomBytes(12).toString("hex"), template: templates.snapshot(templateId), executionMode, createdAt: new Date().toISOString() };
-  list().push(draft);
-  if (!store.save()) { list().pop(); throw new Error("草稿保存失败，请检查磁盘空间或目录权限"); }
-  return draft;
+  if (!Array.isArray(templateIds) || !templateIds.length) throw new Error("请先勾选任务模板");
+  const added = [...new Set(templateIds)].map((id) => ({ id: crypto.randomBytes(12).toString("hex"), template: templates.snapshot(id), executionMode, createdAt: new Date().toISOString() }));
+  const previous = list();
+  store.get().taskDrafts = [...previous, ...added];
+  if (!store.save()) { store.get().taskDrafts = previous; throw new Error("草稿保存失败，请检查磁盘空间或目录权限"); }
+  return added;
+}
+
+function updateMany(patches) {
+  const previous = list();
+  store.get().taskDrafts = previous.map((d) => patches[d.id] ? { ...d, ...patches[d.id] } : d);
+  if (!store.save()) { store.get().taskDrafts = previous; throw new Error("草稿状态保存失败，请检查磁盘空间或目录权限"); }
 }
 
 function remove(id) {
@@ -23,4 +35,4 @@ function remove(id) {
   return { removed: id };
 }
 
-module.exports = { list, create, remove };
+module.exports = { list, create, createMany, updateMany, remove };
