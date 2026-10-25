@@ -1,0 +1,22 @@
+{
+  "electron": "43.2.0",
+  "python": "3.13.9",
+  "pythonRelease": "20251014",
+  "ffmpegRelease": "b6.1.1",
+  "opencv": "4.12.0.88",
+  "numpy": "2.2.6",
+  "arm64": {
+    "electron": "ad4a0ae3c37ee05aa06c7e2ed0627608389790f0505a2b0d20319efbe33ffe28",
+    "python": "52721745b0fa3196e4d0381fa5c06dda1d54343b90d49d90c3bba52d1171bd98",
+    "ffmpeg": "8923876afa8db5585022d7860ec7e589af192f441c56793971276d450ed3bbfa",
+    "ffprobe": "d986a8ec7b030899fe66a8a288ed809a3543338705a3ce178cfb85869c5d80be",
+    "license": "cb48bf09a11f5fb576cddb0431c8f5ed0a60157a9ec942adffc13907cbe083f2"
+  },
+  "x64": {
+    "electron": "1349ff423539cfe2b3edf1b14111e618db234d9ba761cbe97ea549edcb2e7a98",
+    "python": "7c33b153a69c6255e6f2659cf39738f316b03969d6230d7bc47c73b7fde9a0d4",
+    "ffmpeg": "929b375c1182d956c51f7ac25e0b2b0411fb01f6f407aa15c9758efeb4242106",
+    "ffprobe": "d4da574d6e2e197bd259b47d69cf262df9e312af24ad960444f6d806d3d4c186",
+    "license": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
+  }
+}

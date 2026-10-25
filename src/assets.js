@@ -144,9 +144,7 @@ function resolveShotPrompt(shot, opts = {}) {
 /* ------------------------------------------------------------ 九宫格 */
 
 function ffmpegBin() {
-  const packed = path.join(P.res("tools"), "ffmpeg.exe");
-  try { if (fs.existsSync(packed)) return packed; } catch {}
-  return "ffmpeg";
+  return P.tool("ffmpeg");
 }
 
 function run(cmd, args, timeoutMs = 120000) {

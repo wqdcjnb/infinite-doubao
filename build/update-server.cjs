@@ -12,14 +12,14 @@ function createServer(root) {
     let name;
     try { name = decodeURIComponent(new URL(req.url, "http://localhost").pathname).slice(1); }
     catch { res.writeHead(400); return res.end(); }
-    if (name !== "latest.json" && !/^DoubaoWorkshop-\d+\.\d+\.\d+-Setup\.exe$/.test(name)) { res.writeHead(404); return res.end(); }
+    if (!/^latest(?:-darwin-(?:arm64|x64))?\.json$/.test(name) && !/^DoubaoWorkshop-\d+\.\d+\.\d+-(?:Setup\.exe|mac-(?:arm64|x64)\.dmg)$/.test(name)) { res.writeHead(404); return res.end(); }
     const file = path.join(root, name);
     fs.stat(file, (error, stat) => {
       if (error || !stat.isFile()) { res.writeHead(404); return res.end(); }
       res.writeHead(200, {
         "Content-Type": name.endsWith(".json") ? "application/json; charset=utf-8" : "application/octet-stream",
         "Content-Length": stat.size,
-        "Cache-Control": name === "latest.json" ? "no-store" : "public, max-age=31536000, immutable",
+        "Cache-Control": name.endsWith(".json") ? "no-store" : "public, max-age=31536000, immutable",
         "X-Content-Type-Options": "nosniff"
       });
       if (req.method === "HEAD") return res.end();

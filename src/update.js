@@ -32,9 +32,18 @@ function cmpVersion(a, b) {
   return 0;
 }
 
-function sourceUrl() {
+function manifestName(platform = process.platform, arch = process.arch) {
+  if (platform === "win32" && arch === "x64") return "latest.json";
+  if (platform === "darwin" && ["arm64", "x64"].includes(arch)) return `latest-darwin-${arch}.json`;
+  throw new Error("当前系统暂不支持应用内更新");
+}
+
+function sourceUrl(platform = process.platform, arch = process.arch) {
   const saved = String((require("./store").get().settings || {}).updateUrl || "").trim();
-  return process.env.DOLAMOD_UPDATE_URL || (saved && !saved.includes("example.invalid") ? saved : DEFAULT_MANIFEST);
+  const url = new URL(process.env.DOLAMOD_UPDATE_URL || (saved && !saved.includes("example.invalid") ? saved : DEFAULT_MANIFEST));
+  // 兼容既有 Windows 更新地址；自定义平台清单保持原样。
+  if (url.pathname.endsWith("/latest.json")) url.pathname = url.pathname.slice(0, -11) + manifestName(platform, arch);
+  return url.href;
 }
 
 function httpUrl(value, base) {
@@ -51,8 +60,10 @@ function errorMessage(error) {
 
 async function check(opts = {}) {
   const current = opts.currentVersion || require("../package.json").version;
-  const source = opts.url || sourceUrl();
+  const platform = opts.platform || process.platform, arch = opts.arch || process.arch;
+  const source = opts.url || sourceUrl(platform, arch);
   try {
+    manifestName(platform, arch);
     const res = await fetch(httpUrl(source), { signal: AbortSignal.timeout(opts.timeoutMs || 15000), headers: { "cache-control": "no-cache" } });
     if (!res.ok) throw new Error(`读取版本信息失败（HTTP ${res.status}）`);
     const chunks = [];
@@ -65,12 +76,13 @@ async function check(opts = {}) {
     const verified = verifyManifest(JSON.parse(Buffer.concat(chunks).toString("utf8")), opts.publicKey);
     if (!verified.ok) throw new Error(verified.reason);
     const m = verified.manifest;
-    if (!VERSION.test(m.version) || m.platform !== "win32" || m.arch !== "x64") throw new Error("版本信息不适用于 Windows x64");
+    if (!VERSION.test(m.version) || m.platform !== platform || m.arch !== arch) throw new Error(`版本信息不适用于 ${platform} ${arch}`);
     const file = m.file || {};
     if (!/^[a-f0-9]{64}$/i.test(file.sha256) || !Number.isSafeInteger(file.size) || file.size <= 0) throw new Error("安装包缺少有效的大小或校验信息");
     const fileUrl = httpUrl(file.url, source);
-    if (!new URL(fileUrl).pathname.toLowerCase().endsWith(".exe")) throw new Error("更新文件不是 Windows 安装包");
-    return { ok: true, current, source, latest: m.version, hasUpdate: cmpVersion(m.version, current) > 0,
+    const extension = platform === "darwin" ? ".dmg" : ".exe";
+    if (!new URL(fileUrl).pathname.toLowerCase().endsWith(extension)) throw new Error("更新文件格式不适用于当前系统");
+    return { ok: true, current, source, platform, arch, latest: m.version, hasUpdate: cmpVersion(m.version, current) > 0,
       notes: String(m.notes || ""), publishedAt: String(m.publishedAt || ""), file: { url: fileUrl, sha256: file.sha256.toLowerCase(), size: file.size } };
   } catch (error) { return { ok: false, current, source, reason: errorMessage(error) }; }
 }
@@ -85,11 +97,12 @@ async function verifyFile(file, expected) {
 // 下载和安装只使用主进程检查过的清单；渲染进程不能指定 URL、哈希或执行路径。
 function createUpdater(opts = {}) {
   const events = new EventEmitter();
+  const platform = opts.platform || process.platform, arch = opts.arch || process.arch;
   let state = { phase: "idle", current: opts.currentVersion || require("../package.json").version };
   let checked = null;
   let downloaded = null;
   let busy = false;
-  const status = () => ({ ...state, source: state.source || opts.url || sourceUrl() });
+  const status = () => ({ ...state, platform, source: state.source || opts.url || sourceUrl(platform, arch) });
   const set = (patch) => { state = { ...state, ...patch }; events.emit("change", status()); return status(); };
   const fail = (error) => set({ phase: "error", reason: errorMessage(error) });
 
@@ -99,7 +112,7 @@ function createUpdater(opts = {}) {
       if (busy) return status();
       busy = true;
       checked = null; downloaded = null;
-      state = { phase: "checking", current: state.current, source: opts.url || sourceUrl() };
+      state = { phase: "checking", current: state.current, source: opts.url || sourceUrl(platform, arch) };
       set({});
       try {
         const info = await check({ ...opts, url: state.source });
@@ -113,7 +126,8 @@ function createUpdater(opts = {}) {
       if (!checked?.hasUpdate) return fail(new Error("请先检查是否有新版本"));
       busy = true; downloaded = null;
       const dir = opts.downloadDir || P.dir("updates");
-      const target = path.join(dir, `DoubaoWorkshop-${checked.latest}-Setup.exe`);
+      const filename = platform === "darwin" ? `DoubaoWorkshop-${checked.latest}-mac-${arch}.dmg` : `DoubaoWorkshop-${checked.latest}-Setup.exe`;
+      const target = path.join(dir, filename);
       const part = target + ".part";
       set({ phase: "downloading", received: 0, total: checked.file.size, reason: "" });
       try {
@@ -157,4 +171,4 @@ function createUpdater(opts = {}) {
   };
 }
 
-module.exports = { DEFAULT_MANIFEST, check, createUpdater, verifyManifest, cmpVersion, verifyFile };
+module.exports = { DEFAULT_MANIFEST, manifestName, sourceUrl, check, createUpdater, verifyManifest, cmpVersion, verifyFile };

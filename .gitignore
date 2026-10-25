@@ -19,6 +19,9 @@
 !/build/update-server.cjs
 !/build/activate-update.cjs
 !/build/install-update-server.ps1
+!/build/mac.mjs
+!/build/mac-dependencies.json
+!/.github/
 
 !/_test/
 /_test/*

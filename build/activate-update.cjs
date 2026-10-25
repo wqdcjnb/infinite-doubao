@@ -5,19 +5,24 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
-async function activate(root, staging) {
-  const raw = JSON.parse(fs.readFileSync(path.join(staging, "latest.json"), "utf8"));
+async function activate(root, staging, manifestName = "latest.json") {
+  if (!/^latest(?:-darwin-(?:arm64|x64))?\.json$/.test(manifestName)) throw new Error("Invalid manifest filename");
+  const raw = JSON.parse(fs.readFileSync(path.join(staging, manifestName), "utf8"));
   const { sig, ...m } = raw;
   const key = fs.readFileSync(path.join(root, "update-public-key.pem"));
   if (!sig || !crypto.verify(null, Buffer.from(JSON.stringify(m)), key, Buffer.from(sig, "base64"))) throw new Error("Invalid update signature");
-  if (!/^\d+\.\d+\.\d+$/.test(m.version) || m.file.url !== `DoubaoWorkshop-${m.version}-Setup.exe`) throw new Error("Invalid release filename");
+  const mac = m.platform === "darwin" && ["arm64", "x64"].includes(m.arch);
+  if (!mac && !(m.platform === "win32" && m.arch === "x64")) throw new Error("Invalid release platform");
+  const expectedManifest = mac ? `latest-darwin-${m.arch}.json` : "latest.json";
+  const expectedFile = mac ? `DoubaoWorkshop-${m.version}-mac-${m.arch}.dmg` : `DoubaoWorkshop-${m.version}-Setup.exe`;
+  if (manifestName !== expectedManifest || !/^\d+\.\d+\.\d+$/.test(m.version) || m.file?.url !== expectedFile) throw new Error("Invalid release filename");
   const file = path.join(staging, m.file.url);
   if (fs.statSync(file).size !== m.file.size) throw new Error("Uploaded file size mismatch");
   const hash = crypto.createHash("sha256");
   for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
   if (hash.digest("hex") !== m.file.sha256) throw new Error("Uploaded file checksum mismatch");
   const publicDir = path.join(root, "public");
-  const latest = path.join(publicDir, "latest.json");
+  const latest = path.join(publicDir, manifestName);
   const target = path.join(publicDir, m.file.url);
   fs.mkdirSync(publicDir, { recursive: true });
   if (fs.existsSync(latest)) {
@@ -31,10 +36,10 @@ async function activate(root, staging) {
     for await (const chunk of fs.createReadStream(target)) hash.update(chunk);
     if (hash.digest("hex") !== m.file.sha256) throw new Error("An installer with this version already exists");
   } else fs.renameSync(file, target);
-  fs.copyFileSync(path.join(staging, "latest.json"), latest + ".next");
+  fs.copyFileSync(path.join(staging, manifestName), latest + ".next");
   fs.renameSync(latest + ".next", latest);
   console.log(`Published ${m.version}, ${m.file.size} bytes, SHA256 ${m.file.sha256}`);
 }
 
-if (require.main === module) activate(path.resolve(process.argv[2]), path.resolve(process.argv[3])).catch((error) => { console.error(error.message); process.exitCode = 1; });
+if (require.main === module) activate(path.resolve(process.argv[2]), path.resolve(process.argv[3]), process.argv[4]).catch((error) => { console.error(error.message); process.exitCode = 1; });
 module.exports = { activate };

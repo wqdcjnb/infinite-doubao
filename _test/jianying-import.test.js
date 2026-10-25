@@ -34,7 +34,7 @@ function fixture(options = {}) {
   } });
   const context = vm.createContext({
     module: { exports: {} }, Date: Clock,
-    process: { env: { LOCALAPPDATA: options.local === undefined ? local : options.local } },
+    process: { platform: "win32", env: { LOCALAPPDATA: options.local === undefined ? local : options.local } },
     setTimeout: (fn, delay) => { const timer = { fn, delay, cancelled: false }; timers.push(timer); return timer; },
     clearTimeout: (timer) => { if (timer) timer.cancelled = true; },
     require(name) {

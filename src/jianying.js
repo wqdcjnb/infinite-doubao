@@ -28,9 +28,7 @@ const RATIOS = {
 };
 
 function ffprobeBin() {
-  const packed = path.join(P.res("tools"), "ffprobe.exe");
-  try { if (fs.existsSync(packed)) return packed; } catch {}
-  return "ffprobe";
+  return P.tool("ffprobe");
 }
 
 function probeDurationMs(file) {

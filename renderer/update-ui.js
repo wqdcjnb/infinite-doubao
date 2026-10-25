@@ -9,7 +9,7 @@
     <p id="updateVersion" class="hint"></p><p id="updateStatus" role="status" aria-live="polite"></p>
     <progress id="updateProgress" max="100" value="0" hidden></progress>
     <pre id="updateNotes" hidden></pre><p id="updateSource" class="hint"></p>
-    <p class="hint">安装时将关闭并重启应用，保留账号、任务、素材和设置。请先完成或停止正在执行的任务。</p>
+    <p id="updateInstallHint" class="hint"></p>
     <div class="update-actions"><button id="updateClose" class="ghost">稍后</button>
     <button id="updateRecheck" class="ghost">重新检查</button><button id="updateAction" class="primary">检查更新</button></div>`;
   document.body.appendChild(dialog);
@@ -20,6 +20,10 @@
 
   function render(next) {
     state = next;
+    const mac = next.platform === "darwin";
+    q("updateInstallHint").textContent = mac
+      ? "打开安装镜像后应用将退出。将豆包工坊拖入“应用程序”并替换旧版，再重新打开；账号、任务、素材和设置保留。请先完成或停止正在执行的任务。"
+      : "安装时将关闭并重启应用，保留账号、任务、素材和设置。请先完成或停止正在执行的任务。";
     const percent = next.total ? Math.min(100, Math.floor((next.received || 0) * 100 / next.total)) : 0;
     const titles = { idle: "点击检查最新版本", checking: "正在连接更新服务器…", available: `发现新版本 v${next.latest}`,
       current: "已是最新版本", downloading: `正在下载 ${percent}% · ${((next.received || 0) / 1048576).toFixed(1)} / ${(next.total / 1048576).toFixed(1)} MB`,
@@ -36,7 +40,7 @@
     q("updateAction").disabled = busy || requesting;
     q("updateRecheck").disabled = busy || requesting;
     q("updateRecheck").hidden = !["available", "ready"].includes(next.phase);
-    q("updateAction").textContent = next.phase === "available" ? "下载更新" : next.phase === "ready" ? "安装并重启" : busy ? "请稍候…" : "检查更新";
+    q("updateAction").textContent = next.phase === "available" ? "下载更新" : next.phase === "ready" ? (mac ? "打开安装镜像" : "安装并重启") : busy ? "请稍候…" : "检查更新";
     topButton.textContent = next.phase === "available" ? "发现新版本" : next.phase === "downloading" ? `下载中 ${percent}%` : next.phase === "ready" ? "安装更新" : "检查更新";
   }
 

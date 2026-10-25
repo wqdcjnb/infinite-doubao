@@ -22,7 +22,7 @@ function read(file) {
   const candidates = [
     path.join(PAGE_DIR, file),
     path.join(PAGE_DIR, "..", file),
-    path.join(path.dirname(process.execPath), "resources", file)
+    path.join(process.resourcesPath || path.join(path.dirname(process.execPath), "resources"), file)
   ];
   for (const p of candidates) {
     try { return fs.readFileSync(p, "utf8"); } catch {}

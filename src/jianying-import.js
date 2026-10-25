@@ -13,6 +13,16 @@ function isFile(file) {
 }
 
 async function findExecutable() {
+  if (process.platform === "darwin") {
+    const home = require("node:os").homedir();
+    for (const base of ["/Applications", path.join(home, "Applications")]) {
+      for (const name of ["JianyingPro.app", "剪映专业版.app", "CapCut.app"]) {
+        const bundle = path.join(base, name);
+        if (isFile(path.join(bundle, "Contents", "Info.plist"))) return bundle;
+      }
+    }
+    throw new Error("未找到剪映专业版，请将剪映或 CapCut 安装到“应用程序”后重试。");
+  }
   const local = process.env.LOCALAPPDATA;
   const standard = local && path.join(local, "JianyingPro", "Apps", "JianyingPro.exe");
   if (standard && isFile(standard)) return standard;
@@ -63,7 +73,8 @@ function launch(executable, file) {
     }
     // This is Jianying's installed “Edit with Jianying” single-file entry point.
     // The native app inserts into an open project, or creates a project from its home screen.
-    const child = spawn(executable, [`-open-file=${file}`], {
+    const mac = process.platform === "darwin";
+    const child = spawn(mac ? "/usr/bin/open" : executable, mac ? ["-a", executable, file] : [`-open-file=${file}`], {
       shell: false, detached: true, stdio: "ignore", windowsHide: false
     });
     child.once("error", finish);
@@ -79,7 +90,7 @@ function launch(executable, file) {
 
 async function importTask(opts = {}) {
   const file = taskFile(opts);
-  const key = path.resolve(file).toLowerCase();
+  const key = process.platform === "win32" ? path.resolve(file).toLowerCase() : path.resolve(file);
   for (const [item, sent] of recentlySent) if (Date.now() - sent.at >= 5000) recentlySent.delete(item);
   if (recentlySent.has(key)) return recentlySent.get(key).result;
   if (pending.has(key)) return pending.get(key);

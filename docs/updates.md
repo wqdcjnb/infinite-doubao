@@ -4,13 +4,15 @@
 
 生成或排队任务、界面遮脸任务尚未结束时不允许安装。安装前保存模板修改和本地数据，等待旧进程退出，然后沿用原安装目录覆盖更新并重新打开应用。安装器失败会显示错误；下载失败可以重新检查并重试。账号、会话、草稿、任务、素材和用户设置继续保存在原用户目录。
 
+macOS 使用同一服务器的 `latest-darwin-arm64.json` 或 `latest-darwin-x64.json`。清单必须匹配当前架构并带有效签名，下载 DMG 后校验大小与 SHA-256。点击「打开安装镜像」后应用退出，由用户拖拽替换应用，再重新打开；不会执行 Windows 安装参数。
+
 ## 已部署服务器
 
 - 主机：`10.1.11.88`，TCP 端口 `17824`，仅监听该地址。
 - 程序及发布根目录：`C:\ProgramData\DoubaoWorkshopUpdates`。
 - Windows 计划任务：`DoubaoWorkshopUpdates`，SYSTEM 身份开机启动，异常退出后重试。
 - 防火墙规则同名，仅允许 LocalSubnet 访问该地址的更新端口。
-- HTTP 服务只允许 GET/HEAD 读取 `public/latest.json` 和指定格式的版本安装包，不提供上传或目录浏览。
+- HTTP 服务只允许 GET/HEAD 读取三个平台清单和指定格式的 EXE/DMG，不提供上传或目录浏览。
 - 上传通过现有 SSH 别名 `codex-10-1-11-88`，不需要客户端登录或配置 Token。
 
 服务器脚本位于 `build/update-server.cjs`、`build/activate-update.cjs` 和 `build/install-update-server.ps1`。需要重新部署时，将这三个文件以及 `src/update-public-key.pem` 复制到服务器根目录，在服务器的管理员 PowerShell 中执行：
@@ -36,6 +38,15 @@ npm run publish:lan -- --installer "dist\豆包工坊 v1.3.1 安装包.exe" --no
 仅生成发布文件而不上传，可运行 `node build/publish-update.mjs` 并提供相同参数（不加 `--upload`）。默认产物目录为 `build/lan-update-release/<版本>`。随后将已验收源码推到 GitHub，并把同一个安装包、`SHA256SUMS.txt` 和 `latest.json` 放到该版本 Release。GitHub 源码推送不会自动构建安装包或发布客户端更新。
 
 ## 签名与备份
+
+Mac 安装包使用同一发布密钥生成更新清单，分别运行（路径以实际构建产物为准）：
+
+```powershell
+node build/publish-update.mjs --platform darwin --arch arm64 --installer "dist/mac-arm64/DoubaoWorkshop-1.4.0-mac-arm64.dmg" --notes-file "build/release-notes.txt" --upload
+node build/publish-update.mjs --platform darwin --arch x64 --installer "dist/mac-x64/DoubaoWorkshop-1.4.0-mac-x64.dmg" --notes-file "build/release-notes.txt" --upload
+```
+
+三个平台清单独立更新，旧 Windows 客户端仍读取 `latest.json`。部署新版服务端脚本后再发布首个 Mac 包。更新清单签名用于校验发布来源，不等同于 Apple 的 Developer ID 签名或公证。
 
 发布私钥只在发布者本机保存，不能加入仓库、客户端、HTTP 发布目录或 GitHub 附件。`src/update-public-key.pem` 是客户端内置公钥，可以公开。发布脚本会检查私钥是否与客户端公钥匹配。
 

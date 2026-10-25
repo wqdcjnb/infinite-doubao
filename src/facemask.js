@@ -11,33 +11,17 @@ const { spawn, execFile } = require("node:child_process");
 const execFileAsync = require("node:util").promisify(execFile);
 const path = require("node:path");
 const fs = require("node:fs");
+const P = require("./paths");
 
-const PY_DIR = (() => {
-  const packaged = path.join(path.dirname(process.execPath), "resources", "py");
-  try { if (fs.existsSync(path.join(packaged, "face_mask.py"))) return packaged; } catch {}
-  return path.join(__dirname, "..", "py");
-})();
+const PY_DIR = P.pyDir();
 const SCRIPT = path.join(PY_DIR, "face_mask.py");
 const MODEL = path.join(PY_DIR, "face_detection_yunet_2023mar.onnx");
 
 let cachedPython = null;
 let pendingProbe = null;
 
-function exeDir() {
-  return path.join(path.dirname(process.execPath), "resources");
-}
-
 function candidateFfmpeg() {
-  const list = [
-    path.join(exeDir(), "tools", "ffmpeg.exe"),
-    path.join(__dirname, "..", "tools", "ffmpeg.exe"),
-    "ffmpeg"
-  ];
-  for (const p of list) {
-    if (p === "ffmpeg") continue;
-    try { if (fs.existsSync(p)) return p; } catch {}
-  }
-  return "ffmpeg";
+  return P.tool("ffmpeg");
 }
 
 async function tryPython(cmd, args) {
@@ -58,10 +42,11 @@ function findPython() {
 async function discoverPython() {
   const env = process.env.DOLAMOD_PYTHON;
   const cands = [];
-  const bundled = path.join(exeDir(), "python", "python.exe");
-  try { if (fs.existsSync(bundled)) cands.push({ cmd: bundled, args: [] }); } catch {}
+  const bundled = process.platform === "win32" ? P.res("python", "python.exe") : P.res("python", "bin", "python3");
+  try { if (fs.existsSync(bundled)) cands.push({ cmd: bundled, args: ["-I"] }); } catch {}
   if (env) cands.push({ cmd: env, args: [] });
-  cands.push({ cmd: "python", args: [] }, { cmd: "python3", args: [] }, { cmd: "py", args: ["-3"] });
+  for (const cmd of process.platform === "darwin" ? ["python3", "python"] : ["python", "python3"]) cands.push({ cmd, args: [] });
+  if (process.platform === "win32") cands.push({ cmd: "py", args: ["-3"] });
   for (const c of cands) {
     const hit = await tryPython(c.cmd, c.args);
     if (hit) return hit;
@@ -116,6 +101,7 @@ async function runFaceMask(opts) {
       "--pad", String(Math.max(0, Math.min(0.8, Number(opts.padRatio) || 0.18))),
       "--model", MODEL,
       "--ffmpeg", candidateFfmpeg(),
+      "--ffprobe", P.tool("ffprobe"),
       "--json-progress"
     ];
     if (opts.keepOriginal === false) args.push("--no-keep");

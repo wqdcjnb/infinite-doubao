@@ -31,7 +31,7 @@ async function fixture(t) {
     if (f.delay) setTimeout(send, f.delay); else send();
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  f.opts = { url: `http://127.0.0.1:${server.address().port}/latest.json`, publicKey: keys.publicKey, currentVersion: "1.2.3", downloadDir: path.join(dir, "updates") };
+  f.opts = { platform: "win32", arch: "x64", url: `http://127.0.0.1:${server.address().port}/latest.json`, publicKey: keys.publicKey, currentVersion: "1.2.3", downloadDir: path.join(dir, "updates") };
   fs.writeFileSync(path.join(dir, "update-public-key.pem"), keys.publicKey.export({ type: "spki", format: "pem" }));
   t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); fs.rmSync(dir, { recursive: true, force: true }); });
   return f;
@@ -151,4 +151,45 @@ test("发布先校验上传文件再更新清单，拒绝回退和同版本替�
   const changed = Buffer.from("different installer");
   const replaced = f.sign({ file: { ...f.manifest.file, size: changed.length, sha256: crypto.createHash("sha256").update(changed).digest("hex") } });
   write(replaced, changed); await assert.rejects(activate(f.dir, stage), /replacement/);
+});
+
+test("Mac 两种架构只接收对应签名 DMG，并下载后再次校验", async (t) => {
+  const f = await fixture(t);
+  for (const arch of ["arm64", "x64"]) {
+    const name = `DoubaoWorkshop-1.3.0-mac-${arch}.dmg`;
+    f.manifest = f.sign({ platform: "darwin", arch, file: { ...f.sign().file, url: name } });
+    const opts = { ...f.opts, platform: "darwin", arch };
+    assert.equal((await check(opts)).ok, true);
+    assert.equal((await check({ ...opts, arch: arch === "arm64" ? "x64" : "arm64" })).ok, false);
+    assert.equal((await check(f.opts)).ok, false);
+    const updater = createUpdater(opts);
+    await updater.check();
+    assert.equal((await updater.download()).phase, "ready");
+    await updater.install(async (file) => assert.equal(path.basename(file), name));
+    f.manifest = f.sign({ platform: "darwin", arch });
+    assert.equal((await check(opts)).ok, false, "Mac must not execute an exe");
+  }
+});
+
+test("三个平台清单可独立发布且更新服务不缓存清单", async (t) => {
+  const f = await fixture(t), stage = path.join(f.dir, "incoming"); fs.mkdirSync(stage);
+  for (const arch of ["arm64", "x64"]) {
+    const manifestName = `latest-darwin-${arch}.json`;
+    const m = f.sign({ platform: "darwin", arch, file: { ...f.sign().file, url: `DoubaoWorkshop-1.3.0-mac-${arch}.dmg` } });
+    fs.writeFileSync(path.join(stage, manifestName), JSON.stringify(m));
+    fs.writeFileSync(path.join(stage, m.file.url), f.body);
+    await activate(f.dir, stage, manifestName);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir, "public", manifestName))).arch, arch);
+  }
+  await assert.rejects(activate(f.dir, stage, "../latest.json"), /Invalid manifest/);
+  const server = createServer(path.join(f.dir, "public"));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  for (const arch of ["arm64", "x64"]) {
+    const res = await fetch(`${base}/latest-darwin-${arch}.json`);
+    assert.equal(res.status, 200); assert.equal(res.headers.get("cache-control"), "no-store"); await res.text();
+    assert.equal((await fetch(`${base}/DoubaoWorkshop-1.3.0-mac-${arch}.dmg`, { method: "HEAD" })).status, 200);
+  }
+  assert.equal((await fetch(`${base}/latest-darwin-ia32.json`)).status, 404);
 });

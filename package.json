@@ -1,7 +1,7 @@
 {
   "name": "infinite-doubao",
   "productName": "豆包工坊",
-  "version": "1.3.6",
+  "version": "1.4.0",
   "description": "豆包工坊 - 多账号环境管理 / 独立会话 / 指纹伪装 / 代理IP / 素材遮脸 / 无水印导出",
   "main": "src/main.js",
   "author": "yg",
@@ -10,6 +10,8 @@
   "scripts": {
     "start": "electron .",
     "pack": "node build/build.mjs",
+    "pack:mac": "node build/mac.mjs",
+    "test": "node _test/run-tests.cjs",
     "installer": "node build/installer.mjs",
     "publish:lan": "node build/publish-update.mjs --upload"
   }

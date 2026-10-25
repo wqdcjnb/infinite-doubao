@@ -728,6 +728,12 @@ function registerIpc() {
     return updater.install(async (installer) => {
       store.save();
       interceptor.saveResources();
+      if (process.platform === "darwin") {
+        const error = await shell.openPath(installer);
+        if (error) throw new Error(error);
+        setTimeout(() => app.quit(), 200);
+        return;
+      }
       const { spawn } = require("node:child_process");
       const child = spawn(installer, ["/UPDATE", `/D=${path.dirname(process.execPath)}`, `/WAITPID=${process.pid}`], { detached: true, stdio: "ignore" });
       await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
@@ -822,7 +828,11 @@ if (!gotLock) {
     // 旧版 accounts 迁移到 instances 已在 store.migrate 里做，这里补一次保存
     store.save();
 
-    Menu.setApplicationMenu(null);
+    Menu.setApplicationMenu(process.platform === "darwin" ? Menu.buildFromTemplate([
+      { label: brand.name, submenu: [{ role: "about" }, { type: "separator" }, { role: "hide" }, { role: "hideOthers" }, { role: "unhide" }, { type: "separator" }, { role: "quit" }] },
+      { label: "编辑", submenu: [{ role: "undo" }, { role: "redo" }, { type: "separator" }, { role: "cut" }, { role: "copy" }, { role: "paste" }, { role: "selectAll" }] },
+      { label: "窗口", submenu: [{ role: "minimize" }, { role: "zoom" }, { role: "front" }, { role: "close" }] }
+    ]) : null);
     registerIpc();
     startupReady = true;
     createWindow();
@@ -850,6 +860,9 @@ if (!gotLock) {
 
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();
+  });
+  app.on("activate", () => {
+    if (startupReady && !appQuitting) showMainWindow();
   });
 }
 

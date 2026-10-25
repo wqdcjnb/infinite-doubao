@@ -1,15 +1,23 @@
 # 豆包工坊
 
-Windows 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.3.6**。
+Windows / macOS 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.4.0**。
 
 ## 下载与安装
 
-前往 [Releases](https://github.com/wqdcjnb/infinite-doubao/releases/latest) 下载 Windows x64 安装包 `DoubaoWorkshop-1.3.6-Setup.exe`，双击安装后通过桌面「豆包工坊」快捷方式启动。
+前往 [Releases](https://github.com/wqdcjnb/infinite-doubao/releases/latest) 下载对应安装包：
+
+| 系统 | 安装包 | 安装方式 |
+| --- | --- | --- |
+| Windows x64 | `DoubaoWorkshop-1.4.0-Setup.exe` | 双击安装，通过桌面「豆包工坊」启动 |
+| macOS 13+，Apple 芯片 | `DoubaoWorkshop-1.4.0-mac-arm64.dmg` | 打开镜像，将应用拖入 Applications |
+| macOS 13+，Intel | `DoubaoWorkshop-1.4.0-mac-x64.dmg` | 打开镜像，将应用拖入 Applications |
+
+Mac 包内置 Python、OpenCV、FFmpeg 和 ffprobe，无需另装开发环境。首版使用临时签名，**尚未经过 Apple Developer ID 签名和公证**，系统可能提示无法验证开发者。项目不修改系统安全设置。Mac 更新时退出旧版，拖入并替换应用，再重新打开；用户数据位于 `~/Library/Application Support/无限豆包`，替换应用不会删除该目录。此内部目录名用于兼容数据。
 
 发行附件中的 `SHA256SUMS.txt` 用于校验下载文件。在 PowerShell 中运行：
 
 ```powershell
-Get-FileHash .\DoubaoWorkshop-1.3.6-Setup.exe -Algorithm SHA256
+Get-FileHash .\DoubaoWorkshop-1.4.0-Setup.exe -Algorithm SHA256
 ```
 
 新安装默认使用 `%LOCALAPPDATA%\Programs\豆包工坊`。升级已有版本会沿用原安装位置和用户数据目录，保留账号、会话、任务、素材和设置。
@@ -72,6 +80,14 @@ node build/installer.mjs --app "dist\豆包工坊" --out dist --name "豆包工�
 ```
 
 Python 默认从 PATH 查找，也可通过环境变量 `DOLAMOD_PYTHON` 指定。构建会将 Python、OpenCV、NumPy 和模型打包进应用。现有脚本保留开发机的运行时及 FFmpeg 回退路径，在其他机器上应显式提供运行时并准备 `tools/ffmpeg.exe`。
+
+## 构建 macOS 安装包
+
+在相应架构的 Mac 上运行 `npm run pack:mac`。脚本下载并校验固定版本的 Electron、可迁移 Python 和 FFmpeg，安装精确版本的 OpenCV/NumPy，生成 `dist/mac-arm64/` 或 `dist/mac-x64/` 下的 DMG 和 SHA-256 文件。构建需要网络，安装后离线视频处理不依赖系统工具。
+
+GitHub Actions 的 `macOS packages` 工作流分别使用 Apple 芯片和 Intel macOS 环境运行单元测试、构建、安装镜像、启动主窗口和视频遮脸验证。它只产出待验收附件，不自动发布更新。开发者可在 Mac 本机钥匙串准备 Developer ID，并设置 `DOLAMOD_MAC_SIGN_IDENTITY` 和可选的 `DOLAMOD_MAC_NOTARY_PROFILE` 启用正式签名及公证；凭据不入库。
+
+Mac 剪映入口使用系统的文件打开方式寻找“应用程序”中的剪映/CapCut。不同剪映版本是否将文件插入当前工程，仍取决于该软件的文件关联支持。
 
 ## 数据与凭据
 

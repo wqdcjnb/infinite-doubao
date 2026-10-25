@@ -33,9 +33,10 @@ function fixture({ missingPython = false, failFirst = false, missingFfmpeg = fal
   };
   const context = {
     module: { exports: {} },
-    process: { execPath: "C:/fixture/app.exe", env: {} },
+    process: { platform: "win32", execPath: "C:/fixture/app.exe", env: {} },
     __dirname: path.resolve(__dirname, "../src"),
     require(id) {
+      if (id === "./paths") return { pyDir: () => "C:/fixture/resources/py", res: (...parts) => path.join("C:/fixture/resources", ...parts), tool: name => name };
       if (id === "node:child_process") return childProcess;
       if (id === "node:fs") return { existsSync: file => /face_mask\.py$|\.onnx$/.test(file) };
       return require(id);

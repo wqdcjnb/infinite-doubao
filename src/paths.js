@@ -78,6 +78,11 @@ function toolDir() {
   return res("tools");
 }
 
+function tool(name, platform = process.platform) {
+  const bundled = res("tools", name + (platform === "win32" ? ".exe" : ""));
+  return fs.existsSync(bundled) ? bundled : name;
+}
+
 /** 成片目录：设置里可覆盖，默认放到系统下载目录下的专用文件夹 */
 function downloadsRoot() {
   try {
@@ -123,4 +128,4 @@ function all(customDownloadDir) {
   };
 }
 
-module.exports = { init, ensure, home, dir, res, resources, pyDir, toolDir, downloadDir, legacyDownloadDir, paths, all };
+module.exports = { init, ensure, home, dir, res, resources, pyDir, toolDir, tool, downloadDir, legacyDownloadDir, paths, all };

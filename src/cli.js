@@ -28,7 +28,8 @@ function home() {
   if (env) return env;
   // 豆包工坊沿用旧数据目录「无限豆包」，改名不改变账号会话和接口 token；
   // 老版本/开发态可能是 infinite-doubao，两个都探一遍，取真正有 token 的那个。
-  const appData = process.env.APPDATA || path.join(os.homedir(), ".config");
+  const appData = process.platform === "darwin" ? path.join(os.homedir(), "Library", "Application Support")
+    : process.env.APPDATA || path.join(os.homedir(), ".config");
   const candidates = [
     path.join(appData, "无限豆包"),
     path.join(appData, "infinite-doubao"),
