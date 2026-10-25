@@ -41,7 +41,7 @@ namespace DolaModSetup
         internal const string AppName = "豆包工坊";
         internal const string AppExeName = "豆包工坊.exe";
         internal const string LegacyName = "无限豆包";
-        internal const string AppVersion = "1.5.0";
+        internal const string AppVersion = "1.5.1";
         internal const string Publisher = "豆包工坊";
         internal const string RegKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\InfiniteDoubao";
         internal const string Magic = "DMINST01";
