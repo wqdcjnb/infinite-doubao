@@ -76,7 +76,17 @@ class Driver {
     const result = await this.evaluate(`(() => { const enhancer = window[${JSON.stringify(this.key + "_enh")}]; if (!enhancer || !enhancer.setOptions) throw new Error("页面参数未就绪，请刷新账号页面"); return enhancer.setOptions(${JSON.stringify(options)}); })()`);
     return result;
   }
-  async send(options) { return options ? this.call("send", options) : this.call("send"); }
+  async send(options, check = () => {}) {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      check();
+      const result = options ? await this.call("send", options) : await this.call("send");
+      if (!options?.nativeOnly || result?.ok || !/发送按钮/.test(result?.reason || "") || Date.now() >= deadline) return result;
+      // React mounts the custom confirmation send button after the input event.
+      // Retry only explicit pre-click failures, never a lost click response.
+      await sleep(100);
+    }
+  }
   async beginTask(taskId) { return this.call("beginTask", taskId); }
   async confirmGeneration() { return this.call("confirmGeneration"); }
   async readProgress() { return this.call("readProgress"); }

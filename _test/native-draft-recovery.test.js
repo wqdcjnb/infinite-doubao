@@ -39,6 +39,21 @@ const binding = (id, title, prompt) => ({ id, title, prompt, executionMode: "wor
 const numberA = "DB-111111111111111111111111", numberB = "DB-222222222222222222222222";
 const numbered = (number, body = "相同视频提示词") => `【草稿编号：${number}】\n\n${body}`;
 
+test("回执按当前对话的完整用户提示词核对，侧栏迟到或残留草稿不影响，超过20秒仍等待", async () => {
+  let now = 0, content = "错误任务";
+  const prompt = numbered(numberA);
+  const node = { innerText: "", closest: () => ({ getAttribute: key => key === "data-message-role" ? "user" : null }) };
+  const document = { querySelectorAll: sel => sel === '[data-message-id]' ? [{ ...node, innerText: content }] : [], getElementById: () => null };
+  const location = { pathname: '/chat/late-receipt', href: 'https://www.doubao.com/chat/late-receipt' };
+  const context = vm.createContext({ window: { auto: {} }, document, location, CFG: { autoKey: 'auto' }, Date: { now: () => now }, setTimeout: fn => { now += 100; if (now >= 35000) content = prompt; fn(); } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/page/native-drafts.js'), 'utf8'), context);
+  const result = await context.window.auto.waitNativeDraftAccepted({ id: 'a', prompt, conversationIds: [] });
+  assert.equal(result.ok, true, result.reason); assert.equal(result.conversationUrl, location.href);
+  assert.ok(now >= 35000);
+  content = numbered(numberB);
+  assert.equal(context.window.auto.readNativeDraftReceipt({ prompt }).ok, false);
+});
+
 test("19 条草稿只展示最近 5 条时，展开或滚动后仍逐条按完整编号找到全部", async () => {
   const items = Array.from({ length: 19 }, (_, i) => {
     const number = "DB-" + i.toString(16).toUpperCase().padStart(24, "0");
