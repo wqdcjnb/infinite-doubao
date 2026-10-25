@@ -106,6 +106,16 @@ test("只发送勾选草稿，重载保持同一账号", async () => {
   assert.deepEqual(native, [ids[0]]); assert.equal(sends()[0].instanceId, first.id);
   assert.deepEqual(drafts.list().map((d) => d.id), [ids[0]]);
 });
+
+test("未选草稿失效不阻塞所选任务，独立页面只恢复自己的草稿", async () => {
+  account("first"); const ids = [...batch(), drafts.create(template("C").id).id]; await queue.saveDrafts(ids);
+  calls.length = 0;
+  hook = (method, options) => method === "restoreNativeDrafts" && options.some(b => b.id === ids[2]) ? { ok: false, reason: "未选草稿已被移除" } : null;
+  assert.equal((await queue.submitDrafts(ids.slice(0, 2))).count, 2);
+  const restored = calls.filter(c => c.method === "restoreNativeDrafts").map(c => c.options);
+  assert.deepEqual(restored.map(bs => bs.length), [2, 1, 1]);
+  assert.ok(restored.flat().every(b => b.prompt && b.executionMode === "work"));
+});
 test("中途接收超时保留记录，已接收任务仍取回，未确认点击不重发", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   hook = (method, options) => method === "waitNativeDraftAccepted" && options.id === ids[1] ? { ok: false, reason: "接收超时" } : null;

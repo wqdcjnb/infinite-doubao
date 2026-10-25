@@ -44,9 +44,9 @@ const server = http.createServer((req,res)=>{
     await call('dm:template:attach',items[1].id,[path.join(__dirname,'clip.mp4')]);
     for (let i=0;i<3;i++) await c.eval(`document.querySelectorAll('.template-select-row input')[${i}].click()`);
     await click('#templatesAddDrafts');
-    await wait(()=>c.eval("document.querySelector('#templateDraftStatus').checkVisibility()&&!document.querySelector('#templateAddDraft').disabled"));
+    await wait(()=>c.eval("document.querySelector('.draft-success-toast')?.checkVisibility()&&!document.querySelector('#templateAddDraft').disabled"));
     assert.equal(await c.eval("document.querySelector('#view-templates').classList.contains('active')"),true,'batch collection stays on the template page');
-    assert.match(await c.eval("document.querySelector('#templateDraftStatus').textContent"),/3 条任务已加入草稿箱/);
+    assert.match(await c.eval("document.querySelector('.draft-success-toast').textContent"),/3 条任务已加入草稿箱/);
     await click('[data-view="drafts"]');
     await wait(()=>c.eval("document.querySelectorAll('.draft-row').length===3"));
     assert.equal((await call('dm:drafts')).length,3);
@@ -60,13 +60,19 @@ const server = http.createServer((req,res)=>{
     await wait(async()=>{const ds=await call('dm:drafts');return ds.length===3&&ds.every(d=>d.nativeState==='saved');});
     await wait(()=>c.eval("!document.querySelector('#templateAddDraft').disabled"));
     assert.equal(sent.length,0);assert.equal((await call('dm:tasks')).length,0);
+    assert.equal(await c.eval("document.querySelector('.draft-success-toast').checkVisibility()"),true);
+    assert.match(await c.eval("document.querySelector('.draft-success-toast').textContent"),/保存成功：3 条任务/);
+    fs.writeFileSync(path.join(home,'draft-save-success.png'),Buffer.from((await c.send('Page.captureScreenshot')).data,'base64'));
     assert.equal(await page("document.querySelector('aside').children.length"),3);
     const ds=await call('dm:drafts');assert.equal(new Set(ds.map(d=>d.instanceId)).size,1);
     assert.ok(ds.every(d=>d.instanceId==='batch-fixture-2'),'explicitly selected account owns the entire batch');
     assert.equal(new Set(ds.map(d=>d.nativeBinding.title)).size,1,'duplicate titles remain independent');
     console.log('PASS: dedicated drafts page between submit and queue; collect first, choose account, save three native cloud drafts together; no sends');
+    // Another tab adds an unrelated draft and the same-title rows change order.
+    // The old whole-list/index matching rejects this or picks the wrong row.
+    await page("(()=>{const s=JSON.parse(localStorage.getItem('fixture'));s.drafts.reverse();s.drafts.unshift({id:'unrelated',prompt:'手动添加的其他草稿',mode:'云电脑',refs:[]});localStorage.setItem('fixture',JSON.stringify(s));})()");
     await c.eval("document.querySelector('webview').reload()");
-    await wait(()=>page("document.readyState==='complete'&&document.querySelector('aside').children.length===3"));
+    await wait(()=>page("document.readyState==='complete'&&document.querySelector('aside').children.length===4"));
     await click('[data-view="drafts"]');await wait(()=>c.eval("document.querySelectorAll('.draft-row').length===3"));
     await fill('#draftAccount','batch-fixture-1');
     assert.equal(await c.eval("document.querySelector('#draftSubmit').disabled"),true,'wrong account cannot send bound drafts');
@@ -89,18 +95,19 @@ const server = http.createServer((req,res)=>{
     assert.equal(new Set(tasks.map(t=>t.submittedAt)).size,1);
     assert.equal((await getJSON('/json/list')).filter(p=>p.url.startsWith('http://127.0.0.1:18854')).length,1,'temporary submission pages are closed');
     await c.eval("document.querySelector('webview').reload()");
-    await wait(()=>page("document.readyState==='complete'&&document.querySelector('aside').children.length===1"));
+    await wait(()=>page("document.readyState==='complete'&&document.querySelector('aside').children.length===2"));
     assert.equal((await c.eval(`DM.call('dm:drafts:submit',${JSON.stringify(ds.slice(0,2).map(d=>d.id))})`)).ok,false);
-    console.log('PASS: reload restores ambiguous titles safely, accepted tasks retrieve separate videos without resending; unselected draft retained');
+    console.log('PASS: changed sidebar and duplicate-title reordering recover by complete prompt; unrelated/unselected drafts retained; no resends');
     await click('[data-view="templates"]');
     await wait(()=>c.eval("!document.querySelector('#templateEditor').classList.contains('hidden')"));
     await click('#templateAddDraft');
     await wait(async()=>(await call('dm:drafts')).length===2);
     await wait(()=>c.eval("!document.querySelector('#templateAddDraft').disabled"));
     assert.equal(await c.eval("document.querySelector('#view-templates').classList.contains('active')"),true,'current template collection does not navigate');
-    assert.equal(await c.eval("document.querySelector('#templateDraftStatus').checkVisibility()"),true);
-    assert.match(await c.eval("document.querySelector('#templateDraftStatus').textContent"),/已加入草稿箱/);
+    assert.equal(await c.eval("document.querySelector('.draft-success-toast').checkVisibility()"),true);
+    assert.match(await c.eval("document.querySelector('.draft-success-toast').textContent"),/已加入草稿箱/);
     assert.equal(sent.length,2);
-    console.log('PASS: adding current or multiple templates keeps the editor open and displays a success information bar');
+    await wait(()=>c.eval("!document.querySelector('.draft-success-toast')"));
+    console.log('PASS: adding current or multiple templates keeps the editor open; green success toast floats up and disappears');
   }finally{c.close();server.closeAllConnections();server.close();}
 })().catch(e=>{console.error(e);server.closeAllConnections();server.close();process.exitCode=1;});

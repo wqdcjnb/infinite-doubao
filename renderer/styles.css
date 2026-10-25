@@ -19,6 +19,9 @@
   --violet: #7c3aed;
   --warn: #b45309;
   --err: #dc2626;
+  --success: #15803d;
+  --success-bg: #edf9f0;
+  --success-border: #86c99b;
   --glow-cyan: 0 1px 2px rgba(16, 24, 40, .05);
   --glow-blue: 0 6px 16px -8px rgba(37, 99, 235, .45);
   --shadow-sm: 0 1px 2px rgba(16, 24, 40, .06);

@@ -77,6 +77,15 @@ function say(text, isErr) {
   setTimeout(() => t.remove(), 6000);
 }
 
+function draftSuccess(message) {
+  qa(".draft-success-toast").forEach((t) => t.remove());
+  const toast = node("div", "toast draft-success-toast", `✓ ${message}`);
+  toast.setAttribute("role", "status");
+  toast.setAttribute("aria-live", "polite");
+  q("#toasts").appendChild(toast);
+  setTimeout(() => toast.remove(), 1800);
+}
+
 /** 统一解包主进程的 { ok, data } */
 async function call(channel, ...args) {
   const r = await DM.call(channel, ...args);
@@ -458,7 +467,7 @@ function bindTemplateEvents() {
     V.draftBusy = true; V.draftMessage = ""; renderDrafts(); renderTemplateList();
     try {
       const result = await call("dm:drafts:save", [...V.selectedDrafts], { instanceId: q("#draftAccount").value });
-      say(`${result.count} 条已存入 ${result.instanceName} 的豆包草稿`);
+      draftSuccess(`保存成功：${result.count} 条任务已存入 ${result.instanceName} 的豆包草稿`);
     } finally { V.draftBusy = false; await refreshDrafts(); renderTemplateList(); }
   }));
   q("#draftSelectAll").addEventListener("change", (event) => {
@@ -542,15 +551,12 @@ function renderDrafts() {
 
 async function addTemplateDraft(multiple = false) {
   if (V.draftBusy) return;
-  const status = q("#templateDraftStatus");
-  status.classList.add("hidden");
   V.draftBusy = true; V.draftMessage = ""; renderDrafts(); renderTemplateList();
   try {
     const template = await saveTemplate();
     const added = await call("dm:drafts:collect", multiple ? [...V.selectedTemplates] : [template.id]);
     V.selectedDrafts = new Set(added.map((d) => d.id));
-    status.textContent = `${multiple ? `${added.length} 条任务` : `「${template.name}」`}已加入草稿箱。可继续编辑和添加，发送时打开顶部「草稿箱」选择账号。`;
-    status.classList.remove("hidden");
+    draftSuccess(`${multiple ? `${added.length} 条任务` : `「${template.name}」`}已加入草稿箱`);
   } finally { V.draftBusy = false; await refreshDrafts(); renderTemplateList(); }
 }
 

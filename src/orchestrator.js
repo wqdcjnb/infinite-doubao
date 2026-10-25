@@ -498,7 +498,7 @@ function requirePage(result) {
   return result;
 }
 function nativeBindings(instanceId) {
-  return drafts.list().filter((d) => d.instanceId === instanceId && d.nativeState === "saved" && d.nativeBinding).map((d) => d.nativeBinding);
+  return drafts.list().filter((d) => d.instanceId === instanceId && d.nativeState === "saved" && d.nativeBinding).map((d) => ({ ...d.nativeBinding, prompt: d.nativePrompt, executionMode: d.executionMode }));
 }
 function bindingPatches(bindings) {
   return Object.fromEntries((bindings || []).map((binding) => [binding.id, { nativeBinding: binding }]));
@@ -529,7 +529,9 @@ async function withNativeDrafts(selected, options, fn) {
     const login = await driver.isLoggedIn();
     if (login?.loggedIn !== true) throw new Error(`请先在账号 ${inst.name} 的豆包页面登录`);
     check();
-    requirePage(await driver.call("restoreNativeDrafts", nativeBindings(inst.id)));
+    const selectedIds = new Set(selected.map((d) => d.id));
+    const restored = requirePage(await driver.call("restoreNativeDrafts", nativeBindings(inst.id).filter((b) => selectedIds.has(b.id))));
+    if (restored.bindings?.length) drafts.updateMany(bindingPatches(restored.bindings));
     return await fn(driver, inst, check, operation);
   } finally {
     runtime.nativeDrafts.delete(inst.id); runtime.busy.delete(inst.id); wakeQueue();
@@ -598,7 +600,7 @@ async function submitDrafts(ids, options = {}) {
         workers.push(driver);
         check();
         if ((await driver.isLoggedIn())?.loggedIn !== true) throw new Error(`账号 ${inst.name} 的草稿页面登录已失效`);
-        requirePage(await driver.call("restoreNativeDrafts", bindings));
+        requirePage(await driver.call("restoreNativeDrafts", bindings.filter((b) => b.id === draft.id)));
         const options = { id: draft.id, prompt: draft.nativePrompt, executionMode: draft.executionMode };
         const opened = requirePage(await driver.call("openNativeDraft", options));
         const record = templateRecords(draft.template, draft.executionMode), task = record.task;

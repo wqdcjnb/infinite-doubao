@@ -30,15 +30,44 @@
   function result(fn) { return async function () { try { return await fn.apply(null, arguments); } catch (e) { return { ok: false, reason: String(e.message || e) }; } }; }
   api.restoreNativeDrafts = result(async function (bindings) {
     await wait(editor, "豆包输入区尚未加载");
-    if (bindings && bindings.length) await wait(function () { return rows().length >= bindings.length; }, "豆包草稿列表尚未加载或原草稿已被移除");
-    var current = rows(), titles = current.map(title), used = new Set();
-    var mapped = (bindings || []).map(function (binding) {
+    bindings = bindings || [];
+    var previous = "", stableAt = Date.now();
+    if (bindings.length) await wait(function () {
+      var current = rows(), signature = JSON.stringify(current.map(title));
+      if (signature !== previous) { previous = signature; stableAt = Date.now(); }
+      return bindings.every(function (b) { return current.some(function (r) { return title(r) === b.title; }); }) && Date.now() - stableAt >= 600;
+    }, "未找到所选豆包草稿，可能尚未同步或已被移除，请在账号页面核对后重试");
+    var used = new Set(), mapped = [];
+    for (var binding of bindings) {
       var row = rowFor(binding.id);
-      if (!row && JSON.stringify(titles) === JSON.stringify(binding.titles)) row = current[binding.index];
-      if (!row || title(row) !== binding.title || used.has(row)) throw new Error("豆包草稿列表已变化，无法确认原草稿，请在账号页面核对；不会按相似标题发送");
+      if (row && title(row) !== binding.title) row = null;
+      if (!row) {
+        var candidates = rows().filter(function (r) { return title(r) === binding.title; });
+        if (candidates.length === 1) row = candidates[0];
+        else {
+          // Sidebar order is not an identity: other tabs can add or reorder drafts.
+          // Equal sidebar titles must be resolved by the complete saved prompt.
+          if (!normalize(binding.prompt)) throw new Error("多条草稿标题相同，缺少完整提示词，无法确认原草稿");
+          var matches = [];
+          for (var candidate of candidates) {
+            if (!candidate.isConnected) throw new Error("核对期间豆包草稿列表变化，请重试");
+            candidate.click();
+            var lastContent = "", contentAt = Date.now();
+            await wait(function () {
+              var content = text(editor()) + "\n" + mode();
+              if (content !== lastContent) { lastContent = content; contentAt = Date.now(); }
+              return candidate.isConnected && candidate.classList.contains("bg-dbx-bg-float") && text(editor()) && Date.now() - contentAt >= 600;
+            }, "草稿内容尚未加载，未触发发送，请重试");
+            if (text(editor()) === normalize(binding.prompt) && (binding.executionMode !== "work" || mode() === "云电脑")) matches.push(candidate);
+          }
+          if (matches.length > 1) throw new Error("多条豆包草稿的完整提示词相同，无法区分附件归属；请在账号页面核对并区分这些草稿后重试");
+          row = matches[0];
+        }
+      }
+      if (!row || used.has(row)) throw new Error("未找到与所选任务完整内容对应的豆包草稿，未触发发送，请在账号页面核对");
       used.add(row);
-      return { row: row, id: binding.id };
-    });
+      mapped.push({ row: row, id: binding.id });
+    }
     mapped.forEach(function (m) { m.row.dataset.dmDraftId = m.id; });
     return { ok: true, bindings: snapshot() };
   });
