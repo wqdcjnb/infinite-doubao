@@ -125,6 +125,22 @@ test("旧版本地草稿转为云电脑，已绑定的旧版对话草稿禁止�
   await assert.rejects(queue.submitDrafts(ids), /仅支持通过云电脑/);
   assert.equal(calls.length, before); assert.equal(sends().length, 0);
 });
+
+test("18 条草稿有一页登录加载较慢时整批等待，全部就绪后各发送一次", async () => {
+  account("first");
+  const ids = drafts.createMany(Array.from({ length: 18 }, (_, i) => template(String(i)).id)).map(d => d.id);
+  await queue.saveDrafts(ids);
+  let loginChecks = 0, release;
+  const delayed = new Promise(resolve => { release = resolve; });
+  hook = async method => { if (method === "waitForLogin" && ++loginChecks === 18) await delayed; };
+  const pending = queue.submitDrafts(ids);
+  await waitFor(() => loginChecks === 18);
+  assert.equal(sends().length, 0);
+  assert.ok(drafts.list().every(d => !d.submissionRecord));
+  release(); assert.equal((await pending).count, 18);
+  assert.equal(new Set(sends().map(c => c.options.id)).size, 18);
+  assert.equal(sends().length, 18);
+});
 test("指定账号保存和发送整批，已存原生草稿不得静默改用另一号", async () => {
   const first = account("first"), chosen = account("chosen"), ids = batch();
   await queue.saveDrafts(ids, { instanceId: chosen.id });
