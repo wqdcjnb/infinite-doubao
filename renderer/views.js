@@ -173,11 +173,11 @@ function openModal(title, bodyNode, footerButtons) {
     });
     foot.appendChild(btn);
   }
-  q("#dmModal").classList.remove("hidden");
+  window.DMDialogs.open(q("#dmModal"));
 }
 
 function closeModal() {
-  q("#dmModal").classList.add("hidden");
+  window.DMDialogs.close(q("#dmModal"));
   modalOnOk = null;
 }
 
@@ -407,20 +407,19 @@ async function newTemplate() {
   q("#templateName").select();
 }
 
-function deleteTemplate() {
+async function deleteTemplate() {
   const template = V.templates.find((t) => t.id === V.activeTemplate);
   if (!template) return;
-  openModal("删除任务模板", node("div", "hint", `删除「${template.name}」？已提交的任务及附件副本会保留。`), [
-    { label: "取消" },
-    { label: "确认删除", kind: "primary", close: false, onClick: () => guard(async () => {
-      await call("dm:template:remove", template.id);
-      V.templateDirty = false;
-      closeModal();
-      await refreshTemplates();
-      await refreshBadges();
-      say("模板已删除");
-    }) }
-  ]);
+  if (!await window.DMDialogs.confirm({ title: "删除这个任务模板？", subject: template.name,
+    message: "删除后，此模板将从任务提交列表中移除。", detail: "已提交的任务及附件副本会保留。",
+    confirmLabel: "删除模板", danger: true })) return;
+  await guard(async () => {
+    await call("dm:template:remove", template.id);
+    V.templateDirty = false;
+    await refreshTemplates();
+    await refreshBadges();
+    say("模板已删除");
+  });
 }
 
 async function attachTemplateFiles() {
@@ -539,10 +538,11 @@ function renderDrafts() {
     info.appendChild(node("p", "", t.prompt));
     info.appendChild(node("small", "", `${draft.executionMode !== "work" && draft.instanceId ? "旧版对话草稿，请重新加入云电脑草稿" : "工作任务 · 云电脑"} · ${modelLabel(t.model)} · ${t.duration} 秒 · ${t.attachments.length} 附件 · ${fmtTime(draft.createdAt)}`));
     row.append(check, info);
-    const remove = trashButton(`移除草稿「${t.name}」`, () => {
-      openModal("移除草稿记录", node("div", "hint", `移除「${t.name}」的软件记录？豆包网页中的草稿、原模板和本地附件会保留。`), [
-        { label: "取消" }, { label: "移除", close: false, onClick: () => guard(async () => { await call("dm:draft:remove", draft.id); closeModal(); await refreshDrafts(); }) }
-      ]);
+    const remove = trashButton(`移除草稿「${t.name}」`, async () => {
+      if (!await window.DMDialogs.confirm({ title: "移除这条草稿记录？", subject: t.name,
+        message: "将从软件草稿箱中移除这条记录。", detail: "豆包网页中的草稿、原模板和本地附件会保留。",
+        confirmLabel: "移除记录", danger: true })) return;
+      await guard(async () => { await call("dm:draft:remove", draft.id); await refreshDrafts(); });
     });
     remove.disabled = V.draftBusy;
     row.appendChild(remove);
@@ -1312,10 +1312,6 @@ function bindEvents() {
   q("#logLive").addEventListener("change", () => { if (q("#logLive").checked) renderLogs(); });
 
   q("#dmModalClose").addEventListener("click", closeModal);
-  q("#dmModal").addEventListener("click", (e) => { if (e.target.id === "dmModal") closeModal(); });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !q("#dmModal").classList.contains("hidden")) closeModal();
-  });
 
   // 主进程事件 → 界面
   DM.onEvent((e) => {

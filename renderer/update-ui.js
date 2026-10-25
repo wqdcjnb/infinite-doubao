@@ -3,15 +3,17 @@
 (() => {
   const dialog = document.createElement("dialog");
   dialog.id = "updateDialog";
-  dialog.className = "update-dialog";
+  dialog.className = "modal-mask update-dialog";
   dialog.setAttribute("aria-labelledby", "updateTitle");
-  dialog.innerHTML = `<h2 id="updateTitle">软件更新</h2>
-    <p id="updateVersion" class="hint"></p><p id="updateStatus" role="status" aria-live="polite"></p>
+  dialog.innerHTML = `<div class="modal"><div class="modal-head"><div>
+    <strong id="updateTitle">软件更新</strong><p id="updateVersion" class="modal-subtitle"></p></div>
+    <button id="updateDismiss" class="dialog-close" aria-label="关闭弹窗">×</button></div>
+    <div class="modal-body"><p id="updateStatus" class="update-status" role="status" aria-live="polite"></p>
     <progress id="updateProgress" max="100" value="0" hidden></progress>
-    <pre id="updateNotes" hidden></pre><p id="updateSource" class="hint"></p>
-    <p id="updateInstallHint" class="hint"></p>
-    <div class="update-actions"><button id="updateClose" class="ghost">稍后</button>
-    <button id="updateRecheck" class="ghost">重新检查</button><button id="updateAction" class="primary">检查更新</button></div>`;
+    <pre id="updateNotes" hidden></pre><p id="updateInstallHint" class="modal-note"></p>
+    <p id="updateSource" class="hint"></p></div>
+    <div class="modal-foot"><button id="updateClose" class="ghost">稍后</button>
+    <button id="updateRecheck" class="ghost">重新检查</button><button id="updateAction" class="primary">检查更新</button></div></div>`;
   document.body.appendChild(dialog);
   const q = (id) => dialog.querySelector("#" + id);
   const topButton = document.querySelector("#btnUpdate");
@@ -69,7 +71,7 @@
   }
 
   async function open() {
-    if (!dialog.open) dialog.showModal();
+    if (!dialog.open) window.DMDialogs.open(dialog, { focus: q("updateClose") });
     try {
       render(await call("status"));
       if (["idle", "current", "error"].includes(state.phase)) await run("check");
@@ -77,7 +79,8 @@
   }
   q("updateAction").addEventListener("click", () => run(state.phase === "available" ? "download" : state.phase === "ready" ? "install" : "check"));
   q("updateRecheck").addEventListener("click", () => run("check"));
-  q("updateClose").addEventListener("click", () => dialog.close());
+  q("updateClose").addEventListener("click", () => window.DMDialogs.close(dialog));
+  q("updateDismiss").addEventListener("click", () => window.DMDialogs.close(dialog));
   topButton.addEventListener("click", open);
   window.DM.onUpdate(render);
   window.DMUpdates = { open, beforeInstall: null };

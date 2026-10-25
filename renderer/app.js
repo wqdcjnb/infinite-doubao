@@ -78,14 +78,12 @@ async function boot() {
   $("#accClose").addEventListener("click", closeAddModal);
   $("#accCancel").addEventListener("click", closeAddModal);
   $("#accOk").addEventListener("click", submitAddModal);
-  $("#accModal").addEventListener("click", (e) => { if (e.target.id === "accModal") closeAddModal(); });
   $("#accProxyMode").addEventListener("change", (e) => {
     $("#accProxyWrap").classList.toggle("hidden", e.target.value !== "custom");
     if (e.target.value === "custom") $("#accProxyUrl").focus();
   });
   $("#accModal").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); submitAddModal(); }
-    else if (e.key === "Escape") closeAddModal();
   });
   $("#search").addEventListener("input", renderList);
   $("#btnHome").addEventListener("click", async () => {
@@ -182,8 +180,14 @@ function renderList() {
     del.title = "删除账号";
     del.addEventListener("click", async (e) => {
       e.stopPropagation();
-      if (!confirm(`删除账号「${acc.name}」？该账号的登录状态会一起清掉。`)) return;
-      await API.removeAccount(acc.id);
+      if (!await window.DMDialogs.confirm({
+        title: "删除这个账号？", subject: acc.name,
+        message: "删除后，该账号在本机保存的登录状态也会清除。",
+        detail: "此操作无法撤销，再次使用需重新添加并登录。",
+        confirmLabel: "删除账号", danger: true
+      })) return;
+      try { await API.removeAccount(acc.id); }
+      catch (error) { toast("删除账号失败：" + error.message, true); return; }
       closeTab(acc.id);
       state.accounts = state.accounts.filter((a) => a.id !== acc.id);
       if (state.activeId === acc.id) state.activeId = "";
@@ -220,12 +224,12 @@ function openAddModal() {
   modeSel.value = "direct";
   urlIn.value = "";
   wrap.classList.add("hidden");
-  mask.classList.remove("hidden");
-  setTimeout(() => { nameIn.focus(); nameIn.select(); }, 30);
+  window.DMDialogs.open(mask, { focus: nameIn });
+  nameIn.select();
 }
 
 function closeAddModal() {
-  $("#accModal").classList.add("hidden");
+  window.DMDialogs.close($("#accModal"));
 }
 
 async function submitAddModal() {
@@ -499,7 +503,11 @@ function renderEnvPanel(body) {
   });
   const regenBtn = el("button", "ghost", "重新随机");
   regenBtn.addEventListener("click", async () => {
-    if (!confirm("重新生成整个指纹档案？会换掉 UA / 屏幕 / 时区 / 硬件信息全套。")) return;
+    if (!await window.DMDialogs.confirm({
+      title: "重新生成环境指纹？", subject: acc.name,
+      message: "将重新随机生成浏览器标识、屏幕、时区和硬件信息。",
+      detail: "保存后，重新打开该账号环境即可生效。", confirmLabel: "重新生成"
+    })) return;
     const next = await API.regenFingerprint(acc.id);
     acc.fingerprint = next;
     toast("已重新生成档案");
@@ -531,12 +539,14 @@ function renderEnvPanel(body) {
 }
 
 function showFpReport(r) {
-  const mask = el("div", "modal-mask");
+  const mask = el("dialog", "modal-mask");
+  mask.setAttribute("aria-label", "指纹体检报告");
   const box = el("div", "modal wide");
   const head = el("div", "modal-head");
   head.appendChild(el("strong", null, r.ok ? `指纹体检通过 ${r.passed}/${r.total}` : `指纹体检 ${r.failed} 项不一致`));
-  const x = el("button", "ghost small", "关闭");
-  x.addEventListener("click", () => mask.remove());
+  const x = el("button", "dialog-close", "×");
+  x.setAttribute("aria-label", "关闭弹窗");
+  x.addEventListener("click", () => window.DMDialogs.close(mask));
   head.appendChild(x);
   box.appendChild(head);
   const body = el("div", "modal-body");
@@ -561,6 +571,7 @@ function showFpReport(r) {
   box.appendChild(body);
   mask.appendChild(box);
   document.body.appendChild(mask);
+  window.DMDialogs.open(mask, { remove: true });
 }
 
 function field(parent, label) {
@@ -683,8 +694,9 @@ function maskImageUrl(file) {
 }
 
 function showMaskImagePreview(url, name, trigger) {
-  $("#maskImagePreview")?.remove();
-  const mask = el("div", "modal-mask");
+  const previous = $("#maskImagePreview");
+  if (previous) window.DMDialogs.close(previous);
+  const mask = el("dialog", "modal-mask");
   mask.id = "maskImagePreview";
   mask.setAttribute("role", "dialog");
   mask.setAttribute("aria-modal", "true");
@@ -695,8 +707,9 @@ function showMaskImagePreview(url, name, trigger) {
   title.id = "maskImagePreviewTitle";
   title.title = name;
   head.appendChild(title);
-  const close = () => { mask.remove(); if (trigger?.isConnected) trigger.focus(); };
-  const closeBtn = el("button", "ghost small", "关闭");
+  const close = () => window.DMDialogs.close(mask);
+  const closeBtn = el("button", "dialog-close", "×");
+  closeBtn.setAttribute("aria-label", "关闭预览");
   closeBtn.addEventListener("click", close);
   head.appendChild(closeBtn);
   box.appendChild(head);
@@ -711,13 +724,8 @@ function showMaskImagePreview(url, name, trigger) {
   body.appendChild(hint);
   box.appendChild(body);
   mask.appendChild(box);
-  mask.addEventListener("click", (event) => { if (event.target === mask) close(); });
-  mask.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") { event.preventDefault(); close(); }
-    else if (event.key === "Tab") { event.preventDefault(); closeBtn.focus(); }
-  });
   document.body.appendChild(mask);
-  closeBtn.focus();
+  window.DMDialogs.open(mask, { focus: closeBtn, remove: true, onClose: () => { if (trigger?.isConnected) trigger.focus(); } });
 }
 
 function renderMaskPanel(body) {

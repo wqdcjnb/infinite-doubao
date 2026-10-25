@@ -318,29 +318,29 @@
     </aside>
   </div>
 
-  <div class="modal-mask hidden" id="accModal">
+  <dialog class="modal-mask hidden" id="accModal" aria-labelledby="accModalTitle" aria-describedby="accModalDescription">
     <div class="modal">
       <div class="modal-head">
-        <strong>添加豆包账号</strong>
-        <button class="ghost small" id="accClose">关闭</button>
+        <div><strong id="accModalTitle">添加豆包账号</strong><p class="modal-subtitle" id="accModalDescription">为每个账号创建独立的创作空间</p></div>
+        <button class="dialog-close" id="accClose" aria-label="关闭弹窗">×</button>
       </div>
       <div class="modal-body">
         <div class="field">
-          <label>账号名称</label>
+          <label for="accName">账号名称</label>
           <input id="accName" placeholder="豆包号A" />
         </div>
         <div class="row">
           <div class="field">
-            <label>分组</label>
+            <label for="accGroup">分组</label>
             <input id="accGroup" placeholder="可选，如：主号" />
           </div>
           <div class="field">
-            <label>备注</label>
+            <label for="accRemark">备注</label>
             <input id="accRemark" placeholder="可选" />
           </div>
         </div>
         <div class="field">
-          <label>出口代理</label>
+          <label for="accProxyMode">出口代理</label>
           <select id="accProxyMode">
             <option value="direct">直连（本机 IP）</option>
             <option value="system">跟随系统代理（Clash / v2rayN）</option>
@@ -348,31 +348,32 @@
           </select>
         </div>
         <div class="field hidden" id="accProxyWrap">
-          <label>代理地址</label>
+          <label for="accProxyUrl">代理地址</label>
           <input id="accProxyUrl" placeholder="socks5://user:pass@1.3.1.4:1080" />
         </div>
-        <div class="hint">创建后自动打开豆包页面，扫码或手机号登录一次即可，登录态只保存在该环境自己的会话分区里，互不影响。</div>
+        <div class="modal-note">创建后将打开豆包，扫码或使用手机号登录即可。各账号的登录状态独立保存，互不影响。</div>
       </div>
       <div class="modal-foot">
         <button class="ghost" id="accCancel">取消</button>
         <button class="primary" id="accOk">创建并打开</button>
       </div>
     </div>
-  </div>
+  </dialog>
 
   <!-- 通用弹窗：导入分镜 / 编辑镜头 / 添加素材 -->
-  <div class="modal-mask hidden" id="dmModal">
+  <dialog class="modal-mask hidden" id="dmModal" aria-labelledby="dmModalTitle">
     <div class="modal wide">
       <div class="modal-head">
         <strong id="dmModalTitle">标题</strong>
-        <button class="ghost small" id="dmModalClose">关闭</button>
+        <button class="dialog-close" id="dmModalClose" aria-label="关闭弹窗">×</button>
       </div>
       <div class="modal-body" id="dmModalBody"></div>
       <div class="modal-foot" id="dmModalFoot"></div>
     </div>
-  </div>
+  </dialog>
 
   <div class="toasts" id="toasts"></div>
+  <script src="dialogs.js"></script>
   <script src="app.js"></script>
   <script src="update-ui.js"></script>
   <script src="views.js"></script>
