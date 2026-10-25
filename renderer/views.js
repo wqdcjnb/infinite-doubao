@@ -987,7 +987,7 @@ async function refreshSettings() {
   const aboutGroup = group("关于", [
     kvRow("版本", (state && state.brand && state.brand.version) || "1.2.0"),
     kvRow("配置与缓存目录", (V.paths && V.paths.home) || ""),
-    textRow("更新源", s.updateUrl || "", "留空使用局域网 10.1.11.88:17824；更换地址后重新检查更新", (v) => patchSetting(["updateUrl"], v.trim()))
+    textRow("更新源", s.updateUrl || "", "留空使用默认更新服务器；更换地址后重新检查更新", (v) => patchSetting(["updateUrl"], v.trim()))
   ]);
   const upd = node("button", "ghost tiny", "检查更新");
   upd.addEventListener("click", () => window.DMUpdates.open());

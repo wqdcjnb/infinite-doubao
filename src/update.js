@@ -44,8 +44,8 @@ function httpUrl(value, base) {
 }
 
 function errorMessage(error) {
-  if (["TimeoutError", "AbortError"].includes(error?.name)) return "更新服务器响应超时，请检查局域网连接后重试";
-  if (error?.message === "fetch failed") return "无法连接更新服务器，请确认已连接局域网，且服务器已开机";
+  if (["TimeoutError", "AbortError"].includes(error?.name)) return "更新服务器响应超时，请检查网络连接后重试";
+  if (error?.message === "fetch failed") return "无法连接更新服务器，请检查网络或稍后重试";
   return String(error?.message || error);
 }
 

@@ -1,12 +1,12 @@
-# 局域网更新发布
+# 软件更新发布
 
-客户端默认地址为 `http://10.1.11.88:17824/latest.json`。用户点击顶部「检查更新」，查看说明并下载，校验通过后点击「安装并重启」。首次启用此功能的旧版本需先手动安装一次 1.3.0 或更新版本。
+客户端默认地址为 `http://10.1.11.88:17824/latest.json`。用户点击顶部「检查更新」，查看说明并下载，校验通过后点击「安装并重启」。首次启用此功能的旧版本需先手动安装一次 1.3.1 或更新版本。
 
 生成或排队任务、界面遮脸任务尚未结束时不允许安装。安装前保存模板修改和本地数据，等待旧进程退出，然后沿用原安装目录覆盖更新并重新打开应用。安装器失败会显示错误；下载失败可以重新检查并重试。账号、会话、草稿、任务、素材和用户设置继续保存在原用户目录。
 
 ## 已部署服务器
 
-- 主机：`10.1.11.88`，TCP 端口 `17824`，仅监听该局域网地址。
+- 主机：`10.1.11.88`，TCP 端口 `17824`，仅监听该地址。
 - 程序及发布根目录：`C:\ProgramData\DoubaoWorkshopUpdates`。
 - Windows 计划任务：`DoubaoWorkshopUpdates`，SYSTEM 身份开机启动，异常退出后重试。
 - 防火墙规则同名，仅允许 LocalSubnet 访问该地址的更新端口。
@@ -28,12 +28,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\DoubaoWorksho
 3. 准备 UTF-8 更新说明文本，运行以下命令。私钥默认读取本机 `%LOCALAPPDATA%\DoubaoWorkshopPublisher\update-private.pem`，也可用 `DOLAMOD_UPDATE_KEY` 指定本机路径。
 
 ```powershell
-npm run publish:lan -- --installer "dist\豆包工坊 v1.3.0 安装包.exe" --notes-file "build\release-notes.txt"
+npm run publish:lan -- --installer "dist\豆包工坊 v1.3.1 安装包.exe" --notes-file "build\release-notes.txt"
 ```
 
 命令将安装包复制为 `DoubaoWorkshop-<版本>-Setup.exe`，生成签名 `latest.json` 和 `SHA256SUMS.txt`，通过 SSH 上传临时目录。服务器验证签名、大小和 SHA-256，通过后先放置完整安装包，再原子替换版本清单。禁止版本回退或把同一个版本替换成不同内容。上传失败时旧版本保持可用，修复连接后重跑命令即可。
 
-仅生成发布文件而不上传，可运行 `node build/publish-update.mjs` 并提供相同参数（不加 `--upload`）。默认产物目录为 `build/lan-update-release/<版本>`。随后将已验收源码推到 GitHub，并把同一个安装包、`SHA256SUMS.txt` 和 `latest.json` 放到该版本 Release。GitHub 源码推送不会自动构建安装包或更新局域网版本。
+仅生成发布文件而不上传，可运行 `node build/publish-update.mjs` 并提供相同参数（不加 `--upload`）。默认产物目录为 `build/lan-update-release/<版本>`。随后将已验收源码推到 GitHub，并把同一个安装包、`SHA256SUMS.txt` 和 `latest.json` 放到该版本 Release。GitHub 源码推送不会自动构建安装包或发布客户端更新。
 
 ## 签名与备份
 
