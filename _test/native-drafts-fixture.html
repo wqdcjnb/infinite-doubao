@@ -7,6 +7,9 @@
 <button type="button" data-testid="chat_input_action_mode">对话</button>
 <button type="submit" data-testid="chat_input_send_button">发送</button></form>
 <script>
+(async()=>{
+const draftStore=window.fixtureDraftStore?await window.fixtureDraftStore:null;
+let expanded=!draftStore;
 let saved=JSON.parse(localStorage.getItem('fixture')||'{"drafts":[],"conversations":[]}'),current=null,refs=[];
 let editor=document.querySelector('textarea');
 const mode=document.querySelector('[data-testid="chat_input_action_mode"]'),box=document.querySelector('aside'), messages=document.querySelector('#messages'),send=document.querySelector('[type="submit"]');
@@ -16,16 +19,19 @@ const nativeTimeout=window.setTimeout;
 window.setTimeout=function(callback,delay,...args){const start=performance.now();return nativeTimeout(()=>{if(performance.now()-start>2000)trace('delayed-timer:'+delay+':'+Math.round(performance.now()-start));callback(...args);},delay);};
 new MutationObserver(()=>trace('send-attribute')).observe(send,{attributes:true});
 document.addEventListener('click',e=>{if(e.target.tagName==='BUTTON')trace('click:'+e.target.textContent);},true);
-function persist(){localStorage.setItem('fixture',JSON.stringify(saved));}
+function persist(){localStorage.setItem('fixture',JSON.stringify(saved));if(draftStore)draftStore.sync(saved);}
 window.addEventListener('storage',e=>{if(e.key==='fixture'){saved=JSON.parse(e.newValue);render();}});
 function render(){
-  for(const el of [...box.children])if(!saved.drafts.some(d=>d.id===el.id))el.remove();
-  saved.drafts.forEach((d,i)=>{
+  const visible=expanded?saved.drafts:saved.drafts.slice(0,5);
+  for(const el of [...box.children])if(!visible.some(d=>d.id===el.id))el.remove();
+  visible.forEach((d,i)=>{
     let row=document.getElementById(d.id);
     if(!row){row=document.createElement('div');row.id=d.id;row.setAttribute('role','button');row.className='group/conversation-item';row.innerHTML='<span><span></span></span>';row.onclick=()=>{leave();current=d.id;editor.value=d.prompt;mode.textContent=d.mode;refs=d.refs;history.pushState({},'', '/chat');messages.replaceChildren();render();};}
     row.querySelector('span span').textContent=d.prompt.slice(0,8);row.classList.toggle('bg-dbx-bg-float',current===d.id);
+    if(draftStore)row.__reactFiber$fixture={memoizedProps:{draft:draftStore.metadata(d)}};
     if(box.children[i]!==row)box.insertBefore(row,box.children[i]||null);
   });
+  if(!expanded&&saved.drafts.length>5){const more=document.createElement('button');more.setAttribute('aria-expanded','false');more.textContent='显示更多草稿';more.onclick=()=>{expanded=true;render();};box.appendChild(more);}
   document.querySelector('#attachments').textContent=refs.join(' ');
   document.querySelector('#recent').replaceChildren(...saved.conversations.map(c=>{const a=document.createElement('a');a.id='conversation_'+c.id;a.href='/chat/'+c.id;a.textContent=c.prompt;return a;}));
 }
@@ -51,4 +57,5 @@ document.querySelector('form').onsubmit=async e=>{e.preventDefault();send.disabl
  history.pushState({},'','/chat/'+c.id);render();send.disabled=false;show(c);
 };
 render();const previous=saved.conversations.find(c=>location.pathname==='/chat/'+c.id);if(previous)show(previous);
+})();
 </script></body></html>

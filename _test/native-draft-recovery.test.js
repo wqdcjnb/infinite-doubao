@@ -14,7 +14,7 @@ function page(items, delayed) {
     click() { active = this; editor.value = item.prompt; mode.innerText = item.mode || "云电脑"; }
   }));
   const document = {
-    querySelector: selector => selector.includes("chat_input_action_mode") ? mode : selector.includes("chat_input_send_button") ? button : editor,
+    querySelector: selector => selector.includes("draft-conversation-section") ? null : selector.includes("chat_input_action_mode") ? mode : selector.includes("chat_input_send_button") ? button : editor,
     querySelectorAll: selector => selector.includes("draft-conversation-section") ? rows.filter(row => current.includes(row.item)) : []
   };
   const context = vm.createContext({ window: { auto: {} }, document, CFG: { autoKey: "auto" }, Date: { now: () => now },
