@@ -66,22 +66,30 @@
     if (typeof indexedDB === "undefined" || !indexedDB.databases) return null;
     var databases = await indexedDB.databases();
     if (!databases.some(function (db) { return db.name === "flow-draft-conversations-v2"; })) return null;
-    await wait(function () { return document.querySelector('[data-testid="draft-conversation-section"]'); }, "豆包草稿列表尚未加载");
-    await expandDrafts();
-    await wait(function () { return rows().some(function (row) { return rowDraft(row); }); }, "当前账号草稿记录尚未加载");
-    var scopes = new Set(rows().map(rowDraft).filter(Boolean).map(function (d) { return d.inputDraftIndex.accountScope; }));
-    if (scopes.size !== 1) throw new Error("无法确认当前豆包账号的草稿数据，请打开账号草稿列表后重试");
-    var scope = Array.from(scopes)[0];
     var records = await readStore("flow-draft-conversations-v2", "drafts");
+    // The site's current user ID remains available when the sidebar is hidden
+    // or omitted for an empty draft store. Do not infer it from historical rows.
+    var identity = "";
+    try { identity = String(localStorage.getItem("flow_tea_user_id") || "").trim(); } catch (_) {}
+    var scopes = new Set(rows().map(rowDraft).filter(Boolean).map(function (d) { return d.inputDraftIndex.accountScope; }));
+    if (identity) scopes.add(identity);
+    if (!scopes.size && document.querySelector('[data-testid="draft-conversation-section"]')) {
+      await expandDrafts();
+      rows().map(rowDraft).filter(Boolean).forEach(function (d) { scopes.add(d.inputDraftIndex.accountScope); });
+    }
+    if (scopes.size > 1 || (!scopes.size && records.length)) throw new Error("无法确认当前豆包账号的草稿数据，请打开账号草稿列表后重试");
+    var scope = Array.from(scopes)[0];
+    records = records.filter(function (r) { return !r.deleted && r.accountScope === scope && r.data && r.data.id === r.id && r.data.inputDraftIndex && r.data.inputDraftIndex.accountScope === scope; });
+    if (!records.length) return { items: [], accountScope: scope };
     var input = await readStore("samantha-web", "store", "input-engine-draft:v3:account:" + encodeURIComponent(scope));
     if (!input || !input.state || input.state.accountScope !== scope || !Array.isArray(input.state.records)) throw new Error("豆包完整草稿正文尚未加载，请刷新账号页面后重试");
-    return records.filter(function (r) { return !r.deleted && r.accountScope === scope && r.data && r.data.id === r.id && r.data.inputDraftIndex && r.data.inputDraftIndex.accountScope === scope; }).map(function (r) {
+    return { accountScope: scope, items: records.map(function (r) {
       var index = r.data.inputDraftIndex;
       var document = input.state.records.find(function (p) { return p.address && p.address.accountScope === scope && p.address.conversationScope === index.conversationScope && p.address.inputId === index.inputId; });
       var unit = document && document.units && document.units["input.document"], payload = unit && !unit.tombstone && unit.payload;
       var prompt = payload && (payload.format === "plain-text" ? payload.text : payload.plainTextFallback);
       return { nativeId: r.id, accountScope: scope, title: r.data.title, prompt: typeof prompt === "string" ? prompt : null, executionMode: r.data.scene === "new-office-task" ? "work" : "chat" };
-    });
+    }) };
   }
   function candidatesFor(binding) {
     return rows().filter(function (row) {
@@ -146,20 +154,24 @@
   }
   function result(fn) { return async function () { try { return await fn.apply(null, arguments); } catch (e) { return { ok: false, reason: String(e.message || e) }; } }; }
   api.readNativeDrafts = result(async function () {
-    await wait(editor, "豆包输入区尚未加载");
-    var items = await catalog();
-    return { ok: true, source: items ? "indexeddb" : "sidebar", items: items || [], total: items ? items.length : rows().length };
+    var data = await catalog();
+    return { ok: true, source: data ? "indexeddb" : "sidebar", items: data ? data.items : [], total: data ? data.items.length : rows().length };
   });
-  api.restoreNativeDrafts = result(async function (bindings) {
-    await wait(editor, "豆包输入区尚未加载", Date.now() + 60000);
+  api.restoreNativeDrafts = result(async function (bindings, options) {
     bindings = bindings || [];
-    await expandDrafts();
-    var full = bindings.length ? await catalog() : null;
-    if (full) {
-      var resolved = [], usedIds = new Set(), titles = full.map(function (d) { return d.title; });
+    var data = bindings.length ? await catalog() : null;
+    if (data) {
+      if (bindings.some(function (b) { return b.accountScope && data.accountScope && b.accountScope !== data.accountScope; })) throw new Error("当前登录的豆包账号与原草稿账号不一致，请切回原账号");
+      if (options && options.allowMissing && bindings.some(function (b) { return b.accountScope; }) && !data.accountScope) throw new Error("尚未确认当前豆包账号，不能重新存入草稿，请等待账号登录完成");
+      var full = data.items, resolved = [], missingIds = [], usedIds = new Set(), titles = full.map(function (d) { return d.title; });
       for (var binding of bindings) {
         var matches = full.filter(function (d) { return binding.draftNumber ? numberIn(d.prompt) === binding.draftNumber : normalize(d.prompt) === normalize(binding.prompt); });
         if (binding.draftNumber && matches.length > 1) throw new Error("发现重复草稿编号 " + binding.draftNumber + "，未触发发送，请核对网页草稿");
+        var original = binding.nativeId && full.find(function (d) { return d.nativeId === binding.nativeId && d.accountScope === binding.accountScope; });
+        if (!matches.length && !original) {
+          if (full.some(function (d) { return d.prompt === null; })) throw new Error("部分豆包草稿正文尚未完整加载，不能确认原草稿是否缺失，请刷新后重试");
+          missingIds.push(binding.id); continue;
+        }
         if (binding.nativeId) matches = matches.filter(function (d) { return d.nativeId === binding.nativeId && d.accountScope === binding.accountScope; });
         if (matches.length !== 1) throw new Error("完整草稿数据中未找到唯一对应的任务，请核对编号或原生草稿 ID，未触发发送");
         var match = matches[0];
@@ -167,9 +179,13 @@
         usedIds.add(match.nativeId);
         resolved.push({ id: binding.id, nativeId: match.nativeId, accountScope: match.accountScope, title: match.title, index: full.indexOf(match), titles: titles });
       }
+      if (missingIds.length && !(options && options.allowMissing)) throw new Error("豆包网页中已找不到所选的 " + missingIds.length + " 条草稿，本地提示词和素材已保留。请点击「网页草稿已删除？重新存入」恢复缺失草稿");
       resolved.forEach(function (b) { storedBindings.set(b.id, b); });
-      return { ok: true, source: "indexeddb", total: full.length, bindings: snapshot() };
+      return { ok: true, source: "indexeddb", total: full.length, bindings: resolved, missingIds: missingIds };
     }
+    if (options && options.allowMissing) throw new Error("当前豆包页面不支持完整草稿核对，不能确认哪些草稿已删除，请打开账号页面检查");
+    await wait(editor, "豆包输入区尚未加载", Date.now() + 60000);
+    await expandDrafts();
     // Truncated labels require checking each full prompt (600ms stable per row).
     // Keep the list-load limit at 20s, but allow the existing 60s preparation
     // budget for large candidate sets instead of cutting off after 33 rows.

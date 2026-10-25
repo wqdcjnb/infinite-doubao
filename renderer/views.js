@@ -592,9 +592,9 @@ async function saveSelectedDrafts(recreateDeleted = false) {
   if (q(recreateDeleted ? "#draftRecreate" : "#draftSave").disabled) return;
   const ids = [...V.selectedDrafts], instanceId = q("#draftAccount").value;
   if (recreateDeleted && !await window.DMDialogs.confirm({ title: "重新存入已删除的网页草稿？",
-    message: `请确认选中的 ${ids.length} 条草稿在豆包网页中已被删除。`,
-    detail: "保留原编号、提示词和附件，重新存入原账号，不会发送生成任务。若网页草稿仍在，会产生重复草稿；保存或发送结果待核对的记录不能使用此操作。",
-    confirmLabel: "网页已删除，重新存入" })) return;
+    message: `核对选中的 ${ids.length} 条草稿，只重新存入网页中已缺失的条目。`,
+    detail: "保留原编号、提示词和附件，已存在的网页草稿会跳过，不会发送生成任务。无法确认账号或草稿内容时会停止。",
+    confirmLabel: "核对并恢复缺失草稿" })) return;
   if (V.draftBusy) return;
   V.draftBusy = true; V.draftError = ""; V.draftMessage = ""; renderDrafts(); renderTemplateList();
   try {

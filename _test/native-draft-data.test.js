@@ -3,7 +3,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path"), vm = require("node:vm");
 
-function page({ collapsed = false, duplicate = false, missingBody = false, wrongScope = false } = {}) {
+function page({ collapsed = false, duplicate = false, missingBody = false, wrongScope = false, noSidebar = false, empty = false, currentScope = "account-a" } = {}) {
   let now = 1000, expanded = false, active = null, sends = 0, reads = 0;
   const items = Array.from({ length: 50 }, (_, i) => {
     const draftNumber = "DB-" + (duplicate && i === 49 ? 0 : i).toString(16).toUpperCase().padStart(24, "0");
@@ -23,11 +23,11 @@ function page({ collapsed = false, duplicate = false, missingBody = false, wrong
     __reactFiber$test: { memoizedProps: { draft: index[i].data } },
     classList: { contains: () => active === d.id }, click() { active = d.id; editor.value = d.prompt; }
   }));
-  const visible = () => collapsed ? [] : rows.slice(0, expanded ? 50 : 5);
+  const visible = () => noSidebar || collapsed ? [] : rows.slice(0, expanded ? 50 : 5);
   const more = { isConnected: true, click() { expanded = true; this.isConnected = false; } };
   const section = { querySelector: s => s.includes("section-header") ? { click: () => { collapsed = false; } } : expanded ? null : more };
   const document = {
-    querySelector: s => s.includes("draft-conversation-section") ? section : s.includes("chat_input_action_mode") ? mode : s.includes("chat_input_send_button") ? button : editor,
+    querySelector: s => noSidebar ? null : s.includes("draft-conversation-section") ? section : s.includes("chat_input_action_mode") ? mode : s.includes("chat_input_send_button") ? button : editor,
     querySelectorAll: s => s.includes("draft-conversation-section") ? visible() : []
   };
   const indexedDB = {
@@ -37,7 +37,7 @@ function page({ collapsed = false, duplicate = false, missingBody = false, wrong
       queueMicrotask(() => {
         request.result = { close() {}, transaction(storeName, access) {
           assert.equal(access, "readonly"); reads++;
-          const tx = { objectStore() { return { getAll: () => read(index), get: key => { assert.equal(key, "input-engine-draft:v3:account:account-a"); return read(input); } }; } };
+          const tx = { objectStore() { return { getAll: () => read(empty ? [] : index), get: key => { assert.equal(key, "input-engine-draft:v3:account:account-a"); return read(input); } }; } };
           function read(value) { const q = {}; queueMicrotask(() => { q.result = value; q.onsuccess(); queueMicrotask(() => tx.oncomplete()); }); return q; }
           assert.equal(storeName, name === "samantha-web" ? "store" : "drafts"); return tx;
         } }; request.onsuccess();
@@ -45,12 +45,42 @@ function page({ collapsed = false, duplicate = false, missingBody = false, wrong
     }
   };
   class TestDate extends Date { static now() { return now; } }
-  const context = vm.createContext({ window: { auto: {} }, document, indexedDB, CFG: { autoKey: "auto" }, Date: TestDate, clearTimeout,
+  const context = vm.createContext({ window: { auto: {} }, document, indexedDB, localStorage: { getItem: key => key === "flow_tea_user_id" ? currentScope : null }, CFG: { autoKey: "auto" }, Date: TestDate, clearTimeout,
     setTimeout: (fn, delay) => delay > 100 ? setTimeout(fn, delay) : (now += 100, queueMicrotask(fn)) });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/page/native-drafts.js"), "utf8"), context);
-  return { api: context.window.auto, items, rows, reads: () => reads, sends: () => sends, visible: () => visible().length,
+  return { api: context.window.auto, items, rows, index, elapsed: () => now - 1000, reads: () => reads, sends: () => sends, visible: () => visible().length,
     bindings: items.map(d => ({ id: "app-" + d.id, draftNumber: d.draftNumber, prompt: d.prompt, title: "旧标题", executionMode: "work" })) };
 }
+
+test("侧栏与输入框均未挂载时，直接核对 50 条完整草稿并返回全部绑定", async () => {
+  const p = page({ noSidebar: true });
+  assert.equal((await p.api.readNativeDrafts()).total, 50);
+  const result = await p.api.restoreNativeDrafts(p.bindings);
+  assert.equal(result.ok, true, result.reason); assert.equal(result.bindings.length, 50);
+  assert.equal(p.elapsed(), 0); assert.equal(p.sends(), 0);
+});
+
+test("空的原生索引立即报告缺失，保留正文不当作已保存；恢复返回精确缺失 ID", async () => {
+  const p = page({ noSidebar: true, empty: true });
+  const result = await p.api.restoreNativeDrafts(p.bindings);
+  assert.equal(result.ok, false); assert.match(result.reason, /找不到.*50.*重新存入/);
+  assert.equal(p.elapsed(), 0);
+  const recovery = await p.api.restoreNativeDrafts(p.bindings, { allowMissing: true });
+  assert.equal(recovery.ok, true); assert.equal(recovery.missingIds.length, 50); assert.equal(recovery.bindings.length, 0);
+  assert.equal(p.sends(), 0);
+});
+
+test("只恢复确实缺失的条目，已有编号改绑或账号变化不能当作缺失重建", async () => {
+  const p = page({ noSidebar: true }); p.index.splice(1, 1);
+  const result = await p.api.restoreNativeDrafts(p.bindings, { allowMissing: true });
+  assert.equal(result.ok, true, result.reason); assert.equal(result.bindings.length, 49);
+  assert.deepEqual(Array.from(result.missingIds), [p.bindings[1].id]);
+  assert.equal((await p.api.restoreNativeDrafts([{ ...p.bindings[0], nativeId: "old-id", accountScope: "account-a" }], { allowMissing: true })).ok, false);
+  for (const currentScope of ["account-b", ""]) {
+    const changed = page({ noSidebar: true, empty: true, currentScope });
+    assert.equal((await changed.api.restoreNativeDrafts([{ ...changed.bindings[0], accountScope: "account-a" }], { allowMissing: true })).ok, false);
+  }
+});
 
 test("50 条重复正文只显示 5 条时读取全部原生 ID 与完整正文，逐条准确打开发送", async () => {
   const p = page(); assert.equal(p.visible(), 5);

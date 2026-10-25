@@ -587,22 +587,21 @@ async function saveDrafts(ids, options = {}) {
       checkAction();
       return requirePage(result);
     };
-    // Only an explicit acknowledgement of webpage deletion can discard a saved
-    // binding. A failed lookup alone may just mean the page has not loaded yet.
-    if (options.recreateDeleted === true) {
-      const reset = selected.filter((d) => d.nativeState === "saved");
-      if (reset.length) {
-        drafts.updateMany(Object.fromEntries(reset.map((d) => [d.id, { nativeState: "", nativeBinding: null, nativePrompt: "", nativeError: "" }])));
-        selected = selectedDrafts(ids);
-      }
-    }
     const selectedIds = new Set(selected.map((d) => d.id));
     const bindings = nativeBindings(inst.id).filter((b) => selectedIds.has(b.id));
     // New local drafts have no website bindings to restore. An old conversation
     // may not expose a composer until New work task is clicked.
     if (bindings.length) {
-      const restored = await step("正在核对已保存的豆包草稿", () => driver.call("restoreNativeDrafts", bindings));
+      const restored = await step("正在核对已保存的豆包草稿", () => driver.call("restoreNativeDrafts", bindings, { allowMissing: options.recreateDeleted === true }));
       if (restored.bindings?.length) drafts.updateMany(bindingPatches(restored.bindings));
+      // Recreate only IDs confirmed absent from the complete website store.
+      // Existing or changed drafts must not be duplicated on a lookup failure.
+      if (options.recreateDeleted === true && restored.missingIds?.length) {
+        const missing = new Set(restored.missingIds);
+        const reset = selected.filter(d => d.nativeState === "saved" && missing.has(d.id));
+        drafts.updateMany(Object.fromEntries(reset.map(d => [d.id, { nativeState: "", nativeBinding: null, nativePrompt: "", nativeError: "" }])));
+        selected = selectedDrafts(ids);
+      }
     }
     let count = 0;
     for (const draft of selected) {

@@ -21,10 +21,10 @@ beforeEach(() => {
       navigate: async url => { currentUrl = url; calls.push({ method: "navigate", url, draftId }); },
       url: async () => currentUrl,
       ready: async () => true,
-      call: async (method, options) => {
+      call: async (method, options, restoreOptions) => {
         if (method === "openNativeDraft") draftId = options.id;
         calls.push({ method, options, instanceId: inst.id });
-        const override = await hook(method, options, { draftId, taskId }); if (override) return override;
+        const override = await hook(method, options, { draftId, taskId, restoreOptions }); if (override) return override;
         if (method === "saveNativeDraft") { native.push(options.id); return { ok: true, bindings: bindings() }; }
         if (method === "waitNativeDraftAccepted") { native = native.filter((id) => id !== options.id); currentUrl = `https://www.doubao.com/chat/${options.id}`; return { ok: true, conversationUrl: currentUrl, bindings: bindings() }; }
         if (method === "readProgress") return { state: "running", generationStarted: true };
@@ -216,8 +216,8 @@ test("网页草稿已删除后明确重新存入，14 条保留原编号和快�
   await queue.saveDrafts(ids);
   const before = structuredClone(drafts.list()), selected = ids.slice(0, 14);
   native = [ids[14]]; calls.length = 0;
-  hook = (method, bindings) => method === "restoreNativeDrafts" && bindings.some(b => !native.includes(b.id))
-    ? { ok: false, reason: "未找到所选豆包草稿" } : null;
+  hook = (method, bindings, context) => method === "restoreNativeDrafts" && bindings.some(b => !native.includes(b.id))
+    ? context.restoreOptions?.allowMissing ? { ok: true, missingIds: bindings.filter(b => !native.includes(b.id)).map(b => b.id) } : { ok: false, reason: "未找到所选豆包草稿" } : null;
   await assert.rejects(queue.saveDrafts(selected), /未找到/);
   assert.equal(calls.filter(c => c.method === "saveNativeDraft").length, 0);
   assert.equal((await queue.saveDrafts(selected, { instanceId: inst.id, recreateDeleted: true })).count, 14);
@@ -256,11 +256,21 @@ test("重新存入不解除保存中、已发送或接收未知的保护，也�
 test("重新存入重置状态写盘失败不改旧关联，不开始保存", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   const before = structuredClone(drafts.list()), save = store.save; calls.length = 0;
+  hook = method => method === "restoreNativeDrafts" ? { ok: true, missingIds: ids } : null;
   store.save = () => false;
   try { await assert.rejects(queue.saveDrafts(ids, { recreateDeleted: true }), /草稿状态保存失败/); }
   finally { store.save = save; }
   assert.deepEqual(drafts.list(), before);
   assert.equal(calls.filter(c => c.method === "prepareNativeDraft" || c.method === "saveNativeDraft").length, 0);
+});
+
+test("混合选择现有和缺失草稿时，重新存入仅保存缺失条目", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  native = [ids[0]]; calls.length = 0;
+  hook = method => method === "restoreNativeDrafts" ? { ok: true, missingIds: [ids[1]] } : null;
+  assert.equal((await queue.saveDrafts(ids, { recreateDeleted: true })).count, 2);
+  assert.deepEqual(calls.filter(c => c.method === "saveNativeDraft").map(c => c.options.id), [ids[1]]);
+  assert.deepEqual(native, ids); assert.equal(sends().length, 0);
 });
 test("逐条触发后继续下一条，第一条回执不返回也不能阻塞第二条", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);

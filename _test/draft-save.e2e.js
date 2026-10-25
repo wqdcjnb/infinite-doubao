@@ -62,6 +62,26 @@ async function wait(fn, timeout = 15000) {
     await c.eval("document.querySelector('#draftSave').click()");
     await wait(() => c.eval("!document.querySelector('#draftSave').disabled"));
     assert.equal(await page("JSON.parse(localStorage.getItem('fixture')).drafts.length"), 25, "retry does not duplicate saved drafts");
-    console.log(JSON.stringify({ saved:25, templates:2, uniqueNumbers:25, sends, elapsedMs:Date.now()-start, missingComposerRecovered:true, persistentError:true, retryDuplicates:0 }));
+    // Data verification does not depend on either sidebar or composer mounting.
+    await page("window.hiddenDraftSection=document.querySelector('aside');window.hiddenComposer=document.querySelector('form');hiddenDraftSection.remove();hiddenComposer.remove()");
+    const hidden = await c.eval(`DM.call('dm:drafts:save',${JSON.stringify(ids)},{instanceId:${JSON.stringify(account.id)}})`);
+    assert.equal(hidden.ok, true, hidden.error); assert.equal(hidden.data.count, 25);
+    await page("document.body.append(hiddenDraftSection,hiddenComposer)");
+    // The site no longer lists 24 entries, but the local application keeps all 25.
+    const retained = await page("JSON.parse(localStorage.getItem('fixture')).drafts[0].id");
+    await page("(async()=>{const s=JSON.parse(localStorage.getItem('fixture'));s.drafts=s.drafts.slice(0,1);localStorage.setItem('fixture',JSON.stringify(s));await (await window.fixtureDraftStore).sync(s)})()");
+    await c.eval("document.querySelector('webview').reload()");
+    await wait(()=>page("window.fixtureReady"));
+    const missingStart = Date.now();
+    await c.eval("document.querySelector('#draftSave').click()");
+    await wait(()=>c.eval("!document.querySelector('#draftSave').disabled"));
+    assert.match(await c.eval("document.querySelector('#draftStatus').textContent"), /找不到.*24.*重新存入/);
+    assert.ok(Date.now()-missingStart < 3000, "missing drafts must not wait for a nonexistent sidebar");
+    const recovered = await c.eval(`DM.call('dm:drafts:save',${JSON.stringify(ids)},{instanceId:${JSON.stringify(account.id)},recreateDeleted:true})`);
+    assert.equal(recovered.ok, true, recovered.error); assert.equal(recovered.data.count, 25);
+    const native = await page("JSON.parse(localStorage.getItem('fixture')).drafts.map(d=>({id:d.id,prompt:d.prompt}))");
+    assert.equal(native.length, 25); assert.equal(native.filter(d=>d.id===retained).length, 1);
+    assert.equal(new Set(native.map(d=>d.prompt)).size, 25); assert.equal(sends, 0);
+    console.log(JSON.stringify({ saved:25, templates:2, uniqueNumbers:25, sends, elapsedMs:Date.now()-start, missingComposerRecovered:true, persistentError:true, hiddenSidebarVerified:25, restoredMissing:24, retainedExisting:1, retryDuplicates:0 }));
   } finally { c?.close(); child?.kill(); server.closeAllConnections(); server.close(); }
 })().catch(e => { console.error(e); process.exitCode=1; });
