@@ -195,8 +195,20 @@ function readConfig(file) {
   const token=fs.readFileSync(cfg.tokenFile,'utf8').trim();
   return {...cfg,stateDir:path.resolve(base,cfg.stateDir),token};
 }
+function createStudioWindow(inst,{BrowserWindow=require('electron').BrowserWindow,enhancer={},height=900}={}) {
+  const win=new BrowserWindow({show:false,width:1280,height,useContentSize:true,
+    webPreferences:{partition:inst.partition,contextIsolation:true,nodeIntegration:false,nodeIntegrationInSubFrames:false,
+      sandbox:true,webSecurity:true,backgroundThrottling:false,spellcheck:false}});
+  const source=require('./page').buildPageScript({cfg:{profile:null,instanceId:inst.id,kernel:'embedded',enhancer}});
+  // Main-process injection needs no Node-enabled preload and survives navigation.
+  win.webContents.on('dom-ready',()=>{
+    if(win.webContents.isDestroyed())return;
+    win.webContents.executeJavaScript(source).catch(()=>{win.loadError='页面自动化加载失败';});
+  });
+  return win;
+}
 async function start() {
-  const {app,BrowserWindow,ipcMain,session}=require('electron');
+  const {app,BrowserWindow,session}=require('electron');
   const file=app.commandLine.getSwitchValue('studio-config')||process.env.DOUBAO_STUDIO_CONFIG;
   if(!file)throw new Error('private --studio-config file required');
   const cfg=readConfig(file);fs.mkdirSync(cfg.stateDir,{recursive:true,mode:0o700});app.setPath('userData',cfg.stateDir);app.setPath('sessionData',cfg.stateDir);
@@ -207,18 +219,14 @@ async function start() {
   store.get().settings.orchestrator={...store.get().settings.orchestrator,retryLimit:0,autoDownload:true,autoConfirm:true,maxParallel:Math.max(1,Math.min(8,cfg.trackingPages||2))};
   store.get().settings.downloadDir=P.dir('exports');durableSave();
   const interceptor=require('./interceptor'),driver=require('./driver'),{WebAccounts}=require('./web-accounts');
-  const preload=()=>path.join(__dirname,'webview-preload.js');
   const prepareSession=async(inst)=>{const ses=session.fromPartition(inst.partition);interceptor.attach(ses,inst);return ses;};
-  ipcMain.on('dm:fp-profile',(event)=>{
-    const inst=store.get().instances.find(i=>session.fromPartition(i.partition)===event.sender.session);
-    event.returnValue=inst?{instanceId:inst.id,enhancer:store.get().settings.enhancer}:{};
-  });
-  const accounts=new WebAccounts({prepareSession,preload,wake:()=>{},publish:()=>{},log:{warn:()=>{}}});
+  const windowFor=(inst,height)=>createStudioWindow(inst,{BrowserWindow,enhancer:store.get().settings.enhancer,height});
+  const accounts=new WebAccounts({prepareSession,createWindow:inst=>windowFor(inst,800),wake:()=>{},publish:()=>{},log:{warn:()=>{}}});
   const pages=new Set();
   queue.init({resolveDriver:async(inst)=>driver.open(inst,{webContents:(await accounts.open(inst.id)).webContents}),
     resolveDraftDriver:async(inst,{signal}={})=>{
       await prepareSession(inst);signal?.throwIfAborted();
-      const win=new BrowserWindow({show:false,width:1280,height:900,webPreferences:{partition:inst.partition,preload:preload(),contextIsolation:false,nodeIntegration:false,nodeIntegrationInSubFrames:false,sandbox:false,webSecurity:true,backgroundThrottling:false,spellcheck:false}});
+      const win=windowFor(inst,900);
       pages.add(win);const close=()=>{if(!win.isDestroyed())win.destroy();};
       win.on('closed',()=>{pages.delete(win);signal?.removeEventListener('abort',close);});signal?.addEventListener('abort',close,{once:true});
       win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
@@ -235,4 +243,4 @@ async function start() {
   bridge.run(controller.signal).catch(()=>{process.stderr.write('studio-executor: stopped\n');app.exit(1);});
   return {bridge,adapter};
 }
-module.exports={NativeAdapter,decryptInput,assertDedicatedState,readConfig,start};
+module.exports={NativeAdapter,decryptInput,assertDedicatedState,readConfig,createStudioWindow,start};
