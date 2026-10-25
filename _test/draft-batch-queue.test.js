@@ -141,6 +141,59 @@ test("已存网页的旧草稿保留原提示词和旧恢复方式", async () =>
   assert.ok(sends().every(c => c.options.prompt.startsWith("旧提示词 ")));
   assert.ok(calls.filter(c => c.method === "restoreNativeDrafts").flatMap(c => c.options).every(b => !b.draftNumber));
 });
+
+test("网页草稿已删除后明确重新存入，14 条保留原编号和快照且不发送", async () => {
+  const inst = account("first");
+  const ids = drafts.createMany(Array.from({ length: 15 }, (_, i) => template(String(i)).id)).map(d => d.id);
+  await queue.saveDrafts(ids);
+  const before = structuredClone(drafts.list()), selected = ids.slice(0, 14);
+  native = [ids[14]]; calls.length = 0;
+  hook = (method, bindings) => method === "restoreNativeDrafts" && bindings.some(b => !native.includes(b.id))
+    ? { ok: false, reason: "未找到所选豆包草稿" } : null;
+  await assert.rejects(queue.saveDrafts(selected), /未找到/);
+  assert.equal(calls.filter(c => c.method === "saveNativeDraft").length, 0);
+  assert.equal((await queue.saveDrafts(selected, { instanceId: inst.id, recreateDeleted: true })).count, 14);
+  assert.equal(native.length, 15); assert.equal(new Set(native).size, 15);
+  store.load();
+  for (const [i, draft] of drafts.list().entries()) {
+    assert.equal(draft.draftNumber, before[i].draftNumber);
+    assert.deepEqual(draft.template, before[i].template);
+    assert.equal(draft.nativeState, "saved");
+    assert.equal(draft.instanceId, inst.id);
+  }
+  assert.equal(sends().length, 0); assert.equal(store.get().tasks.length, 0);
+  calls.length = 0; await queue.saveDrafts(selected);
+  assert.equal(calls.filter(c => c.method === "saveNativeDraft").length, 0);
+});
+
+test("重新存入先校验整批附件，失败保留旧关联且不操作网页", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  drafts.updateMany({ [ids[1]]: { template: { ...drafts.list()[1].template, attachments: [{ name: "missing.png", path: path.join(root, "missing.png") }] } } });
+  const before = structuredClone(drafts.list()); calls.length = 0;
+  await assert.rejects(queue.saveDrafts(ids, { recreateDeleted: true }), /附件/);
+  assert.deepEqual(drafts.list(), before); assert.equal(calls.length, 0);
+});
+
+test("重新存入不解除保存中、已发送或接收未知的保护，也不能换号", async () => {
+  const inst = account("first"), other = account("other"), ids = batch(); await queue.saveDrafts(ids);
+  const before = structuredClone(drafts.list()); calls.length = 0;
+  await assert.rejects(queue.saveDrafts(ids, { instanceId: other.id, recreateDeleted: true }), /请使用该账号/);
+  for (const patch of [{ nativeState: "saving" }, { nativeState: "sent", submissionRecord: { task: { submissionUncertain: false } } }, { submissionRecord: { task: { submissionUncertain: true } } }]) {
+    drafts.updateMany({ [ids[0]]: { ...before[0], submissionRecord: null, ...patch } });
+    await assert.rejects(queue.saveDrafts(ids, { instanceId: inst.id, recreateDeleted: true }), /上次操作未确认/);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("重新存入重置状态写盘失败不改旧关联，不开始保存", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  const before = structuredClone(drafts.list()), save = store.save; calls.length = 0;
+  store.save = () => false;
+  try { await assert.rejects(queue.saveDrafts(ids, { recreateDeleted: true }), /草稿状态保存失败/); }
+  finally { store.save = save; }
+  assert.deepEqual(drafts.list(), before);
+  assert.equal(calls.filter(c => c.method === "prepareNativeDraft" || c.method === "saveNativeDraft").length, 0);
+});
 test("逐条触发后继续下一条，第一条回执不返回也不能阻塞第二条", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   let release;

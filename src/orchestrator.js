@@ -557,11 +557,11 @@ async function withNativeDrafts(selected, options, fn) {
   }
 }
 async function saveDrafts(ids, options = {}) {
-  const selected = selectedDrafts(ids);
+  let selected = selectedDrafts(ids);
   for (const d of selected) {
     if (d.nativeState === "saving" || d.submissionRecord) throw new Error(`草稿「${d.template.name}」上次操作未确认，请先在豆包页面核对，避免重复保存或发送`);
     if (d.executionMode !== "work" && (d.instanceId || d.nativeBinding || d.nativeState)) throw new Error(`草稿「${d.template.name}」是旧版对话草稿，草稿提交仅支持云电脑，请将模板重新加入草稿箱`);
-    if (!d.nativeBinding) templates.validateSnapshot(d.template);
+    if (!d.nativeBinding || options.recreateDeleted === true) templates.validateSnapshot(d.template);
   }
   // Older local-only drafts have no webpage state and can be saved as cloud tasks.
   const converted = selected.filter((d) => d.executionMode !== "work");
@@ -570,6 +570,15 @@ async function saveDrafts(ids, options = {}) {
     converted.forEach((d) => { d.executionMode = "work"; });
   }
   return withNativeDrafts(selected, options, async (driver, inst, check, operation) => {
+    // Only an explicit acknowledgement of webpage deletion can discard a saved
+    // binding. A failed lookup alone may just mean the page has not loaded yet.
+    if (options.recreateDeleted === true) {
+      const reset = selected.filter((d) => d.nativeState === "saved");
+      if (reset.length) {
+        drafts.updateMany(Object.fromEntries(reset.map((d) => [d.id, { nativeState: "", nativeBinding: null, nativePrompt: "", nativeError: "" }])));
+        selected = selectedDrafts(ids);
+      }
+    }
     const selectedIds = new Set(selected.map((d) => d.id));
     const restored = requirePage(await draftStep(operation, "草稿列表核对", () => driver.call("restoreNativeDrafts", nativeBindings(inst.id).filter((b) => selectedIds.has(b.id)))));
     if (restored.bindings?.length) drafts.updateMany(bindingPatches(restored.bindings));

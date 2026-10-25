@@ -36,6 +36,31 @@ app.on("browser-window-created", (_event, win) => {
         assert.equal(await evaluate(`document.querySelector('#view-${view}').classList.contains('active')`), true);
       }
       report.checks.push("packaged main window, version, IPC and six navigation pages");
+      const drafts = require(path.join(archive, "src/task-drafts")), templates = require(path.join(archive, "src/task-templates"));
+      const queue = require(path.join(archive, "src/orchestrator"));
+      const inst = store.add({ id: "smoke-account", name: "隔离测试账号" });
+      const template = templates.create({ name: "已删除网页草稿", prompt: "隔离测试", model: "seedance_v2.0_mini", duration: 5 });
+      const draft = drafts.create(template.id);
+      drafts.updateMany({ [draft.id]: { instanceId: inst.id, instanceName: inst.name, nativeState: "saved" } });
+      const saveCalls = [], originalSave = queue.saveDrafts;
+      queue.saveDrafts = async (ids, options) => { saveCalls.push({ ids, options }); return { count: ids.length, instanceName: inst.name }; };
+      try {
+        await evaluate("document.querySelector('.vtab[data-view=\"drafts\"]').click()");
+        for (let i = 0; i < 100 && !await evaluate("document.querySelector('#draftAccount option[value=\"smoke-account\"]') !== null"); i++) await new Promise(resolve => setTimeout(resolve, 20));
+        await evaluate("document.querySelector('#draftAccount').value = 'smoke-account'; document.querySelector('#draftAccount').dispatchEvent(new Event('change')); document.querySelector('#draftSelectAll').click()");
+        assert.equal(await evaluate("document.querySelector('#draftRecreate').disabled"), false);
+        await evaluate("document.querySelector('#draftRecreate').click()");
+        assert.match(await evaluate("document.querySelector('#confirmMessage').textContent"), /1 条.*已被删除/);
+        assert.equal(saveCalls.length, 0);
+        await evaluate("document.querySelector('#confirmCancel').click()");
+        await new Promise(resolve => setTimeout(resolve, 100));
+        assert.equal(saveCalls.length, 0);
+        await evaluate("document.querySelector('#draftRecreate').click(); document.querySelector('#confirmAccept').click()");
+        for (let i = 0; i < 100 && !saveCalls.length; i++) await new Promise(resolve => setTimeout(resolve, 20));
+        assert.deepEqual(saveCalls, [{ ids: [draft.id], options: { instanceId: inst.id, recreateDeleted: true } }]);
+        assert.equal(store.get().tasks.length, 0);
+        report.checks.push("deleted-draft recovery requires acknowledgement; cancel has no effects; confirm passes exact selected IDs and account without submitting tasks");
+      } finally { queue.saveDrafts = originalSave; }
       const source = path.resolve(__dirname, ".."), files = [];
       function walk(dir, relative = "") {
         for (const name of fs.readdirSync(dir)) {
