@@ -1,6 +1,6 @@
 # 豆包工坊
 
-Windows / macOS 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.4.0**。
+Windows / macOS 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.4.1**。
 
 ## 下载与安装
 
@@ -8,16 +8,16 @@ Windows / macOS 桌面应用，使用 Electron、JavaScript 和 Python 构建。
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | `DoubaoWorkshop-1.4.0-Setup.exe` | 双击安装，通过桌面「豆包工坊」启动 |
-| macOS 13+，Apple 芯片 | `DoubaoWorkshop-1.4.0-mac-arm64.dmg` | 打开镜像，将应用拖入 Applications |
-| macOS 13+，Intel | `DoubaoWorkshop-1.4.0-mac-x64.dmg` | 打开镜像，将应用拖入 Applications |
+| Windows x64 | `DoubaoWorkshop-1.4.1-Setup.exe` | 双击安装，通过桌面「豆包工坊」启动 |
+| macOS 13+，Apple 芯片 | `DoubaoWorkshop-1.4.1-mac-arm64.dmg` | 打开镜像，将应用拖入 Applications |
+| macOS 13+，Intel | `DoubaoWorkshop-1.4.1-mac-x64.dmg` | 打开镜像，将应用拖入 Applications |
 
 Mac 包内置 Python、OpenCV、FFmpeg 和 ffprobe，无需另装开发环境。首版使用临时签名，**尚未经过 Apple Developer ID 签名和公证**，系统可能提示无法验证开发者。项目不修改系统安全设置。Mac 更新时退出旧版，拖入并替换应用，再重新打开；用户数据位于 `~/Library/Application Support/无限豆包`，替换应用不会删除该目录。此内部目录名用于兼容数据。
 
 发行附件中的 `SHA256SUMS.txt` 用于校验下载文件。在 PowerShell 中运行：
 
 ```powershell
-Get-FileHash .\DoubaoWorkshop-1.4.0-Setup.exe -Algorithm SHA256
+Get-FileHash .\DoubaoWorkshop-1.4.1-Setup.exe -Algorithm SHA256
 ```
 
 新安装默认使用 `%LOCALAPPDATA%\Programs\豆包工坊`。升级已有版本会沿用原安装位置和用户数据目录，保留账号、会话、任务、素材和设置。
