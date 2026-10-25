@@ -1,7 +1,7 @@
 {
   "name": "infinite-doubao",
   "productName": "豆包工坊",
-  "version": "1.5.2",
+  "version": "1.5.5",
   "description": "豆包工坊 - 多账号环境管理 / 独立会话 / 指纹伪装 / 代理IP / 素材遮脸 / 无水印导出",
   "main": "src/main.js",
   "author": "yg",

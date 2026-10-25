@@ -1,0 +1,68 @@
+<!doctype html><meta charset="utf-8">
+<style>
+  body { font: 14px sans-serif; display: flex; gap: 30px; }
+  nav { width: 300px; } #list { height: 180px; overflow: auto; }
+  [role=button] { padding: 12px; cursor: pointer; }
+  #input-engine-container { width: 600px; border: 1px solid #ccc; }
+  .tiptap { padding: 12px; min-height: 80px; }
+  button { padding: 10px; } #messages { min-height: 100px; }
+</style>
+<nav>
+  <button id="heading">草稿 <span>对话列表设置</span></button>
+  <div id="list"><div data-testid="draft-conversation-section"></div></div>
+  <button id="more" hidden>展开更多草稿</button>
+</nav>
+<main>
+  <div id="messages"></div>
+  <div id="input-engine-container">
+    <div id="panel"></div>
+    <span data-testid="chat_input_action_mode">云电脑</span>
+    <div class="tiptap ProseMirror" contenteditable="true" role="textbox"></div>
+    <button data-testid="chat_input_send_button" aria-label="发送">↑</button>
+  </div>
+</main>
+<script>
+  const section = document.querySelector('[data-testid="draft-conversation-section"]');
+  const list = document.querySelector('#list'), editor = document.querySelector('.tiptap');
+  const heading = document.querySelector('#heading'), more = document.querySelector('#more');
+  let visibleCount = 0, active = null, loading = false;
+  window.loadDelay = 0; window.expandCount = 10;
+  window.events = [];
+  window.items = Array.from({ length: 19 }, (_, i) => {
+    const number = 'DB-' + i.toString(16).toUpperCase().padStart(24, '0');
+    return { id: String(i), draftNumber: number, title: `【草稿编号：${number}】`, prompt: `【草稿编号：${number}】\n测试草稿 ${i + 1}` };
+  });
+  function render() {
+    section.replaceChildren();
+    items.slice(0, visibleCount).forEach(item => {
+      const row = document.createElement('div'); row.role = 'button'; row.className = 'group/conversation-item';
+      const span = document.createElement('span'), title = document.createElement('span'); title.textContent = item.title; span.append(title); row.append(span);
+      row.onclick = () => {
+        section.querySelectorAll('[role=button]').forEach(r => r.classList.remove('bg-dbx-bg-float'));
+        row.classList.add('bg-dbx-bg-float'); active = item; editor.innerText = item.prompt;
+      };
+      section.append(row);
+    });
+  }
+  heading.onclick = () => { events.push({ type: 'expand-heading' }); visibleCount = 5; more.hidden = false; render(); };
+  more.onclick = () => { events.push({ type: 'expand-more' }); visibleCount = window.expandCount; more.hidden = true; render(); };
+  list.onscroll = () => {
+    if (more.hidden && !loading && visibleCount && visibleCount < items.length && list.scrollTop + list.clientHeight >= list.scrollHeight - 20) {
+      loading = true;
+      setTimeout(() => { events.push({ type: 'load-older' }); visibleCount = Math.min(items.length, visibleCount + 5); loading = false; render(); }, window.loadDelay);
+    }
+  };
+  document.querySelector('[data-testid="chat_input_send_button"]').onclick = () => {
+    events.push({ type: editor.innerText.trim() === '按要求生成' ? 'confirmation' : 'draft', text: editor.innerText.trim(), id: active?.id });
+    editor.innerText = '';
+  };
+  window.reset = () => { visibleCount = 0; active = null; more.hidden = true; list.scrollTop = 0; editor.innerText = ''; document.querySelector('#messages').replaceChildren(); document.querySelector('#panel').replaceChildren(); render(); };
+  window.reminder = text => {
+    const panel = document.querySelector('#panel'); panel.replaceChildren();
+    const question = document.createElement('p'); question.textContent = text; panel.append(question);
+    for (const label of ['按要求生成', '暂不生成']) {
+      const option = document.createElement('button'); option.textContent = label;
+      option.onclick = () => events.push({ type: 'option-click', label }); panel.append(option);
+    }
+  };
+</script>

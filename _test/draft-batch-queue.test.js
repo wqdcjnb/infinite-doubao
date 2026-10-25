@@ -13,22 +13,24 @@ beforeEach(() => {
   calls = []; native = []; hook = () => null;
   liveWorkers = 0; peakWorkers = 0;
   const resolveDriver = async (inst) => {
-    let taskId;
+    let taskId, draftId, text;
     const bindings = () => native.map((id, i) => ({ id, index: i, title: id, titles: native.slice() }));
     return {
       isLoggedIn: async () => ({ loggedIn: true }),
       waitForLogin: async () => (await hook("waitForLogin")) || { loggedIn: true },
       call: async (method, options) => {
+        if (method === "openNativeDraft") draftId = options.id;
         calls.push({ method, options, instanceId: inst.id });
-        const override = await hook(method, options); if (override) return override;
+        const override = await hook(method, options, { draftId, taskId }); if (override) return override;
         if (method === "saveNativeDraft") { native.push(options.id); return { ok: true, bindings: bindings() }; }
         if (method === "waitNativeDraftAccepted") { native = native.filter((id) => id !== options.id); return { ok: true, conversationUrl: `https://www.doubao.com/chat/${options.id}`, bindings: bindings() }; }
+        if (method === "readProgress") return { state: "running", generationStarted: true };
         return { ok: true, conversationIds: [] };
       },
       close: () => { calls.push({ method: "close", instanceId: inst.id }); },
-      setGenerationOptions: async () => ({}), setText: async () => ({ ok: true }),
+      setGenerationOptions: async () => ({}), setText: async value => { text = value; return { ok: true }; },
       beginTask: async (input) => { taskId = input.taskId; return { ok: true, baselineUrls: [] }; },
-      send: async () => { calls.push({ method: "normalSend", instanceId: inst.id }); return { ok: true }; },
+      send: async () => { calls.push({ method: "normalSend", instanceId: inst.id, draftId, text }); return await hook("send", { text }, { draftId, taskId }) || { ok: true }; },
       readProgress: async () => { calls.push({ method: "result" }); return { state: "done", mediaUrls: [`https://fixture.invalid/${index}/${taskId}.mp4`] }; }
     };
   };
@@ -50,6 +52,66 @@ async function waitFor(check) {
   throw new Error("Native draft fixture timed out");
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
+
+test("同账号的确认提醒乱序到达，独立回复按要求生成且先落盘，不等第一条完成", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  let firstReady = false;
+  const confirmed = [];
+  hook = (method, options, context) => {
+    if (method === "peekGenerationConfirmation") return context.draftId === ids[1] || firstReady
+      ? { ok: true, kind: "text", key: context.draftId, text: "按要求生成" } : { ok: false };
+    if (method === "readProgress") return { state: "running", generationStarted: false };
+    if (method === "send") {
+      const saved = JSON.parse(fs.readFileSync(path.join(P.home(), "store.json"), "utf8"));
+      const record = saved.taskDrafts.find(d => d.id === context.draftId).submissionRecord;
+      assert.equal(record.task.confirmationIntents[context.draftId].state, "pending");
+      assert.equal(options.text, "按要求生成"); confirmed.push(context.draftId);
+    }
+  };
+  const submission = queue.submitDrafts(ids);
+  // Attach a handler now so a failed assertion cannot leave a rejected promise unobserved.
+  submission.catch(() => {});
+  await waitFor(() => confirmed.includes(ids[1]) || store.get().tasks.length);
+  assert.deepEqual(confirmed, [ids[1]]);
+  assert.equal(sends().length, 2); assert.equal(liveWorkers, 1);
+  firstReady = true;
+  assert.equal((await submission).count, 2);
+  assert.deepEqual(confirmed, [ids[1], ids[0]]);
+  assert.ok(store.get().tasks.every(t => Object.values(t.confirmationIntents)[0].state === "sent"));
+  assert.equal(liveWorkers, 0);
+});
+
+test("确认发送回执丢失时保留 pending，恢复取回不重复草稿或确认", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  hook = (method, options, context) => {
+    if (method === "peekGenerationConfirmation") return { ok: true, kind: "text", key: context.draftId || "resumed", text: "按要求生成" };
+    if (method === "send") throw new Error("确认发送后的 IPC 丢失");
+  };
+  await assert.rejects(queue.submitDrafts(ids), /已接收.*确认/);
+  assert.equal(sends().length, 2);
+  assert.equal(calls.filter(c => c.method === "normalSend").length, 2);
+  assert.ok(store.get().tasks.every(t => Object.values(t.confirmationIntents)[0].state === "pending"));
+  store.load(); queue.recoverTemplateTasks(); queue.wakeQueue();
+  await waitFor(() => store.get().tasks.every(t => t.status === "succeeded"));
+  assert.equal(calls.filter(c => c.method === "normalSend").length, 2);
+});
+
+test("等待确认提醒时停止立即关闭独立页面，迟到提醒不再发送", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  let release, peeks = 0;
+  const delayed = new Promise(resolve => { release = resolve; });
+  hook = async method => {
+    if (method === "peekGenerationConfirmation") { peeks++; await delayed; return { ok: true, kind: "text", key: "late", text: "按要求生成" }; }
+    if (method === "readProgress") return { state: "unknown" };
+  };
+  const submission = queue.submitDrafts(ids); submission.catch(() => {});
+  await waitFor(() => peeks === 2 || store.get().tasks.length);
+  assert.equal(peeks, 2);
+  queue.stopAll(); await assert.rejects(submission, /已停止/);
+  assert.equal(liveWorkers, 0); release(); await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(calls.filter(c => c.method === "normalSend").length, 0);
+  assert.equal(store.get().tasks.length, 2);
+});
 
 test("新草稿和旧版本地草稿保存编号，普通提交不带草稿编号", async () => {
   account("first"); const ids = batch();
@@ -78,6 +140,59 @@ test("已存网页的旧草稿保留原提示词和旧恢复方式", async () =>
   await queue.submitDrafts(ids);
   assert.ok(sends().every(c => c.options.prompt.startsWith("旧提示词 ")));
   assert.ok(calls.filter(c => c.method === "restoreNativeDrafts").flatMap(c => c.options).every(b => !b.draftNumber));
+});
+
+test("网页草稿已删除后明确重新存入，14 条保留原编号和快照且不发送", async () => {
+  const inst = account("first");
+  const ids = drafts.createMany(Array.from({ length: 15 }, (_, i) => template(String(i)).id)).map(d => d.id);
+  await queue.saveDrafts(ids);
+  const before = structuredClone(drafts.list()), selected = ids.slice(0, 14);
+  native = [ids[14]]; calls.length = 0;
+  hook = (method, bindings) => method === "restoreNativeDrafts" && bindings.some(b => !native.includes(b.id))
+    ? { ok: false, reason: "未找到所选豆包草稿" } : null;
+  await assert.rejects(queue.saveDrafts(selected), /未找到/);
+  assert.equal(calls.filter(c => c.method === "saveNativeDraft").length, 0);
+  assert.equal((await queue.saveDrafts(selected, { instanceId: inst.id, recreateDeleted: true })).count, 14);
+  assert.equal(native.length, 15); assert.equal(new Set(native).size, 15);
+  store.load();
+  for (const [i, draft] of drafts.list().entries()) {
+    assert.equal(draft.draftNumber, before[i].draftNumber);
+    assert.deepEqual(draft.template, before[i].template);
+    assert.equal(draft.nativeState, "saved");
+    assert.equal(draft.instanceId, inst.id);
+  }
+  assert.equal(sends().length, 0); assert.equal(store.get().tasks.length, 0);
+  calls.length = 0; await queue.saveDrafts(selected);
+  assert.equal(calls.filter(c => c.method === "saveNativeDraft").length, 0);
+});
+
+test("重新存入先校验整批附件，失败保留旧关联且不操作网页", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  drafts.updateMany({ [ids[1]]: { template: { ...drafts.list()[1].template, attachments: [{ name: "missing.png", path: path.join(root, "missing.png") }] } } });
+  const before = structuredClone(drafts.list()); calls.length = 0;
+  await assert.rejects(queue.saveDrafts(ids, { recreateDeleted: true }), /附件/);
+  assert.deepEqual(drafts.list(), before); assert.equal(calls.length, 0);
+});
+
+test("重新存入不解除保存中、已发送或接收未知的保护，也不能换号", async () => {
+  const inst = account("first"), other = account("other"), ids = batch(); await queue.saveDrafts(ids);
+  const before = structuredClone(drafts.list()); calls.length = 0;
+  await assert.rejects(queue.saveDrafts(ids, { instanceId: other.id, recreateDeleted: true }), /请使用该账号/);
+  for (const patch of [{ nativeState: "saving" }, { nativeState: "sent", submissionRecord: { task: { submissionUncertain: false } } }, { submissionRecord: { task: { submissionUncertain: true } } }]) {
+    drafts.updateMany({ [ids[0]]: { ...before[0], submissionRecord: null, ...patch } });
+    await assert.rejects(queue.saveDrafts(ids, { instanceId: inst.id, recreateDeleted: true }), /上次操作未确认/);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("重新存入重置状态写盘失败不改旧关联，不开始保存", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  const before = structuredClone(drafts.list()), save = store.save; calls.length = 0;
+  store.save = () => false;
+  try { await assert.rejects(queue.saveDrafts(ids, { recreateDeleted: true }), /草稿状态保存失败/); }
+  finally { store.save = save; }
+  assert.deepEqual(drafts.list(), before);
+  assert.equal(calls.filter(c => c.method === "prepareNativeDraft" || c.method === "saveNativeDraft").length, 0);
 });
 test("逐条触发后继续下一条，第一条回执不返回也不能阻塞第二条", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);

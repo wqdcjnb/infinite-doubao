@@ -136,8 +136,14 @@
     return { ok: true, count: files.length };
   };
 
-  api.send = function () {
+  api.send = function (options) {
     var ed = findEditor();
+    var native = all('#input-engine-container button[data-testid="chat_input_send_button"]').find(visible);
+    if (options && options.nativeOnly && (!ed || !native)) return { ok: false, reason: "未找到对话输入框的发送按钮" };
+    if (native) {
+      if (native.disabled || ["aria-disabled", "aria-busy", "data-loading"].some(function (attr) { return native.getAttribute(attr) === "true"; })) return { ok: false, reason: "发送按钮尚未就绪" };
+      native.click(); return { ok: true, mode: "native" };
+    }
     var scope = ed ? (ed.closest("form") || ed.parentElement || document) : document;
     var cands = all('button, [role="button"]', scope).filter(function (b) {
       if (!visible(b) || b.disabled) return false;
@@ -225,6 +231,17 @@
       return id ? tracking.messageIds.indexOf(id) < 0 : tracking.nodes.indexOf(node) < 0;
     });
   }
+  function confirmationPanels() { return all('[role="dialog"], dialog, #input-engine-container').filter(visible); }
+  function panelText(root) {
+    if (!root.cloneNode) return txt(root);
+    var copy = root.cloneNode(true);
+    all('[contenteditable], textarea, input', copy).forEach(function (node) { node.remove(); });
+    return txt(copy);
+  }
+  function planQuestion(content) {
+    var match = content.match(/(?:以上方案\s*[（(][^?？]{1,800}[）)]\s*是否按此开始生成|是否按(?:以上|上述)(?:完整)?方案\s*[（(][^?？]{1,800}[）)]\s*开始生成视频)[？?]/);
+    return match ? match[0] : "";
+  }
   api.beginTask = function (input) {
     var opts = typeof input === "string" ? { taskId: input } : input || {};
     if (tracking && tracking.taskId === opts.taskId && opts.resume) return { ok: true, baselineUrls: tracking.urls, baselineMessageIds: tracking.messageIds };
@@ -232,7 +249,8 @@
     var urls = opts.resume && Array.isArray(opts.baselineUrls) ? opts.baselineUrls : videoUrls();
     var ids = opts.resume && Array.isArray(opts.baselineMessageIds) ? opts.baselineMessageIds : nodes.map(messageId).filter(Boolean);
     tracking = { taskId: opts.taskId, prompt: String(opts.prompt || ""), urls: urls, keys: urls.map(videoKey), messageIds: ids, nodes: opts.resume ? [] : nodes, hadBaseline: ids.length > 0 || (!opts.resume && nodes.length > 0),
-      text: document.body ? String(document.body.innerText || "") : "", resumed: !!opts.resume, confirmed: opts.confirmedKeys || [] };
+      text: document.body ? String(document.body.innerText || "") : "", resumed: !!opts.resume, confirmed: opts.confirmedKeys || [],
+      oldPanels: opts.resume ? [] : confirmationPanels().map(function (root) { return planQuestion(panelText(root)); }).filter(Boolean) };
     return { ok: true, baselineUrls: urls, baselineMessageIds: ids };
   };
   function newText(roots, hasMessages) {
@@ -261,7 +279,8 @@
     else if (/(生成中|排队中|正在生成|处理中)/.test(tail)) state = "running";
     else if (urls.length || /(生成完成|已完成|已生成)/.test(tail)) state = "done";
     else if (findConfirmation(null, roots).kind) state = "waiting_confirmation";
-    return { state: state, percent: state === "done" ? 100 : percent, videos: urls.length, mediaUrls: urls, snippet: tail.slice(-400) };
+    var generationStarted = state === "running" && /(?:视频.{0,10}(?:正在生成|生成中|排队中)|正在(?:为你)?生成视频)/.test(tail);
+    return { state: state, generationStarted: generationStarted, percent: state === "done" ? 100 : percent, videos: urls.length, mediaUrls: urls, snippet: tail.slice(-400) };
   };
   function confirmationKey(root, content, kind) {
     var hash = 2166136261;
@@ -274,33 +293,38 @@
     // Once a new assistant response exists, the earlier confirmation request
     // is history and must not be sent again.
     var roots = current.length ? [current[current.length - 1]] : [];
-    roots = roots.concat(all('[role="dialog"], dialog').filter(visible));
+    var panels = confirmationPanels();
+    roots = roots.concat(panels);
     for (var i = 0; i < roots.length; i += 1) {
       var root = roots[i];
-      var content = txt(root);
+      var content = panels.indexOf(root) >= 0 ? panelText(root) : txt(root);
       if (!/生成/.test(content)) continue;
-      var textRequest = messageRole(root) === "assistant" && /视频生成参数确认/.test(content) && /确认后.{0,25}(开始|生成)/.test(content);
+      var question = planQuestion(content);
+      var planRequest = !!question && (messageRole(root) === "assistant" || panels.indexOf(root) >= 0);
+      if (panels.indexOf(root) >= 0 && tracking.oldPanels.indexOf(question) >= 0) continue;
+      var textRequest = planRequest || (messageRole(root) === "assistant" && /视频生成参数确认/.test(content) && /确认后.{0,25}(开始|生成)/.test(content));
       var blocked = /购买|支付|充值|订阅|开通会员|付费|扣费|升级/.test(content);
       var buttons = all('button, [role="button"]', root).filter(function (button) {
         if (!visible(button) || button.disabled || button.getAttribute("aria-disabled") === "true") return false;
         var label = txt(button);
         return /^(确认生成|继续生成|开始生成)$/.test(label) || ((root.getAttribute("role") === "dialog" || root.tagName === "DIALOG") && /^(确认|继续)$/.test(label));
       });
-      var kind = buttons.length ? "button" : textRequest ? "text" : "";
+      var kind = planRequest ? "text" : buttons.length ? "button" : textRequest ? "text" : "";
       if (!kind) continue;
-      var key = confirmationKey(root, content, kind);
+      var key = confirmationKey(root, planRequest ? question : content, kind);
       var reason = blocked ? "确认涉及付费或升级，请手动检查" : "";
       if (textRequest && options && options.model) {
         var labels = { "seedance_v2.5": "Seedance 2.5", "seedance_v2.0": "Seedance 2.0", "seedance_v2.0_fast": "Seedance 2.0 Fast", "seedance_v2.0_mini": "Seedance 2.0 Mini" };
-        var model = content.match(/Seedance\s*2\.\d+(?:\s+(?:Fast|Mini))?/i);
-        var seconds = content.match(/时长\s*[:：]?\s*(\d+)\s*秒/);
+        var parameters = planRequest ? question : content;
+        var model = parameters.match(/Seedance\s*2\.\d+(?:\s+(?:Fast|Mini))?/i);
+        var seconds = parameters.match(planRequest ? /(?:[/／]|时长\s*[:：]?)\s*(\d+)\s*秒/ : /时长\s*[:：]?\s*(\d+)\s*秒/);
         if (!model || model[0].replace(/\s+/g, " ").toLowerCase() !== String(labels[options.model] || "").toLowerCase() || !seconds || Number(seconds[1]) !== Number(options.duration)) reason = "平台确认的模型或时长与任务不一致，请手动检查";
         if (options.ratio && options.ratio !== "adaptive") {
-          var ratio = content.match(/(?:画面比例|宽高比|比例)\s*[:：]?\s*(\d+)\s*[:：]\s*(\d+)/);
+          var ratio = parameters.match(planRequest ? /(?:[/／]|画面比例|宽高比|比例)\s*[:：]?\s*(\d+)\s*[:：]\s*(\d+)/ : /(?:画面比例|宽高比|比例)\s*[:：]?\s*(\d+)\s*[:：]\s*(\d+)/);
           if (!ratio || ratio[1] + ":" + ratio[2] !== options.ratio) reason = "平台未确认所选画面比例，请手动检查";
         }
       }
-      return { ok: !reason, kind: kind, key: key, text: kind === "text" ? "确认，开始生成视频。" : txt(buttons[0]), reason: reason, button: buttons[0] || null, alreadyConfirmed: tracking.confirmed.indexOf(key) >= 0 };
+      return { ok: !reason, kind: kind, key: key, text: planRequest ? "按要求生成" : kind === "text" ? "确认，开始生成视频。" : txt(buttons[0]), reason: reason, button: buttons[0] || null, alreadyConfirmed: tracking.confirmed.indexOf(key) >= 0 };
     }
     return { ok: false };
   };
