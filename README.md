@@ -1,24 +1,30 @@
 # 豆包工坊（无限豆包）
 
-Windows 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.2.1**，内部项目标识沿用 `infinite-doubao`。
+Windows 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.2.2**，内部项目标识沿用 `infinite-doubao`。
 
 ## 下载与安装
 
-前往 [Releases](https://github.com/wqdcjnb/infinite-doubao/releases/latest) 下载 Windows x64 安装包 `DoubaoWorkshop-1.2.1-Setup.exe`，双击安装后通过桌面「豆包工坊」快捷方式启动。
+前往 [Releases](https://github.com/wqdcjnb/infinite-doubao/releases/latest) 下载 Windows x64 安装包 `DoubaoWorkshop-1.2.2-Setup.exe`，双击安装后通过桌面「豆包工坊」快捷方式启动。
 
 发行附件中的 `SHA256SUMS.txt` 用于校验下载文件。在 PowerShell 中运行：
 
 ```powershell
-Get-FileHash .\DoubaoWorkshop-1.2.1-Setup.exe -Algorithm SHA256
+Get-FileHash .\DoubaoWorkshop-1.2.2-Setup.exe -Algorithm SHA256
 ```
 
 新安装默认使用 `%LOCALAPPDATA%\Programs\豆包工坊`。升级已有版本会沿用原安装位置。账号、会话、任务、素材和设置保存在 `%APPDATA%\无限豆包`，与程序目录分开。
+
+## 1.2.2 更新
+
+- 处理后的图片直接显示在结果下方，支持点击放大、重复处理后刷新。
+- 移除设置页重复的全局模型与时长控件，任务模板保留独立参数。
+- 改进视频生成入口和模型、时长控件的等待及恢复。
 
 ## 主要功能
 
 - 多账号环境与独立浏览器会话、代理配置和指纹检查。
 - 任务模板、分镜编排、生成队列及本地视频素材管理。
-- 图片与视频人脸遮挡处理、剪映草稿导出。
+- 图片与视频人脸遮挡处理，处理后图片预览及点击放大；一键将任务视频导入剪映。
 - 本地 REST API、MCP、SSE 和命令行入口。
 
 生成能力和额度以对应服务实际提供的权限为准。

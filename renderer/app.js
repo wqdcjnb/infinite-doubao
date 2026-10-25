@@ -21,6 +21,7 @@ const state = {
   resources: [],
   maskFiles: [],
   maskResults: [],
+  maskRunning: false,
   proxyCache: {}
 };
 
@@ -685,6 +686,51 @@ function renderProxyPanel(body) {
 
 /* ---- 遮脸面板 ---- */
 
+function maskImageUrl(file) {
+  const encoded = String(file).replace(/\\/g, "/").split("/")
+    .map((part, index) => index === 0 && /^[a-z]:$/i.test(part) ? part : encodeURIComponent(part)).join("/");
+  const url = encoded.startsWith("//") ? "file:" + encoded : "file://" + (encoded.startsWith("/") ? encoded : "/" + encoded);
+  return `${url}?preview=${Date.now()}`;
+}
+
+function showMaskImagePreview(url, name, trigger) {
+  $("#maskImagePreview")?.remove();
+  const mask = el("div", "modal-mask");
+  mask.id = "maskImagePreview";
+  mask.setAttribute("role", "dialog");
+  mask.setAttribute("aria-modal", "true");
+  mask.setAttribute("aria-labelledby", "maskImagePreviewTitle");
+  const box = el("div", "modal mask-image-modal");
+  const head = el("div", "modal-head");
+  const title = el("strong", null, `处理后图片 · ${name}`);
+  title.id = "maskImagePreviewTitle";
+  title.title = name;
+  head.appendChild(title);
+  const close = () => { mask.remove(); if (trigger?.isConnected) trigger.focus(); };
+  const closeBtn = el("button", "ghost small", "关闭");
+  closeBtn.addEventListener("click", close);
+  head.appendChild(closeBtn);
+  box.appendChild(head);
+  const body = el("div", "modal-body");
+  const img = el("img", "hidden");
+  img.alt = `处理后的 ${name}`;
+  const hint = el("div", "hint", "图片加载中…");
+  img.addEventListener("load", () => { img.classList.remove("hidden"); hint.remove(); });
+  img.addEventListener("error", () => { img.classList.add("hidden"); hint.textContent = "图片预览加载失败，请关闭后定位文件检查。"; body.appendChild(hint); });
+  img.src = url;
+  body.appendChild(img);
+  body.appendChild(hint);
+  box.appendChild(body);
+  mask.appendChild(box);
+  mask.addEventListener("click", (event) => { if (event.target === mask) close(); });
+  mask.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.preventDefault(); close(); }
+    else if (event.key === "Tab") { event.preventDefault(); closeBtn.focus(); }
+  });
+  document.body.appendChild(mask);
+  closeBtn.focus();
+}
+
 function renderMaskPanel(body) {
   const card = el("div", "card");
   card.appendChild(el("h4", null, "上传前处理素材"));
@@ -742,7 +788,8 @@ function renderMaskPanel(body) {
   const btnRow = el("div", "row");
   btnRow.style.marginTop = "10px";
   const pickBtn = el("button", "ghost", "选择素材");
-  const runBtn = el("button", "primary", "开始处理");
+  const runBtn = el("button", "primary", state.maskRunning ? "处理中…" : "开始处理");
+  pickBtn.disabled = runBtn.disabled = state.maskRunning;
   btnRow.appendChild(pickBtn);
   btnRow.appendChild(runBtn);
   card.appendChild(btnRow);
@@ -757,6 +804,9 @@ function renderMaskPanel(body) {
   const fill = el("i");
   bar.appendChild(fill);
   listCard.appendChild(bar);
+  const previews = el("div", "mask-previews");
+  previews.id = "maskPreviews";
+  listCard.appendChild(previews);
   body.appendChild(listCard);
   paintMaskList();
 
@@ -764,38 +814,54 @@ function renderMaskPanel(body) {
     const files = await API.pickMaskFiles();
     if (!files.length) return;
     state.maskFiles = files.concat(state.maskFiles).slice(0, 60);
+    state.maskResults = [];
+    $("#maskImagePreview")?.remove();
+    fill.style.width = "0%";
     paintMaskList();
   });
 
   runBtn.addEventListener("click", async () => {
+    if (state.maskRunning) return;
     if (!state.maskFiles.length) { toast("先选素材", true); return; }
-    runBtn.disabled = true;
+    state.maskRunning = true;
+    pickBtn.disabled = runBtn.disabled = true;
     runBtn.textContent = "处理中…";
     state.maskResults = [];
-    const out = await API.runMask({
-      files: state.maskFiles,
-      mode: modeSel.value,
-      strength: Number(strIn.value),
-      pad: Number(padIn.value) / 100,
-      keepOriginal: keepC.checked
-    });
-    runBtn.disabled = false;
-    runBtn.textContent = "开始处理";
-    fill.style.width = "100%";
-    if (out.ok) {
-      toast(`处理完成：${out.results.length} 个文件`);
-      const done = new Set(out.results.map((r) => r.file));
-      state.maskFiles = state.maskFiles.filter((f) => !done.has(f));
-      state.maskResults = out.results;
-      paintMaskList();
-    } else {
-      toast("处理失败：" + (out.message || out.stderr || "未知错误"), true);
+    $("#maskImagePreview")?.remove();
+    fill.style.width = "0%";
+    paintMaskList();
+    try {
+      const out = await API.runMask({
+        files: state.maskFiles,
+        mode: modeSel.value,
+        strength: Number(strIn.value),
+        pad: Number(padIn.value) / 100,
+        keepOriginal: keepC.checked
+      });
+      if (out.ok) {
+        state.maskResults = (out.results || []).filter((r) => r.event === "done" && typeof r.out === "string" && r.out);
+        toast(`处理完成：${state.maskResults.length} 个文件`);
+        const done = new Set(state.maskResults.map((r) => r.file));
+        state.maskFiles = state.maskFiles.filter((f) => !done.has(f));
+        fill.style.width = "100%";
+        paintMaskList();
+      } else {
+        toast("处理失败：" + (out.message || out.stderr || "未知错误"), true);
+      }
+    } catch (error) {
+      toast("处理失败：" + ((error && error.message) || error), true);
+    } finally {
+      state.maskRunning = false;
+      pickBtn.disabled = runBtn.disabled = false;
+      runBtn.textContent = "开始处理";
+      if (!listBox.isConnected && state.panel === "mask") renderPanel();
     }
   });
 
   function paintMaskList() {
     if (!listBox) return;
     listBox.textContent = "";
+    previews.replaceChildren();
     for (const r of state.maskResults) {
       const item = el("div", "mask-item");
       item.appendChild(el("span", null, r.out.split(/[\\/]/).pop()));
@@ -804,6 +870,32 @@ function renderMaskPanel(body) {
       right.addEventListener("click", () => API.showItem(r.out));
       item.appendChild(right);
       listBox.appendChild(item);
+      if (r.kind === "image") {
+        const name = r.out.split(/[\\/]/).pop();
+        const preview = el("div", "mask-preview-card");
+        const button = el("button", "mask-preview-trigger");
+        button.disabled = true;
+        button.title = `点击放大处理后的 ${name}`;
+        button.setAttribute("aria-label", button.title);
+        const img = el("img", "hidden");
+        img.alt = `处理后的 ${name}`;
+        img.decoding = "async";
+        const hint = el("span", "hint", "预览加载中…");
+        img.addEventListener("load", () => { img.classList.remove("hidden"); hint.remove(); button.disabled = false; });
+        img.addEventListener("error", () => { img.classList.add("hidden"); button.disabled = true; hint.textContent = "图片预览加载失败，请定位文件检查"; button.appendChild(hint); });
+        img.src = maskImageUrl(r.out);
+        button.appendChild(img);
+        button.appendChild(hint);
+        button.addEventListener("click", () => showMaskImagePreview(img.src, name, button));
+        preview.appendChild(button);
+        const caption = el("div", "mask-preview-caption");
+        const filename = el("strong", null, name);
+        filename.title = r.out;
+        caption.appendChild(filename);
+        caption.appendChild(el("span", "hint", "处理后图片 · 点击图片放大"));
+        preview.appendChild(caption);
+        previews.appendChild(preview);
+      }
     }
     for (const f of state.maskFiles) {
       const item = el("div", "mask-item");

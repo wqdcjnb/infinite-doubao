@@ -476,6 +476,22 @@ input[type="checkbox"]:checked::after {
 .mask-item > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mask-item .p { color: var(--cyan); cursor: pointer; flex: 0 0 auto; }
 .mask-item .p:hover { text-decoration: underline; }
+.mask-previews { display: flex; flex-direction: column; gap: 12px; }
+.mask-previews:not(:empty) { margin-top: 14px; }
+.mask-preview-card { min-width: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
+.mask-preview-trigger { display: flex; width: 100%; min-height: 180px; padding: 0; border: 0; border-radius: 0; background: var(--panel-2); box-shadow: none; }
+.mask-preview-trigger:hover { background: var(--panel-2); box-shadow: none; }
+.mask-preview-trigger:disabled { opacity: 1; }
+.mask-preview-trigger:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
+.mask-preview-trigger img { display: block; width: 100%; height: 180px; object-fit: contain; }
+.mask-preview-caption { display: flex; flex-direction: column; gap: 3px; padding: 9px 11px; }
+.mask-preview-caption strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.modal.mask-image-modal { width: min(1000px, calc(100vw - 40px)); max-height: calc(100vh - 40px); }
+.mask-image-modal .modal-head { gap: 12px; }
+.mask-image-modal .modal-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mask-image-modal .modal-head button { flex-shrink: 0; }
+.mask-image-modal .modal-body { display: flex; align-items: center; justify-content: center; min-height: 180px; max-height: calc(100vh - 120px); background: var(--panel-2); }
+.mask-image-modal img { display: block; max-width: 100%; max-height: calc(100vh - 160px); object-fit: contain; }
 
 .progress { height: 4px; border-radius: 3px; background: #eef1f5; overflow: hidden; margin-top: 10px; position: relative; }
 .progress > i {

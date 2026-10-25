@@ -38,7 +38,7 @@ namespace DolaModSetup
         internal const string AppName = "豆包工坊";
         internal const string AppExeName = "豆包工坊.exe";
         internal const string LegacyName = "无限豆包";
-        internal const string AppVersion = "1.2.1";
+        internal const string AppVersion = "1.2.2";
         internal const string Publisher = "豆包工坊";
         internal const string RegKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\InfiniteDoubao";
         internal const string Magic = "DMINST01";
@@ -130,13 +130,19 @@ namespace DolaModSetup
         {
             string dir = Path.GetFullPath(o.Dir);
             if (dir.Length < 4) throw new InvalidOperationException("安装目录不合法。");
-            string stage = Path.Combine(Path.GetTempPath(), "dm_setup_" + Guid.NewGuid().ToString("N"));
+            // 与目标目录同卷，解压后可直接移动文件，避免再次读写整套运行时。
+            string parent = Path.GetDirectoryName(dir);
+            Directory.CreateDirectory(parent);
+            string stage = Path.Combine(parent, ".doubao-setup-" + Guid.NewGuid().ToString("N"));
+            Stopwatch timer = Stopwatch.StartNew();
             try
             {
                 // 先完整解包，损坏的安装包或被占用的旧版本不能造成半覆盖。
                 if (status != null) status("正在检查并释放安装文件…");
                 Directory.CreateDirectory(stage);
-                using (Stream payload = OpenPayload()) Extract(payload, stage, progress);
+                using (Stream payload = OpenPayload())
+                    Extract(payload, stage, progress == null ? null : new Action<int, string>(delegate(int p, string name) { progress(p * 85 / 100, name); }));
+                TryLog("extract_ms=" + timer.ElapsedMilliseconds);
                 if (!File.Exists(Path.Combine(stage, AppExeName)) ||
                     !File.Exists(Path.Combine(stage, "resources", "app.asar")))
                     throw new InvalidOperationException("安装包缺少主程序或应用资源，请重新下载安装包。");
@@ -146,7 +152,10 @@ namespace DolaModSetup
                 KillRunningIn(dir);
 
                 if (status != null) status("正在更新应用文件…");
+                timer.Restart();
                 CopyStagedFiles(stage, dir);
+                TryLog("update_ms=" + timer.ElapsedMilliseconds);
+                if (progress != null) progress(97, "");
 
                 if (status != null) status("正在创建快捷方式…");
                 string exe = Path.Combine(dir, AppExeName);
@@ -167,6 +176,11 @@ namespace DolaModSetup
 
         private static void CopyStagedFiles(string stage, string dir)
         {
+            if (!Directory.Exists(dir))
+            {
+                Directory.Move(stage, dir);
+                return;
+            }
             string[] sources = Directory.GetFiles(stage, "*", SearchOption.AllDirectories);
             DateTime deadline = DateTime.UtcNow.AddSeconds(5);
             while (true)
@@ -177,24 +191,21 @@ namespace DolaModSetup
                 bool writing = false;
                 try
                 {
-                    // 所有文件的独占句柄保持到更新完成，不能预检后释放再重新打开。
+                    // 保持读写独占锁直到提交完成；仅允许同卷替换操作删除旧文件名。
                     foreach (string source in sources)
                     {
                         string target = Path.Combine(dir, source.Substring(stage.Length + 1));
                         blocked = target;
                         Directory.CreateDirectory(Path.GetDirectoryName(target));
                         bool exists = File.Exists(target);
-                        targets.Add(new FileStream(target, exists ? FileMode.Open : FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None));
+                        targets.Add(new FileStream(target, exists ? FileMode.Open : FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Delete));
                         if (!exists) created.Add(target);
                     }
                     writing = true;
                     for (int i = 0; i < sources.Length; i++)
                     {
-                        using (FileStream source = new FileStream(sources[i], FileMode.Open, FileAccess.Read, FileShare.Read))
-                        {
-                            targets[i].SetLength(0);
-                            source.CopyTo(targets[i]);
-                        }
+                        string target = Path.Combine(dir, sources[i].Substring(stage.Length + 1));
+                        File.Replace(sources[i], target, null);
                     }
                     return;
                 }
@@ -728,7 +739,8 @@ namespace DolaModSetup
             if (pos >= len) return 0;
             long left = len - pos;
             if (count > left) count = (int)left;
-            inner.Seek(start + pos, SeekOrigin.Begin);
+            // 连续解压无需重复 Seek，让底层 FileStream 的顺序读取缓冲生效。
+            if (inner.Position != start + pos) inner.Seek(start + pos, SeekOrigin.Begin);
             int n = inner.Read(buffer, offset, count);
             pos += n;
             return n;
@@ -973,12 +985,12 @@ namespace DolaModSetup
             long now = Environment.TickCount;
             if (now - lastTick < 90 && percent < 100) return;
             lastTick = now;
-            Invoke(new Action(delegate
+            BeginInvoke(new Action(delegate
             {
                 if (percent < 0) percent = 0;
                 if (percent > 100) percent = 100;
                 bar.Value = percent;
-                lblStatus.Text = "正在释放文件…  " + percent + "%";
+                lblStatus.Text = (percent < 85 ? "正在释放文件…  " : "正在完成安装…  ") + percent + "%";
             }));
         }
 

@@ -227,9 +227,12 @@ async function runTask(task, inst, shot, sb) {
     }
     if (!task.submittedAt && driver.call) {
       const prepared = await driver.call("prepareVideoGeneration", { model: task.model, duration: task.duration });
-      if (!prepared?.ok) throw Object.assign(new Error(`视频生成参数未就绪：${prepared?.reason || "无法选择模型或时长"}`), {
-        code: (prepared?.code ? prepared.code === "model_unavailable" : /未开通|没有.*可选择|不可用|不支持|无权限|升级|会员|付费|当前账号不能使用/.test(prepared?.reason || "")) ? "model_unavailable" : "prepare_failed"
-      });
+      if (!prepared?.ok) {
+        if (prepared?.diagnostics) log.warn("video-prepare-failed", { taskId: task.id, instanceId: inst.id, diagnostics: prepared.diagnostics });
+        throw Object.assign(new Error(`视频生成参数未就绪：${prepared?.reason || "无法选择模型或时长"}`), {
+          code: (prepared?.code ? prepared.code === "model_unavailable" : /未开通|没有.*可选择|不可用|不支持|无权限|升级|会员|付费|当前账号不能使用/.test(prepared?.reason || "")) ? "model_unavailable" : "prepare_failed"
+        });
+      }
       checkStopped(sb);
     }
     if (!task.submittedAt) {

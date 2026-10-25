@@ -863,7 +863,6 @@ async function refreshSettings() {
 
   const s = V.settings || {};
   const orch = s.orchestrator || {};
-  const enh = s.enhancer || {};
   const srv = s.server || {};
 
   box.appendChild(group("派发与并发", [
@@ -889,24 +888,6 @@ async function refreshSettings() {
     numberRow("每实例每日条数", (s.quota || {}).perDay || 2, `本地派发上限，按 ${(s.quota || {}).resetTz || "Asia/Tokyo"} 每日重置；平台实际额度以账号为准`, (v) => patchSetting(["quota", "perDay"], v), { min: 1 }),
     selectRow("命名规则", s.naming || "timestamp", [["timestamp", "时间戳"], ["prompt", "提示词前 40 字"], ["custom", "自定义模板"]], (v) => patchSetting(["naming"], v)),
     textRow("命名模板", s.namingTemplate || "{account}_{date}_{index}", "可用占位符：{account} {date} {index} {prompt}", (v) => patchSetting(["namingTemplate"], v))
-  ]));
-
-  const modelKey = enh.model || "seedance_v2.5";
-  const capOf = (value) => V.models.find((m) => m.value === value)?.maxDuration || 15;
-  const curCap = capOf(modelKey);
-
-  box.appendChild(group("页面增强", [
-    numberRow(
-      "目标时长（秒）",
-      Math.min(Number(enh.duration) || 30, curCap),
-      `新模板默认值，当前模型上限 ${curCap} 秒；已有模板使用各自参数`,
-      (v) => patchSetting(["enhancer", "duration"], v),
-      { min: 1, max: curCap }
-    ),
-    selectRow("默认模型", modelKey, V.models.map((m) => [m.value, m.label]), (v) => patchSetting(["enhancer"], {
-      model: v,
-      duration: Math.min(Number(enh.duration) || 30, capOf(v))
-    }))
   ]));
 
   box.appendChild(group("本地接口", [
@@ -1038,10 +1019,6 @@ async function patchSetting(path, value) {
     if (path[0] === "downloadDir") {
       await refreshSettings();
       say("视频目录已保存");
-    } else if (path[0] === "enhancer") {
-      // 换模型会改时长上限，必须重画这组，否则输入框的 max 与提示还停在旧档位
-      await refreshSettings();
-      say("默认参数已保存，新模板会继承；已有模板使用各自参数");
     } else if (path[0] === "orchestrator" && path[1] === "stopHotkey") say("停止热键已生效");
     else if (path[0] === "updateUrl") say("更新源已保存，下次检查更新时使用");
     else say("已保存，后续任务使用新设置");

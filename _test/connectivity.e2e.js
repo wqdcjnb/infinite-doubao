@@ -66,12 +66,14 @@ if (process.argv.includes("--prepare")) {
       res.end(`<!doctype html><html><head><title>本地生成验证</title><style>body{font:16px sans-serif;margin:30px}textarea{display:block;width:700px;height:140px}button{padding:10px 30px}.avatar{width:30px;height:30px}video{width:640px;height:360px}</style></head><body>
       <img class="avatar" alt="avatar" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='30'%3E%3Crect width='30' height='30' fill='green'/%3E%3C/svg%3E"><span>我的创作</span>
       <div id="messages"><div data-message-role="assistant"><div data-message-id="old-message">旧消息：已完成</div></div></div>
+      <button type="button" id="new-chat">新对话</button>
       <button type="button" id="video-mode" ${menuEntry ? 'hidden role="menuitem"' : ''}>视频生成</button>
       <div id="video-options" hidden><button type="button" id="model-picker" role="button" aria-expanded="false">模型 Seedance 2.0 Fast</button><button type="button" id="duration-picker" role="button" aria-expanded="false">自动 · 10s</button></div><div id="menus"></div>
       <form id="composer"><textarea placeholder="输入提示词"></textarea>${menuEntry ? '<button type="button" id="chat-mode" aria-haspopup="menu" aria-expanded="false">对话</button><button type="button" id="skills" aria-haspopup="menu" aria-expanded="false">技能</button>' : ''}<button type="submit">生成</button></form>
       <script>
       let selectedModel='Seedance 2.0 Fast', selectedDuration=10;
       const controlEvents={modelPointerDown:0,durationPointerDown:0,durationKeys:[],skillsOpened:0};
+      document.querySelector('#new-chat').onclick=()=>document.querySelector('#messages').replaceChildren();
       const chatMode=document.querySelector('#chat-mode'), skills=document.querySelector('#skills');
       if(chatMode){chatMode.onclick=()=>chatMode.setAttribute('aria-expanded',String(chatMode.getAttribute('aria-expanded')!=='true'));chatMode.onkeydown=()=>chatMode.setAttribute('aria-expanded','false');}
       if(skills)skills.onclick=()=>{skills.setAttribute('aria-expanded','true');controlEvents.skillsOpened++;setTimeout(()=>{document.querySelector('#video-mode').hidden=false;},400);};
