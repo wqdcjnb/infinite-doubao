@@ -1,5 +1,12 @@
 "use strict";
 
+if (process.argv.includes("--studio-executor")) {
+  require("./server-executor").start().catch(() => {
+    process.stderr.write("studio-executor: startup failed; check private configuration and runtime\n");
+    require("electron").app.exit(1);
+  });
+} else {
+
 /**
  * 主进程
  *
@@ -958,3 +965,4 @@ app.on("login", (event, webContents, details, authInfo, callback) => {
     callback(hit.username || "", hit.password || "");
   }
 });
+}
