@@ -41,6 +41,11 @@ process.on("uncaughtException", (error) => { bootLog("uncaught", error); if (!st
 process.on("unhandledRejection", (error) => { bootLog("unhandled-rejection", error); if (!startupReady) reportStartupFailure(error); });
 
 const { app, BrowserWindow, ipcMain, session, shell, dialog, Menu, globalShortcut } = require("electron");
+if (process.platform === "darwin") {
+  // Intel macOS can defer a hidden guest's 100 ms timer past the task's 20 s deadline.
+  app.commandLine.appendSwitch("disable-background-timer-throttling");
+  app.commandLine.appendSwitch("disable-renderer-backgrounding");
+}
 app.on("before-quit", () => { appQuitting = true; });
 const path = require("node:path");
 const fs = require("node:fs");

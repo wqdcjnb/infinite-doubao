@@ -45,6 +45,9 @@ const dmgRoot = path.join(out, "image");
 const app = path.join(dmgRoot, `${name}.app`);
 run("ditto", [path.join(runtime, "Electron.app"), app]);
 const contents = path.join(app, "Contents"), res = path.join(contents, "Resources");
+for (const license of ["LICENSE", "LICENSES.chromium.html"]) {
+  if (fs.existsSync(path.join(runtime, license))) fs.copyFileSync(path.join(runtime, license), path.join(res, license));
+}
 fs.rmSync(path.join(res, "default_app.asar"), { force: true });
 fs.renameSync(path.join(contents, "MacOS", "Electron"), path.join(contents, "MacOS", name));
 const plist = path.join(contents, "Info.plist");
@@ -93,7 +96,9 @@ for (const tool of ["ffmpeg", "ffprobe"]) {
 }
 const license = await download(`https://github.com/eugeneware/ffmpeg-static/releases/download/${deps.ffmpegRelease}/darwin-${arch}.LICENSE`, deps[arch].license);
 fs.copyFileSync(license, path.join(tools, "FFmpeg-LICENSE.txt"));
-fs.writeFileSync(path.join(res, "THIRD-PARTY.txt"), `Electron ${deps.electron}: https://github.com/electron/electron\nCPython ${deps.python}: https://github.com/astral-sh/python-build-standalone/releases/tag/${deps.pythonRelease}\nOpenCV ${deps.opencv}: https://github.com/opencv/opencv-python\nNumPy ${deps.numpy}: https://github.com/numpy/numpy\nFFmpeg: https://github.com/eugeneware/ffmpeg-static/releases/tag/${deps.ffmpegRelease}\nFFmpeg source: https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz\nSee bundled licenses and Python dist-info directories.\n`);
+const readme = await download(`https://github.com/eugeneware/ffmpeg-static/releases/download/${deps.ffmpegRelease}/darwin-${arch}.README`, deps[arch].readme);
+fs.copyFileSync(readme, path.join(tools, "FFmpeg-README.txt"));
+fs.writeFileSync(path.join(res, "THIRD-PARTY.txt"), `Electron ${deps.electron}: https://github.com/electron/electron\nCPython ${deps.python}: https://github.com/astral-sh/python-build-standalone/releases/tag/${deps.pythonRelease}\nOpenCV ${deps.opencv}: https://github.com/opencv/opencv-python\nNumPy ${deps.numpy}: https://github.com/numpy/numpy\nFFmpeg binaries, source and build information: https://github.com/eugeneware/ffmpeg-static/releases/tag/${deps.ffmpegRelease}\nSee tools/FFmpeg-README.txt, bundled licenses and Python dist-info directories.\n`);
 // A local ad-hoc signature makes the arm64 bundle executable; it is not Developer ID notarization.
 // Production signing can be supplied by a developer's login keychain, with no secrets in this repository.
 const identity = process.env.DOLAMOD_MAC_SIGN_IDENTITY;
