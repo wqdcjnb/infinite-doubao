@@ -446,7 +446,7 @@ function registerIpc() {
     if (!inst) return { ok: false, message: "实例不存在" };
     try {
       const ses = await prepareSession(inst);
-      return await proxyDiagnostics.testProxy(ses, { mode: inst.proxy?.mode || "direct" });
+      return await proxyDiagnostics.testProxy(ses, { mode: inst.proxy?.mode || "direct", targetUrl: inst.url || store.get().settings.defaultUrl });
     } catch {
       return { ok: false, message: "代理设置应用失败，请检查代理配置后重试" };
     }
