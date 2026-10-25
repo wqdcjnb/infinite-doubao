@@ -11,7 +11,7 @@ beforeEach(() => {
   Object.assign(store.get().settings.orchestrator, { maxParallel: 3, pollInterval: 1500, retryLimit: 0, autoDownload: false });
   store.get().settings.quota.perDay = 20;
   calls = []; native = []; hook = () => null;
-  queue.init({ sessionFor: () => ({ cookies: { get: async () => [{ name: "sessionid" }] } }), resolveDriver: async (inst) => {
+  const resolveDriver = async (inst) => {
     let taskId;
     const bindings = () => native.map((id, i) => ({ id, index: i, title: id, titles: native.slice() }));
     return {
@@ -23,12 +23,14 @@ beforeEach(() => {
         if (method === "waitNativeDraftAccepted") { native = native.filter((id) => id !== options.id); return { ok: true, conversationUrl: `https://www.doubao.com/chat/${options.id}`, bindings: bindings() }; }
         return { ok: true, conversationIds: [] };
       },
+      close: () => { calls.push({ method: "close", instanceId: inst.id }); },
       setGenerationOptions: async () => ({}), setText: async () => ({ ok: true }),
       beginTask: async (input) => { taskId = input.taskId; return { ok: true, baselineUrls: [] }; },
       send: async () => { calls.push({ method: "normalSend", instanceId: inst.id }); return { ok: true }; },
       readProgress: async () => { calls.push({ method: "result" }); return { state: "done", mediaUrls: [`https://fixture.invalid/${index}/${taskId}.mp4`] }; }
     };
-  } });
+  };
+  queue.init({ sessionFor: () => ({ cookies: { get: async () => [{ name: "sessionid" }] } }), resolveDriver, resolveDraftDriver: resolveDriver });
 });
 afterEach(async () => { queue.stopAll(); await waitFor(() => !queue.state().running.length); });
 after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -40,6 +42,29 @@ async function waitFor(check) {
   throw new Error("Native draft fixture timed out");
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
+test("整批页面先就绪，所有发送先触发，慢回执不阻塞其他发送", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  let release;
+  const delayed = new Promise((resolve) => { release = resolve; });
+  hook = async (method, options) => {
+    if (method === "sendNativeDraft") assert.equal(calls.filter((c) => c.method === "openNativeDraft").length, 2);
+    if (method === "waitNativeDraftAccepted" && options.id === ids[0]) await delayed;
+  };
+  const submission = queue.submitDrafts(ids);
+  await waitFor(() => sends().length === 2);
+  assert.equal(store.get().tasks.length, 0);
+  assert.ok(drafts.list().every((d) => d.submissionRecord));
+  release(); assert.equal((await submission).count, 2);
+  assert.equal(calls.filter((c) => c.method === "close").length, 2);
+  assert.equal(new Set(store.get().tasks.map((t) => t.submittedAt)).size, 1);
+});
+test("任一页面准备失败整批不发送，关闭所有已创建页面", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  hook = (method, options) => method === "openNativeDraft" && options.id === ids[1] ? { ok: false, reason: "附件未就绪" } : null;
+  await assert.rejects(queue.submitDrafts(ids), /整批尚未触发发送/);
+  assert.equal(sends().length, 0); assert.equal(calls.filter((c) => c.method === "close").length, 2);
+  assert.ok(drafts.list().every((d) => !d.submissionRecord));
+});
 test("旧版本地草稿转为云电脑，已绑定的旧版对话草稿禁止保存和发送", async () => {
   const chosen = account("chosen"), ids = batch();
   drafts.updateMany(Object.fromEntries(ids.map((id) => [id, { executionMode: "video" }])));
@@ -84,7 +109,7 @@ test("只发送勾选草稿，重载保持同一账号", async () => {
 test("中途接收超时保留记录，已接收任务仍取回，未确认点击不重发", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   hook = (method, options) => method === "waitNativeDraftAccepted" && options.id === ids[1] ? { ok: false, reason: "接收超时" } : null;
-  await assert.rejects(queue.submitDrafts(ids), /已发送 1\/2/);
+  await assert.rejects(queue.submitDrafts(ids), /已确认发送 1\/2/);
   assert.equal(store.get().tasks.length, 1); assert.equal(drafts.list()[0].submissionRecord.task.submissionUncertain, true);
   store.load(); await assert.rejects(queue.submitDrafts([ids[1]]), /不会自动重发/); assert.equal(sends().length, 2);
 });
@@ -109,6 +134,15 @@ test("批量操作互斥，停止阻止下一次点击", async () => {
   hook = async (method, options) => {
     if (method === "openNativeDraft" && options.id === ids[1]) { await assert.rejects(queue.submitDrafts([ids[1]]), /正在执行任务/); queue.stopAll(); }
   };
-  await assert.rejects(queue.submitDrafts(ids), /已停止/); assert.equal(sends().length, 1);
+  await assert.rejects(queue.submitDrafts(ids), /已停止/); assert.equal(sends().length, 0);
   assert.equal(queue.state().paused, true); assert.equal(drafts.list()[0].submissionRecord, undefined);
+});
+test("并发回执更新未勾选草稿的位置，单条拒绝不影响其他已发任务", async () => {
+  account("first"); const ids = [...batch(), drafts.create(template("C").id).id]; await queue.saveDrafts(ids);
+  hook = (method, options) => method === "sendNativeDraft" && options.id === ids[1] ? { ok: false, reason: "按钮状态变化，未发送" } : null;
+  await assert.rejects(queue.submitDrafts(ids.slice(0, 2)), /已确认发送 1\/2/);
+  assert.equal(drafts.list().find((d) => d.id === ids[1]).submissionRecord, null);
+  const remaining = drafts.list().find((d) => d.id === ids[2]).nativeBinding;
+  assert.equal(remaining.index, 1); assert.deepEqual(remaining.titles, ids.slice(1));
+  assert.equal(store.get().tasks.length, 1);
 });

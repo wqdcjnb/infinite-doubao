@@ -3,14 +3,19 @@
 // draft has been sent, so waiting for generation before the next send fails.
 process.env.DM_TEST_CDP_PORT = process.env.DM_TEST_CDP_PORT || "9254";
 const assert = require("node:assert/strict"), fs = require("node:fs"), path = require("node:path"), http = require("node:http");
-const { CDP } = require("./cdp");
+const { CDP, getJSON } = require("./cdp");
 const home = path.resolve(process.env.DM_TEST_HOME || path.join(__dirname, "../build/native-drafts-e2e-userdata"));
-const port = 18854, sent = []; let resultsReady = false;
+const port = 18854, sent = [], receipts = [], receivedAt = []; let resultsReady = false;
 const video = fs.readFileSync(path.join(__dirname, "clip.mp4"));
 const server = http.createServer((req,res)=>{
   if(req.url.startsWith('/generated')){res.writeHead(200,{'Content-Type':'video/mp4','Content-Length':video.length});return res.end(video);}
   if(req.url==='/result-ready'){res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(resultsReady));}
-  if(req.url==='/submit'){let data='';req.on('data',c=>data+=c);req.on('end',()=>{sent.push(JSON.parse(data));res.setHeader('Content-Type','application/json');res.end(JSON.stringify({id:String(10000+sent.length),url:'/generated-'+sent.length+'.mp4?lr=watermark'}));});return;}
+  if(req.url==='/submit'){let data='';req.on('data',c=>data+=c);req.on('end',()=>{
+    sent.push(JSON.parse(data));receivedAt.push(Date.now());const n=sent.length;
+    receipts.push(()=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({id:String(10000+n),url:'/generated-'+n+'.mp4?lr=watermark'}));});
+    // A serial sender deadlocks here: neither response is released until BOTH requests arrive.
+    if(receipts.length===2)receipts.forEach((reply,i)=>setTimeout(reply,50+i*100));
+  });return;}
   res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Set-Cookie':'sessionid=native-fixture-only; Path=/'});res.end(fs.readFileSync(path.join(__dirname,'native-drafts-fixture.html')));
 });
 (async()=>{
@@ -72,14 +77,19 @@ const server = http.createServer((req,res)=>{
     await c.eval("document.querySelector('#draftSubmit').click();document.querySelector('#draftSubmit').click()");
     await wait(()=>sent.length===2);
     assert.equal(resultsReady,false);assert.ok(sent.every(s=>s.mode==='云电脑'));
-    assert.ok(sent[0].prompt.includes('独立提示词 1'));assert.ok(sent[1].prompt.includes('独立提示词 2'));
-    assert.equal(sent[0].refs.length,0);assert.equal(sent[1].refs.length,1);
-    console.log('PASS: both drafts sent before any result, full prompts and reference attachment stay with their template');
+    const first=sent.find(s=>s.prompt.includes('独立提示词 1')),second=sent.find(s=>s.prompt.includes('独立提示词 2'));
+    assert.ok(first&&second);assert.equal(first.refs.length,0);assert.equal(second.refs.length,1);
+    assert.ok(Math.max(...receivedAt)-Math.min(...receivedAt)<1000,'requests arrive together before either acknowledgement');
+    console.log('PASS: both requests arrive before either acknowledgement, spread='+ (Math.max(...receivedAt)-Math.min(...receivedAt)) +'ms; prompts and attachments stay separate');
     resultsReady=true;
     await wait(async()=>{const ts=await call('dm:tasks');return ts.length===2&&ts.every(t=>t.status==='succeeded');});
     assert.equal(sent.length,2);assert.equal((await call('dm:drafts')).length,1);
     const tasks=await call('dm:tasks');assert.equal(new Set(tasks.map(t=>t.instanceId)).size,1);
     assert.ok(tasks.every(t=>t.conversationLocked&&t.result.files.length&&t.result.files.every(f=>fs.existsSync(f))));
+    assert.equal(new Set(tasks.map(t=>t.submittedAt)).size,1);
+    assert.equal((await getJSON('/json/list')).filter(p=>p.url.startsWith('http://127.0.0.1:18854')).length,1,'temporary submission pages are closed');
+    await c.eval("document.querySelector('webview').reload()");
+    await wait(()=>page("document.readyState==='complete'&&document.querySelector('aside').children.length===1"));
     assert.equal((await c.eval(`DM.call('dm:drafts:submit',${JSON.stringify(ds.slice(0,2).map(d=>d.id))})`)).ok,false);
     console.log('PASS: reload restores ambiguous titles safely, accepted tasks retrieve separate videos without resending; unselected draft retained');
     await click('[data-view="templates"]');

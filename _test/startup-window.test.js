@@ -28,7 +28,7 @@ function fixture({ loadError = null } = {}) {
   const app = new EventEmitter(); app.isReady = () => true; app.exit = (code) => exits.push(code); app.whenReady = () => Promise.resolve();
   const dialog = { showErrorBox: (title, message) => diagnostics.push({ title, message }) };
   const context = vm.createContext({
-    app, dialog, BrowserWindow: FakeWindow, startupReady: true, startupFailed: false, appQuitting: false, mainWindow: null,
+    app, dialog, BrowserWindow: FakeWindow, startupReady: true, startupFailed: false, appQuitting: false, mainWindow: null, draftWindows: new Set(),
     path, __dirname: "C:/fixture/src", brand: { name: "无限豆包" }, BOOT_LOG: "C:/fixture/boot.log", bootLog() {},
     require: (name) => { assert.equal(name, "electron"); return { app, dialog }; },
     process: { exit: (code) => exits.push(code) }, log: { info() {}, error() {}, init() {} },
@@ -86,4 +86,11 @@ test("正常退出期间渲染器结束不会弹错或被二次启动重新显�
   win.webContents.emit("render-process-gone", {}, { reason: "clean-exit", exitCode: 0 });
   f.app.emit("second-instance");
   assert.equal(f.diagnostics.length, 0); assert.deepEqual(f.exits, []); assert.deepEqual(win.calls, []);
+});
+test("关闭主窗口同步销毁所有临时草稿页面，不遗留隐藏进程", () => {
+  const f = fixture(); f.context.createWindow();
+  let closed = 0;
+  for (let i = 0; i < 2; i++) f.context.draftWindows.add({ isDestroyed: () => false, destroy: () => { closed++; } });
+  f.created[0].emit("closed");
+  assert.equal(closed, 2); assert.equal(f.context.mainWindow, null);
 });

@@ -102,7 +102,7 @@
     var row = rowFor(options.id), button = sendButton();
     if (!row || !row.classList.contains("bg-dbx-bg-float") || text(editor()) !== normalize(options.prompt) || !enabled(button)) throw new Error("当前草稿发生变化，尚未点击发送");
     button.click();
-    return { ok: true };
+    return { ok: true, clickedAt: new Date().toISOString() };
   });
   api.waitNativeDraftAccepted = result(async function (options) {
     await wait(function () {

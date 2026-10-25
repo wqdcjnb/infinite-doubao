@@ -17,7 +17,7 @@ const log = require("./logger");
 
 const events = new EventEmitter();
 const runtime = { running: new Map(), nativeDrafts: new Map(), busy: new Set(), blocked: new Map(), paused: false, stopped: new Set(), timer: null, lastError: "" };
-let deps = { resolveDriver: null, findWebContents: null };
+let deps = { resolveDriver: null, resolveDraftDriver: null, findWebContents: null };
 function init(d) { deps = { ...deps, ...(d || {}) }; }
 function emit(type, payload) {
   try { events.emit("event", { type, at: new Date().toISOString(), ...payload }); } catch {}
@@ -502,6 +502,13 @@ function nativeBindings(instanceId) {
 function bindingPatches(bindings) {
   return Object.fromEntries((bindings || []).map((binding) => [binding.id, { nativeBinding: binding }]));
 }
+function remainingDraftBindings(bindings, acceptedIds) {
+  const removed = bindings.filter((b) => acceptedIds.has(b.id));
+  return bindings.filter((b) => !acceptedIds.has(b.id)).map((b) => {
+    const indexes = new Set(removed.filter((r) => JSON.stringify(r.titles) === JSON.stringify(b.titles)).map((r) => r.index));
+    return { ...b, index: b.index - [...indexes].filter((i) => i < b.index).length, titles: b.titles.filter((_title, i) => !indexes.has(i)) };
+  });
+}
 async function withNativeDrafts(selected, options, fn) {
   const fixed = [...new Set(selected.map((d) => d.instanceId).filter(Boolean))];
   if (fixed.length > 1) throw new Error("请选择同一个豆包号里的草稿一起发送");
@@ -575,37 +582,63 @@ async function submitDrafts(ids, options = {}) {
     if (d.executionMode !== "work" && !d.submissionRecord) throw new Error(`草稿「${d.template.name}」仅支持通过云电脑提交，请先存入云电脑草稿`);
     if (!d.submissionRecord && d.nativeState !== "saved") throw new Error("请先将所选草稿存入豆包网页，再一起发送");
   }
-  return withNativeDrafts(selected, options, async (driver, inst, check, operation) => {
-    const accepted = [], draftBatchId = `draft-batch-${crypto.randomBytes(12).toString("hex")}`;
-    let failure;
+  return withNativeDrafts(selected, options, async (_driver, inst, check, operation) => {
+    const accepted = selected.filter((d) => d.submissionRecord).map((d) => ({ id: d.id, record: d.submissionRecord }));
+    const pending = selected.filter((d) => !d.submissionRecord), workers = [];
+    const bindings = nativeBindings(inst.id), draftBatchId = `draft-batch-${crypto.randomBytes(12).toString("hex")}`;
+    let failure, readyCount = 0;
     try {
-      for (const draft of selected) {
+      if (pending.length && !deps.resolveDraftDriver) throw new Error("并发草稿页面未就绪，请更新并重启应用");
+      // Every draft has its own page, but all pages share the chosen account's session.
+      // Nothing is sent until the whole selection is ready.
+      const prepared = await Promise.allSettled(pending.map(async (draft) => {
         check();
-        if (draft.submissionRecord) { accepted.push({ id: draft.id, record: draft.submissionRecord }); continue; }
+        const driver = await deps.resolveDraftDriver(inst);
+        workers.push(driver);
+        check();
+        if ((await driver.isLoggedIn())?.loggedIn !== true) throw new Error(`账号 ${inst.name} 的草稿页面登录已失效`);
+        requirePage(await driver.call("restoreNativeDrafts", bindings));
         const options = { id: draft.id, prompt: draft.nativePrompt, executionMode: draft.executionMode };
         const opened = requirePage(await driver.call("openNativeDraft", options));
         const record = templateRecords(draft.template, draft.executionMode), task = record.task;
-        Object.assign(task, { prompt: draft.nativePrompt, draftBatchId, instanceId: inst.id, instanceName: inst.name, preferredInstanceId: inst.id, submittedAt: new Date().toISOString(), submissionUncertain: true });
+        Object.assign(task, { prompt: draft.nativePrompt, draftBatchId, instanceId: inst.id, instanceName: inst.name, preferredInstanceId: inst.id, submissionUncertain: true });
         const tracking = requirePage(await driver.beginTask({ taskId: task.id, prompt: task.prompt, resume: false }));
         Object.assign(task, { baselineUrls: tracking.baselineUrls || [], baselineMessageIds: tracking.baselineMessageIds || [], baselineMediaKeys: [...new Set([...(tracking.baselineUrls || []).map(mediaKey), ...interceptor.list({ instanceId: inst.id, kind: "video", limit: 800 }).map((m) => mediaKey(m.url))])], confirmationIntents: {} });
-        const previousOptions = await driver.setGenerationOptions({ model: task.model, duration: task.duration });
-        try {
-          check();
-          drafts.updateMany({ [draft.id]: { submissionRecord: JSON.parse(JSON.stringify(record)) } });
-          const sent = await driver.call("sendNativeDraft", options);
-          if (!sent?.ok) { drafts.updateMany({ [draft.id]: { submissionRecord: null } }); requirePage(sent); }
-          const receipt = requirePage(await driver.call("waitNativeDraftAccepted", { ...options, conversationIds: opened.conversationIds }));
-          Object.assign(task, { conversationUrl: receipt.conversationUrl, conversationLocked: true, submissionUncertain: false });
-          drafts.updateMany({ ...bindingPatches(receipt.bindings), [draft.id]: { nativeState: "sent", nativeBinding: null, submissionRecord: record } });
-          accepted.push({ id: draft.id, record });
-          emit("draft", { message: `豆包已接收 ${accepted.length}/${selected.length} 条`, instanceId: inst.id });
-        } finally { await driver.setGenerationOptions(previousOptions).catch(() => {}); }
-      }
+        await driver.setGenerationOptions({ model: task.model, duration: task.duration });
+        check();
+        emit("draft", { message: `并发发送准备就绪 ${++readyCount}/${pending.length}`, instanceId: inst.id });
+        return { draft, driver, options, opened, record };
+      }));
+      const rejected = prepared.find((p) => p.status === "rejected");
+      if (rejected) throw new Error(`整批尚未触发发送：${rejected.reason.message}`);
+      check();
+      const batch = prepared.map((p) => p.value);
+      const submittedAt = new Date().toISOString();
+      batch.forEach((p) => { p.record.task.submittedAt = submittedAt; });
+      if (batch.length) drafts.updateMany(Object.fromEntries(batch.map((p) => [p.draft.id, { submissionRecord: JSON.parse(JSON.stringify(p.record)) }])));
+      // Issue EVERY click before awaiting ANY acknowledgement. A slow page can
+      // never serialize the other sends. A durable intent exists for every click.
+      const launches = batch.map((p) => ({ ...p, sent: p.driver.call("sendNativeDraft", p.options) }));
+      if (batch.length) log.info("draft-batch-dispatched", { draftBatchId, instanceId: inst.id, count: batch.length, submittedAt });
+      const outcomes = await Promise.allSettled(launches.map(async ({ draft, driver, options, opened, record, sent }) => {
+        const clicked = await sent;
+        if (!clicked?.ok) { drafts.updateMany({ [draft.id]: { submissionRecord: null } }); requirePage(clicked); }
+        record.task.sentAt = clicked.clickedAt || submittedAt;
+        const receipt = requirePage(await driver.call("waitNativeDraftAccepted", { ...options, conversationIds: opened.conversationIds }));
+        Object.assign(record.task, { conversationUrl: receipt.conversationUrl, conversationLocked: true, submissionUncertain: false });
+        drafts.updateMany({ [draft.id]: { nativeState: "sent", nativeBinding: null, submissionRecord: record } });
+        accepted.push({ id: draft.id, record });
+        emit("draft", { message: `并发提交：豆包已接收 ${accepted.length}/${selected.length} 条`, instanceId: inst.id });
+      }));
+      failure = outcomes.find((o) => o.status === "rejected")?.reason;
+      // Worker snapshots can each be stale while another page is accepting.
+      // Reindex only known receipts; unknown results stay blocked from resending.
+      drafts.updateMany(bindingPatches(remainingDraftBindings(bindings, new Set(accepted.map((a) => a.id)))));
     } catch (error) { failure = error; }
-    // Start result retrieval only AFTER all sends (or a partial failure). A slow
-    // generation can never hold up the next draft's send. Receipts survive a crash.
+    finally { await Promise.allSettled(workers.map((driver) => Promise.resolve().then(() => driver.close()))); }
+    accepted.sort((a, b) => selected.findIndex((d) => d.id === a.id) - selected.findIndex((d) => d.id === b.id));
     const items = accepted.length ? commitTemplates(accepted.map((a) => a.record), accepted.map((a) => a.id), !operation.stopped) : [];
-    if (failure) throw new Error(`已发送 ${accepted.length}/${selected.length} 条。${failure.message}；其余草稿记录已保留`);
+    if (failure) throw new Error(`已确认发送 ${accepted.length}/${selected.length} 条。${failure.message}；其余草稿记录已保留`);
     return { items, count: items.length, instanceId: inst.id, instanceName: inst.name };
   });
 }

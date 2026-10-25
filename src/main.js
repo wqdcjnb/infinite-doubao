@@ -89,6 +89,7 @@ let server = null;
 let registeredStopHotkey = "";
 let activeMaskJobs = 0;
 const openingAccounts = new Map();
+const draftWindows = new Set();
 const watchedLoginSessions = new WeakSet();
 
 /* ------------------------------------------------------------------ 基础 */
@@ -263,7 +264,10 @@ function createWindow() {
     if (/^https?:/i.test(url)) shell.openExternal(url);
     return { action: "deny" };
   });
-  mainWindow.on("closed", () => { if (mainWindow === win) mainWindow = null; });
+  mainWindow.on("closed", () => {
+    if (mainWindow === win) mainWindow = null;
+    for (const page of draftWindows) if (!page.isDestroyed()) page.destroy();
+  });
 }
 
 /* -------------------------------------------------------------- webview 事件 */
@@ -799,6 +803,26 @@ orchestrator.init({
   resolveDriver: async (inst) => {
     const wc = await ensureAccountWebContents(inst);
     return driverMod.open(inst, { webContents: wc });
+  },
+  resolveDraftDriver: async (inst) => {
+    await prepareSession(inst);
+    if (!mainWindow || mainWindow.isDestroyed()) throw new Error("主窗口已关闭，无法准备并发草稿");
+    const win = new BrowserWindow({
+      parent: mainWindow, show: false, width: 1280, height: 900,
+      webPreferences: { partition: inst.partition, preload: webviewPreloadPath(), contextIsolation: false,
+        nodeIntegration: false, nodeIntegrationInSubFrames: false, sandbox: false,
+        webSecurity: true, spellcheck: false, backgroundThrottling: false }
+    });
+    draftWindows.add(win);
+    win.on("closed", () => draftWindows.delete(win));
+    const close = () => { if (!win.isDestroyed()) win.destroy(); };
+    win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    try {
+      await win.loadURL(new URL("/chat/", inst.url).href);
+      const driver = await driverMod.open(inst, { webContents: win.webContents });
+      driver.close = close;
+      return driver;
+    } catch (error) { close(); throw error; }
   },
   findWebContents
 });

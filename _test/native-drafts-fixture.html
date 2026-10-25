@@ -15,6 +15,7 @@ const trace=event=>{window.fixtureTrace.push({event,at:Date.now(),performance:pe
 new MutationObserver(()=>trace('send-attribute')).observe(send,{attributes:true});
 document.addEventListener('click',e=>{if(e.target.tagName==='BUTTON')trace('click:'+e.target.textContent);},true);
 function persist(){localStorage.setItem('fixture',JSON.stringify(saved));}
+window.addEventListener('storage',e=>{if(e.key==='fixture'){saved=JSON.parse(e.newValue);render();}});
 function render(){
   for(const el of [...box.children])if(!saved.drafts.some(d=>d.id===el.id))el.remove();
   saved.drafts.forEach((d,i)=>{
@@ -44,7 +45,7 @@ async function show(c){
 }
 document.querySelector('form').onsubmit=async e=>{e.preventDefault();send.disabled=true;trace('submit');
  const payload={prompt:editor.value,mode:mode.textContent,refs:refs.slice()};const result=await(await fetch('/submit',{method:'POST',body:JSON.stringify(payload)})).json();
- saved.drafts=saved.drafts.filter(d=>d.id!==current);const c={...payload,...result};saved.conversations.unshift(c);persist();current=null;editor.value='';refs=[];
+ saved=JSON.parse(localStorage.getItem('fixture'));saved.drafts=saved.drafts.filter(d=>d.id!==current);const c={...payload,...result};saved.conversations.unshift(c);persist();current=null;editor.value='';refs=[];
  history.pushState({},'','/chat/'+c.id);render();send.disabled=false;show(c);
 };
 render();const previous=saved.conversations.find(c=>location.pathname==='/chat/'+c.id);if(previous)show(previous);
