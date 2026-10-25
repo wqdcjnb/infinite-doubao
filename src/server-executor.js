@@ -195,6 +195,18 @@ function readConfig(file) {
   const token=fs.readFileSync(cfg.tokenFile,'utf8').trim();
   return {...cfg,stateDir:path.resolve(base,cfg.stateDir),token};
 }
+function studioConfigFile(app,argv=process.argv,environment=process.env) {
+  const native=app.commandLine.getSwitchValue('studio-config');
+  if(native)return native;
+  // Electron can omit application switches from commandLine while retaining argv.
+  const index=argv.findIndex(value=>value==='--studio-config'||value.startsWith('--studio-config='));
+  if(index>=0) {
+    const value=argv[index]==='--studio-config'?argv[index+1]:argv[index].slice('--studio-config='.length);
+    if(!value||value.startsWith('--'))throw new Error('private --studio-config file required');
+    return value;
+  }
+  return environment.DOUBAO_STUDIO_CONFIG;
+}
 function createStudioWindow(inst,{BrowserWindow=require('electron').BrowserWindow,enhancer={},height=900}={}) {
   const win=new BrowserWindow({show:false,width:1280,height,useContentSize:true,
     webPreferences:{partition:inst.partition,contextIsolation:true,nodeIntegration:false,nodeIntegrationInSubFrames:false,
@@ -209,7 +221,7 @@ function createStudioWindow(inst,{BrowserWindow=require('electron').BrowserWindo
 }
 async function start() {
   const {app,BrowserWindow,session}=require('electron');
-  const file=app.commandLine.getSwitchValue('studio-config')||process.env.DOUBAO_STUDIO_CONFIG;
+  const file=studioConfigFile(app);
   if(!file)throw new Error('private --studio-config file required');
   const cfg=readConfig(file);fs.mkdirSync(cfg.stateDir,{recursive:true,mode:0o700});app.setPath('userData',cfg.stateDir);app.setPath('sessionData',cfg.stateDir);
   if(!app.requestSingleInstanceLock()) {app.exit(1);return;}
@@ -243,4 +255,4 @@ async function start() {
   bridge.run(controller.signal).catch(()=>{process.stderr.write('studio-executor: stopped\n');app.exit(1);});
   return {bridge,adapter};
 }
-module.exports={NativeAdapter,decryptInput,assertDedicatedState,readConfig,createStudioWindow,start};
+module.exports={NativeAdapter,decryptInput,assertDedicatedState,readConfig,studioConfigFile,createStudioWindow,start};
