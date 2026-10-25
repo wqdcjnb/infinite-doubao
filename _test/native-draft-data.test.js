@@ -89,3 +89,11 @@ test("已绑定原生 ID 不得悄悄改绑到另一条同编号或同正文草�
   }
   assert.equal(p.sends(), 0);
 });
+
+test("原生条目移除后，空列表恢复不能重新写回缓存中的旧绑定", async () => {
+  const p = page();
+  assert.equal((await p.api.restoreNativeDrafts([p.bindings[0]])).ok, true);
+  p.rows.shift();
+  const result = await p.api.restoreNativeDrafts([]);
+  assert.equal(result.ok, true); assert.equal(result.bindings.length, 0);
+});

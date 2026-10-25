@@ -465,14 +465,8 @@ function bindTemplateEvents() {
   q("#draftRefresh").addEventListener("click", () => guard(refreshDrafts));
   q("#draftDelete").addEventListener("click", () => guard(deleteSelectedDrafts));
   q("#draftSubmit").addEventListener("click", () => guard(submitSelectedDrafts));
-  q("#draftSave").addEventListener("click", () => guard(async () => {
-    if (q("#draftSave").disabled) return;
-    V.draftBusy = true; V.draftMessage = ""; renderDrafts(); renderTemplateList();
-    try {
-      const result = await call("dm:drafts:save", [...V.selectedDrafts], { instanceId: q("#draftAccount").value });
-      draftSuccess(`保存成功：${result.count} 条任务已存入 ${result.instanceName} 的豆包草稿`);
-    } finally { V.draftBusy = false; await refreshDrafts(); renderTemplateList(); }
-  }));
+  q("#draftSave").addEventListener("click", () => guard(() => saveSelectedDrafts()));
+  q("#draftRecreate").addEventListener("click", () => guard(() => saveSelectedDrafts(true)));
   q("#draftSelectAll").addEventListener("change", (event) => {
     V.selectedDrafts = new Set(event.target.checked ? V.drafts.map((d) => d.id) : []);
     renderDrafts();
@@ -516,6 +510,7 @@ function renderDrafts() {
   const blocked = V.draftBusy || !selected.length || !account || !!mismatch || uncertain;
   q("#draftSubmit").disabled = blocked || !ready;
   q("#draftSave").disabled = blocked || selected.some((d) => d.submissionRecord);
+  q("#draftRecreate").disabled = q("#draftSave").disabled || !selected.some((d) => d.nativeState === "saved");
   q("#draftStatus").textContent = V.draftBusy ? V.draftMessage || "正在处理所选草稿，请稍候…" : !selected.length ? "勾选要一起保存或发送的草稿。" : !account ? "请在上方选择一个豆包账号，再保存或发送所选草稿。" : mismatch ? `所选草稿包含 ${mismatch.instanceName || "其他账号"} 的网页草稿，请只勾选同一账号的草稿，并选择该账号。` : uncertain ? "部分草稿上次操作尚未确认，请先打开所属账号的豆包页面核对。" : !ready ? "先点击 ①，将所选草稿全部存入豆包网页，再点击 ② 一起发送。" : `所选草稿将由 ${V.instances.find((i) => i.id === account)?.name || "所选账号"} 通过云电脑同时提交。`;
   if (!V.draftBusy && V.draftError) q("#draftStatus").textContent = V.draftError;
   q("#templateAddDraft").disabled = V.draftBusy;
@@ -590,6 +585,21 @@ async function deleteSelectedDrafts() {
     await refreshDrafts();
     renderTemplateList();
   }
+}
+
+async function saveSelectedDrafts(recreateDeleted = false) {
+  if (q(recreateDeleted ? "#draftRecreate" : "#draftSave").disabled) return;
+  const ids = [...V.selectedDrafts], instanceId = q("#draftAccount").value;
+  if (recreateDeleted && !await window.DMDialogs.confirm({ title: "重新存入已删除的网页草稿？",
+    message: `请确认选中的 ${ids.length} 条草稿在豆包网页中已被删除。`,
+    detail: "保留原编号、提示词和附件，重新存入原账号，不会发送生成任务。若网页草稿仍在，会产生重复草稿；保存或发送结果待核对的记录不能使用此操作。",
+    confirmLabel: "网页已删除，重新存入" })) return;
+  if (V.draftBusy) return;
+  V.draftBusy = true; V.draftError = ""; V.draftMessage = ""; renderDrafts(); renderTemplateList();
+  try {
+    const result = await call("dm:drafts:save", ids, { instanceId, recreateDeleted });
+    draftSuccess(`保存成功：${result.count} 条任务已存入 ${result.instanceName} 的豆包草稿`);
+  } finally { V.draftBusy = false; await refreshDrafts(); renderTemplateList(); }
 }
 
 async function submitSelectedDrafts() {

@@ -47,7 +47,7 @@ function fresh(work){
 document.querySelector('#new-work').onclick=()=>fresh(true);document.querySelector('#new-chat').onclick=()=>fresh(false);
 document.querySelector('[type="file"]').onchange=e=>{send.disabled=true;trace('upload-start');refs=[...e.target.files].map(f=>f.name);setTimeout(()=>{render();send.disabled=false;trace('upload-ready');},300);};
 async function show(c){
-  messages.innerHTML='<div data-message-role="user" data-message-id="u-'+c.id+'"></div><div data-message-role="assistant" data-message-id="a-'+c.id+'">正在生成 10%</div>';
+  messages.innerHTML='<div data-message-role="user" data-message-id="u-'+c.id+'"></div><div data-message-role="assistant" data-message-id="a-'+c.id+'">正在生成视频 10%</div>';
   messages.firstChild.textContent=c.prompt;
   while(location.pathname==='/chat/'+c.id){const ready=await(await fetch('/result-ready')).json();if(ready){messages.lastChild.innerHTML='生成完成 100%<video src="'+c.url+'" controls></video>';return;}await new Promise(r=>setTimeout(r,250));}
 }

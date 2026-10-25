@@ -16,6 +16,8 @@ after(() => fs.rmSync(root, { recursive: true, force: true }));
 test("改名后默认配置和导出文件使用新品牌，内部产品标识保持兼容", () => {
   assert.equal(brand.name, "豆包工坊");
   assert.equal(require("../package.json").productName, brand.name);
+  assert.equal(require("../package.json").version, brand.version);
+  assert.ok(fs.readFileSync(path.join(__dirname, "../renderer/index.html"), "utf8").includes(`id="verText">v${brand.version}</em>`));
   assert.equal(brand.productKey, "infinite-doubao");
   P.init({ home: path.join(root, "fresh") }); store.load();
   assert.match(interceptor.buildFileName({kind:"video"}), /^豆包工坊_/);
