@@ -25,6 +25,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\DoubaoWorksho
 
 ## 每次发版
 
+从 1.4.5 起，构建同时输出精简安装包、`DoubaoWorkshop-MediaTools-<版本>-<平台>-<架构>.tar.gz` 和 `components-<平台>-<架构>.json`。发布时必须传入 `--components <组件清单路径>`；脚本把组件校验信息写入签名更新清单，并在激活主程序更新前上传、验证组件。组件压缩包也要上传到同一个 GitHub Release，客户端会在内网不可用时尝试 GitHub。清单保留在构建产物中供发布使用，应用自身携带对应校验信息。
+
+首次发布精简版前需要更新服务器上的 `update-server.cjs` 和 `activate-update.cjs` 并重启原服务，以支持组件文件；监听地址和端口不变。组件放在用户数据目录，不写入应用目录，替换主程序不会清除它。
+
+示例：`node build/publish-update.mjs --installer "安装包.exe" --components "构建目录/components-win32-x64.json" --notes-file "更新说明.txt" --upload`。Mac 对应传入 `--platform darwin --arch arm64`（或 `x64`）及相应组件清单。
+
 1. 同步 `package.json`、`src/brand.js`、安装器和页面显示的版本号，使用递增的 `主.次.修订` 版本。
 2. 验证代码，重新打包应用和安装包；在本机覆盖安装并验证快捷方式和数据保留。
 3. 准备 UTF-8 更新说明文本，运行以下命令。私钥默认读取本机 `%LOCALAPPDATA%\DoubaoWorkshopPublisher\update-private.pem`，也可用 `DOLAMOD_UPDATE_KEY` 指定本机路径。

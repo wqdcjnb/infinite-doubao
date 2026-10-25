@@ -5,6 +5,8 @@ import { execFileSync } from "node:child_process";
 
 export function splitComponents({ resources, out, version, platform = process.platform, arch = process.arch }) {
   const root = path.resolve(resources);
+  const required = platform === "win32" ? ["python/python.exe", "tools/ffmpeg.exe"] : ["python/bin/python3", "tools/ffmpeg", "tools/ffprobe"];
+  for (const file of required) if (!fs.existsSync(path.join(root, file))) throw new Error("Missing component tool: " + file);
   const content = crypto.createHash("sha256");
   function hashTree(dir) {
     for (const name of fs.readdirSync(dir).sort()) {

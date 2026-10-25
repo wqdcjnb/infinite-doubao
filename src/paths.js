@@ -89,7 +89,7 @@ function tool(name, platform = process.platform) {
 }
 
 function optionalFiles() {
-  return process.platform === "win32" ? ["python/python.exe", "tools/ffmpeg.exe", "tools/ffprobe.exe"] : ["python/bin/python3", "tools/ffmpeg", "tools/ffprobe"];
+  return process.platform === "win32" ? ["python/python.exe", "tools/ffmpeg.exe"] : ["python/bin/python3", "tools/ffmpeg", "tools/ffprobe"];
 }
 
 function optionalDir() {

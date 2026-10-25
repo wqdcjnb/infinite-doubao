@@ -1,0 +1,32 @@
+// Validate real downloaded binaries without launching the desktop application.
+const fs = require("node:fs"), path = require("node:path"), http = require("node:http"), assert = require("node:assert/strict");
+const exec = require("node:util").promisify(require("node:child_process").execFile);
+const build = path.resolve(process.argv[2]), home = path.resolve(process.argv[3]);
+if (fs.existsSync(home)) throw new Error("Use a fresh test directory");
+const P = require("../src/paths");
+P.init({ home, resources: path.join(build, "豆包工坊", "resources") });
+const { createManager, catalog } = require("../src/components");
+const m = catalog();
+let requests = 0;
+const server = http.createServer((_req, response) => { requests++; response.writeHead(200, {"Content-Length": m.file.size}); fs.createReadStream(path.join(build, m.file.name)).pipe(response); });
+(async () => {
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const options = { urls: [`http://127.0.0.1:${server.address().port}/tools`] };
+  const manager = createManager(options);
+  assert.equal(manager.status().phase, "idle"); assert.equal(requests, 0);
+  const installed = await manager.install();
+  assert.equal(installed.phase, "installed", JSON.stringify(installed)); assert.equal(requests, 1);
+  const mask = require("../src/facemask"), probe = await mask.probeFaceMask();
+  assert.ok(probe.opencv && probe.ffmpegOk && probe.model && probe.script, JSON.stringify(probe));
+  assert.ok(probe.python.startsWith(home));
+  const video = path.join(home, "中文素材.mp4"), png = path.join(home, "素材图片.png");
+  await exec(probe.ffmpeg, ["-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240:r=10", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", video], { windowsHide: true });
+  const masked = await mask.runFaceMask({ files: [video], outDir: path.join(home, "处理输出"), keepOriginal: true });
+  assert.equal(masked.ok, true, JSON.stringify(masked)); assert.ok(fs.statSync(masked.results[0].out).size > 1000);
+  await exec(probe.ffmpeg, ["-y", "-i", video, "-frames:v", "1", png], { windowsHide: true });
+  require("../src/store").load();
+  const grid = await require("../src/assets").grid([png, png, png, png], path.join(home, "四宫格.png"), { cols: 2 });
+  assert.equal(grid.ok, true, JSON.stringify(grid));
+  const restored = createManager(options); assert.equal(restored.status().phase, "installed"); await restored.install(); assert.equal(requests, 1);
+  console.log(JSON.stringify({ ok:true, checks:["no automatic download", "hash and size verification", "real archive extraction", "Python/OpenCV and FFmpeg", "Chinese video processing", "image grid", "reuse without downloading"], componentMiB:m.file.size/1048576 }));
+})().catch(error => { console.error(error); process.exitCode=1; }).finally(() => server.close());
