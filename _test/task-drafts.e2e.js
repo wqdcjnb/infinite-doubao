@@ -45,8 +45,14 @@ const server = http.createServer((req, res) => {
     assert.equal((await call("dm:tasks")).length, 0, "Use a fresh fixture profile after dispatch tests");
     for (const d of await call("dm:drafts")) await call("dm:draft:remove", d.id);
     await click('[data-view="templates"]');
+    if (!(await call("dm:templates")).items.length) await click("#templateNew");
     await wait(() => c.eval("!document.querySelector('#templateEditor').classList.contains('hidden')"));
     for (let i = 1; i <= 3; i++) {
+      if (i > 1) {
+        await click("#templateNew");
+        await wait(async () => (await call("dm:templates")).items.length === i);
+        await wait(() => c.eval("document.activeElement?.id === 'templateName'"));
+      }
       await fill("#templateName", "批量草稿 " + i);
       await fill("#templatePrompt", "本地视频提示词 " + i);
       await click("#templateAddDraft");
@@ -76,19 +82,23 @@ const server = http.createServer((req, res) => {
     assert.ok(sent[0].prompt.includes("本地视频提示词 1"));
     assert.ok(sent[1].prompt.includes("本地视频提示词 2"));
     const tasks = await call("dm:tasks");
+    assert.equal(new Set(tasks.map((t) => t.templateId)).size, 2);
+    assert.equal(new Set(tasks.map((t) => t.draftBatchId)).size, 1);
+    assert.ok(tasks[0].draftBatchId);
+    assert.equal(new Set(tasks.map((t) => t.instanceId)).size, 1);
     assert.ok(tasks.every((t) => t.result.files.length && t.result.files.every((f) => fs.existsSync(f))));
     assert.equal((await call("dm:drafts")).length, 1);
     const duplicate = await c.eval(`DM.call('dm:drafts:submit',${JSON.stringify(ids)})`);
     assert.equal(duplicate.ok, false);
     assert.equal((await call("dm:tasks")).length, 2);
-    console.log("PASS: selected drafts dispatched in cloud mode exactly once, both videos delivered; unselected draft retained");
+    console.log("PASS: different-template drafts use one account in cloud mode exactly once, both videos delivered; unselected draft retained");
     await click('[data-view="templates"]');
     await wait(() => c.eval("document.querySelectorAll('.draft-row').length===1"));
     await click(".draft-row .delete-icon");
     await wait(() => c.eval("!document.querySelector('#dmModal').classList.contains('hidden')"));
     await c.eval("document.querySelector('#dmModalFoot').lastElementChild.click()");
     await wait(async () => (await call("dm:drafts")).length === 0);
-    assert.equal((await call("dm:templates")).items.length, 1);
+    assert.equal((await call("dm:templates")).items.length, 3);
     console.log("PASS: removing a draft retains its reusable template");
     const output = await promisify(execFile)(process.execPath, [path.join(__dirname, "work-entry.e2e.js")], { env: process.env });
     process.stdout.write(output.stdout);

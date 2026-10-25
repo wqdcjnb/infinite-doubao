@@ -467,7 +467,7 @@ async function submitSelectedDrafts() {
   try {
     result = await call("dm:drafts:submit", ids);
     ids.forEach((id) => V.selectedDrafts.delete(id));
-    say(`${result.count} 条草稿已加入任务队列`);
+    say(`${result.count} 条草稿已加入任务队列，将由同一个豆包号依次发送`);
   } finally {
     V.draftBusy = false;
     await refreshDrafts();
@@ -549,7 +549,8 @@ function renderTaskTable() {
     model.appendChild(modelValues);
     tr.appendChild(model);
     const account = node("td", "task-account");
-    const accountValue = node("span", "task-pill task-truncate", t.instanceName || t.instanceId || "—");
+    const batchAccount = t.draftBatchId && V.instances.find((i) => i.id === t.preferredInstanceId);
+    const accountValue = node("span", "task-pill task-truncate", t.instanceName || t.instanceId || batchAccount?.name || "—");
     accountValue.title = accountValue.textContent;
     account.appendChild(accountValue);
     tr.appendChild(account);

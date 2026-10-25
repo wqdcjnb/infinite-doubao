@@ -78,6 +78,19 @@ function pickInstance(exclude = new Set(), preferred = []) {
   const ordered = [...preferred.map((id) => list.find((i) => i.id === id)).filter(Boolean), ...list.filter((i) => !preferred.includes(i.id))];
   return ordered.find((inst) => !exclude.has(inst.id) && instanceReady(inst).ok) || null;
 }
+function bindDraftBatch(task, inst) {
+  if (!task.draftBatchId || task.preferredInstanceId) return;
+  const batch = store.get().tasks.filter((t) => t.draftBatchId === task.draftBatchId);
+  const previous = batch.map((t) => t.preferredInstanceId);
+  batch.forEach((t) => { t.preferredInstanceId = inst.id; });
+  // Bind the whole batch durably before any page action; recovery and retries
+  // use the existing fixed-account dispatch path.
+  if (!store.save()) {
+    batch.forEach((t, i) => { if (previous[i] === undefined) delete t.preferredInstanceId; else t.preferredInstanceId = previous[i]; });
+    throw new Error("草稿批次账号保存失败，任务尚未发送，请检查磁盘空间或目录权限");
+  }
+  batch.forEach((t) => emit("task", { task: t }));
+}
 function buildShotPayload(sb, shot, opts = {}) {
   const prev = (sb.shots || []).find((s) => s.index === shot.index - 1);
   return assets.resolveShotPrompt(shot, { style: opts.style || "", chain: opts.chain !== false, prevPrompt: prev?.videoPrompt || "" });
@@ -289,7 +302,7 @@ async function runTask(task, inst, shot, sb) {
       if (progress.state === "failed") {
         const quotaFailure = /额度|免费数量|今日次数|已达上限|quota/i.test(progress.snippet || "");
         patchTask(task.id, { submittedAt: "", generatedAt: "", submissionUncertain: false });
-        throw Object.assign(new Error(quotaFailure ? "账号额度用尽，等待其他可用账号" : "平台明确返回生成失败"), { code: quotaFailure ? "quota" : "generation_failed" });
+        throw Object.assign(new Error(quotaFailure ? (task.draftBatchId ? "批次账号额度用尽，等待同一账号额度恢复" : "账号额度用尽，等待其他可用账号") : "平台明确返回生成失败"), { code: quotaFailure ? "quota" : "generation_failed" });
       }
       if (progress.state === "done") {
         patchTask(task.id, { generatedAt: task.generatedAt || new Date().toISOString() });
@@ -351,10 +364,13 @@ async function dispatchOne(sbId, opts = {}) {
   const inst = fixedId ? (fixed && !exclude.has(fixedId) && instanceReady(fixed, !!task.submittedAt).ok ? fixed : null) : pickInstance(exclude, opts.preferredInstances || []);
   if (!inst) {
     const reasons = store.get().instances.map((i) => `${i.name}：${task.accountExclusions?.[i.id] || instanceReady(i, !!task.submittedAt).reason || "等待派发"}`);
-    const waitReason = fixedId && !fixed ? "原生成账号已删除，无法取回结果" : reasons.join("；") || "尚无账号，请添加并登录账号后自动继续";
+    const waitReason = task.draftBatchId && fixedId
+      ? (fixed ? `等待批次账号 ${fixed.name}：${task.accountExclusions?.[fixedId] || instanceReady(fixed, !!task.submittedAt).reason || "等待派发"}` : "批次账号已删除，无法继续发送该批任务")
+      : fixedId && !fixed ? "原生成账号已删除，无法取回结果" : reasons.join("；") || "尚无账号，请添加并登录账号后自动继续";
     if (task.stage !== "waiting_account" || task.waitReason !== waitReason) patchTask(task.id, { stage: "waiting_account", waitReason });
     scheduleWake(); return { ok: false, error: waitReason, taskId: task.id };
   }
+  bindDraftBatch(task, inst);
   storyboard.updateShot(sb.id, shot.id, { status: "queued", attempts: (shot.attempts || 0) + 1, taskId: task.id });
   void runTask(task, inst, shot, sb);
   return { ok: true, taskId: task.id, shotId: shot.id, instanceId: inst.id };
@@ -432,6 +448,8 @@ async function redispatch(taskId, instanceId) {
   if (!store.find(instanceId)) return { ok: false, error: "账号不存在" };
   if (task.submittedAt && task.instanceId !== instanceId) return { ok: false, error: "此任务已提交，只能在原账号继续取回结果" };
   if (runtime.running.has(task.id)) return { ok: false, error: "任务还在运行" };
+  if (task.draftBatchId && task.preferredInstanceId && task.preferredInstanceId !== instanceId) return { ok: false, error: "草稿批次已绑定同一个账号，不能单独改派其中的任务" };
+  bindDraftBatch(task, store.find(instanceId));
   patchTask(task.id, { preferredInstanceId: instanceId });
   return retryTask(taskId, { preferredInstances: [instanceId] });
 }
@@ -466,12 +484,15 @@ function submitTemplate(template) {
 function submitDrafts(ids) {
   if (!Array.isArray(ids) || !ids.length) throw new Error("请先勾选要提交的草稿");
   const selected = [...new Set(ids)];
+  const draftBatchId = `draft-batch-${crypto.randomBytes(12).toString("hex")}`;
   const records = selected.map((id) => {
     const draft = store.get().taskDrafts.find((d) => d.id === id);
     if (!draft) throw new Error("部分草稿不存在或已提交，请刷新草稿箱");
     try {
       if (!["video", "work"].includes(draft.executionMode)) throw new Error("任务模式无效");
-      return templateRecords(templates.validateSnapshot(draft.template), draft.executionMode);
+      const record = templateRecords(templates.validateSnapshot(draft.template), draft.executionMode);
+      record.task.draftBatchId = draftBatchId;
+      return record;
     } catch (error) { throw new Error(`草稿「${draft.template?.name || id}」：${error.message}`); }
   });
   return { items: commitTemplates(records, selected), count: records.length };

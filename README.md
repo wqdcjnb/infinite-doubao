@@ -1,15 +1,15 @@
 # 豆包工坊
 
-Windows 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.3.1**。
+Windows 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.3.2**。
 
 ## 下载与安装
 
-前往 [Releases](https://github.com/wqdcjnb/infinite-doubao/releases/latest) 下载 Windows x64 安装包 `DoubaoWorkshop-1.3.1-Setup.exe`，双击安装后通过桌面「豆包工坊」快捷方式启动。
+前往 [Releases](https://github.com/wqdcjnb/infinite-doubao/releases/latest) 下载 Windows x64 安装包 `DoubaoWorkshop-1.3.2-Setup.exe`，双击安装后通过桌面「豆包工坊」快捷方式启动。
 
 发行附件中的 `SHA256SUMS.txt` 用于校验下载文件。在 PowerShell 中运行：
 
 ```powershell
-Get-FileHash .\DoubaoWorkshop-1.3.1-Setup.exe -Algorithm SHA256
+Get-FileHash .\DoubaoWorkshop-1.3.2-Setup.exe -Algorithm SHA256
 ```
 
 新安装默认使用 `%LOCALAPPDATA%\Programs\豆包工坊`。升级已有版本会沿用原安装位置和用户数据目录，保留账号、会话、任务、素材和设置。
@@ -30,7 +30,7 @@ Get-FileHash .\DoubaoWorkshop-1.3.1-Setup.exe -Algorithm SHA256
 
 生成能力和额度以对应服务实际提供的权限为准。
 
-在“任务提交”中填写提示词，选择草稿提交模式，点击“存入草稿箱”，再继续填写下一条。草稿箱中勾选多条后点击“提交所选草稿”，会一次加入现有任务队列；同一账号依次执行，不同账号遵循并发设置。草稿重启后保留，修改或删除原模板不会改变已有草稿。批量校验或写入失败时草稿保留；提交成功后所选草稿从草稿箱移入队列，避免重复提交。
+在“任务提交”中填写提示词，选择草稿提交模式，点击“存入草稿箱”，再继续填写下一条或切换其他模板。草稿箱中勾选多条后点击“提交所选草稿”，会一次加入现有任务队列，并在首次派发时自动绑定一个可用豆包号，整批由同一账号依次发送；重启和重试保留绑定，账号暂不可用时等待恢复，不把同批任务分散到其他账号。其他正常提交仍按原规则分配账号和并发执行。草稿重启后保留，修改或删除原模板不会改变已有草稿。批量校验或写入失败时草稿保留；提交成功后所选草稿从草稿箱移入队列，避免重复提交。
 
 ## 源码结构
 
