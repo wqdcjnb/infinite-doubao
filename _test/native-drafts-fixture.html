@@ -10,6 +10,10 @@
 let saved=JSON.parse(localStorage.getItem('fixture')||'{"drafts":[],"conversations":[]}'),current=null,refs=[];
 let editor=document.querySelector('textarea');
 const mode=document.querySelector('[data-testid="chat_input_action_mode"]'),box=document.querySelector('aside'), messages=document.querySelector('#messages'),send=document.querySelector('[type="submit"]');
+window.fixtureTrace=[];
+const trace=event=>{window.fixtureTrace.push({event,at:Date.now(),performance:performance.now(),disabled:send.disabled});if(window.fixtureTrace.length>50)window.fixtureTrace.shift();};
+new MutationObserver(()=>trace('send-attribute')).observe(send,{attributes:true});
+document.addEventListener('click',e=>{if(e.target.tagName==='BUTTON')trace('click:'+e.target.textContent);},true);
 function persist(){localStorage.setItem('fixture',JSON.stringify(saved));}
 function render(){
   for(const el of [...box.children])if(!saved.drafts.some(d=>d.id===el.id))el.remove();
@@ -32,13 +36,13 @@ function fresh(work){
   if(work)setTimeout(()=>{const next=editor.cloneNode();next.value='';editor.replaceWith(next);editor=next;},150);
 }
 document.querySelector('#new-work').onclick=()=>fresh(true);document.querySelector('#new-chat').onclick=()=>fresh(false);
-document.querySelector('[type="file"]').onchange=e=>{send.disabled=true;refs=[...e.target.files].map(f=>f.name);setTimeout(()=>{render();send.disabled=false;},300);};
+document.querySelector('[type="file"]').onchange=e=>{send.disabled=true;trace('upload-start');refs=[...e.target.files].map(f=>f.name);setTimeout(()=>{render();send.disabled=false;trace('upload-ready');},300);};
 async function show(c){
   messages.innerHTML='<div data-message-role="user" data-message-id="u-'+c.id+'"></div><div data-message-role="assistant" data-message-id="a-'+c.id+'">正在生成 10%</div>';
   messages.firstChild.textContent=c.prompt;
   while(location.pathname==='/chat/'+c.id){const ready=await(await fetch('/result-ready')).json();if(ready){messages.lastChild.innerHTML='生成完成 100%<video src="'+c.url+'" controls></video>';return;}await new Promise(r=>setTimeout(r,250));}
 }
-document.querySelector('form').onsubmit=async e=>{e.preventDefault();send.disabled=true;
+document.querySelector('form').onsubmit=async e=>{e.preventDefault();send.disabled=true;trace('submit');
  const payload={prompt:editor.value,mode:mode.textContent,refs:refs.slice()};const result=await(await fetch('/submit',{method:'POST',body:JSON.stringify(payload)})).json();
  saved.drafts=saved.drafts.filter(d=>d.id!==current);const c={...payload,...result};saved.conversations.unshift(c);persist();current=null;editor.value='';refs=[];
  history.pushState({},'','/chat/'+c.id);render();send.disabled=false;show(c);

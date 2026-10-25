@@ -74,7 +74,7 @@ let c, mounted = false;
   report.ok = false; report.error = error.stack; process.exitCode = 1;
   if (c) {
     try {
-      report.diagnostics = await c.eval(`(async()=>({draftStatus:document.querySelector('#draftStatus')?.textContent,drafts:await DM.call('dm:drafts'),logs:await DM.call('dm:logs',30),guest:document.querySelector('webview')?await document.querySelector('webview').executeJavaScript('document.body.innerText'):null}))()`);
+      report.diagnostics = await c.eval(`(async()=>({draftStatus:document.querySelector('#draftStatus')?.textContent,drafts:await DM.call('dm:drafts'),logs:await DM.call('dm:logs',30),guest:document.querySelector('webview')?await document.querySelector('webview').executeJavaScript('({text:document.body.innerText,button:document.querySelector("[type=submit]").outerHTML,trace:window.fixtureTrace,now:Date.now()})'):null}))()`);
       fs.writeFileSync(path.join(out, "mac-main-window.png"), Buffer.from((await c.send("Page.captureScreenshot", { format: "png" })).data, "base64"));
     } catch (diagnosticError) { report.diagnosticError = String(diagnosticError); }
   }
