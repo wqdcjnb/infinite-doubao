@@ -22,8 +22,9 @@ function decryptInput(encrypted,token) {
   } catch {throw new Error('invalid encrypted login command');}
 }
 class NativeAdapter {
-  constructor({journal,client,accounts,driverFactory,maxDraftPages=4}) {
+  constructor({journal,client,accounts,environment,sessionId=crypto.randomUUID(),driverFactory,maxDraftPages=4}) {
     this.journal=journal;this.client=client;this.accounts=accounts;this.driverFactory=driverFactory||((inst,wc)=>require('./driver').open(inst,{webContents:wc}));
+    this.environment=environment;this.sessionId=sessionId;
     this.maxDraftPages=Math.max(1,Math.min(8,maxDraftPages));
   }
   account(op) {
@@ -31,6 +32,12 @@ class NativeAdapter {
     const id=stableId('studio-account-',op.accountId);
     let inst=store.find(id);
     if(!inst) {inst=store.add({id,name:String(op.payload.account.name||op.accountId),url:store.DEFAULT_URL});durableSave();}
+    if(this.environment) {
+      const previous=inst.studioEnvironment?.version;
+      this.environment.configure(inst,op.payload.account.environment);
+      if(previous && previous!==inst.studioEnvironment.version)this.accounts.close(inst.id);
+      durableSave();
+    }
     return inst;
   }
   local(taskId,accountId) {
@@ -119,6 +126,7 @@ class NativeAdapter {
     return tasks.length?{outcome:'progress',receipt:{tasks}}:null;
   }
   async track(op) {
+    this.account(op);
     const taskId=op.taskId||op.payload.task?.id,task=this.local(taskId,op.accountId);
     if(!task)return {outcome:'uncertain',receipt:{taskId,status:'running',error:'original local task missing'}};
     const receipt={taskId,localTaskId:task.id,conversationId:task.conversationUrl,confirmed:confirmed(task)};
@@ -144,7 +152,18 @@ class NativeAdapter {
     const action=op.payload.action||'frame';
     const input=action==='input'?decryptInput(op.payload.inputEncrypted,this.client.token):{};
     const checkAction=this.leaseGuard(op,context);
-    const inst=this.account(op),win=await this.accounts.open(inst.id),wc=win.webContents;
+    const inst=this.account(op);let win;
+    try {win=await this.accounts.open(inst.id);} catch(error) {
+      if(action!=='probe')throw error;
+      return {outcome:'success',receipt:{environmentVersion:inst.studioEnvironment?.version,executorSessionId:this.sessionId,
+        environmentCheck:{proxy:{ok:false,ip:'',location:'',latency:0,message:'account proxy or target navigation failed'},fingerprint:{ok:false,message:'target page unavailable'}}}};
+    }
+    const wc=win.webContents;
+    if(action==='probe') {
+      if(!this.environment)throw new Error('account environment unavailable');
+      const environmentCheck=await this.environment.check(inst,wc);
+      return {outcome:'success',receipt:{environmentVersion:inst.studioEnvironment.version,executorSessionId:this.sessionId,environmentCheck}};
+    }
     if(action==='navigate') {
       const url=new URL(op.payload.url||store.DEFAULT_URL);
       if(url.href!==store.DEFAULT_URL)throw new Error('Doubao login navigation only');
@@ -155,6 +174,10 @@ class NativeAdapter {
         const [width,height]=win.getContentSize(),value={x:Math.min(width-1,Math.round(input.x*width)),y:Math.min(height-1,Math.round(input.y*height)),button:'left',clickCount:1};
         checkAction();await wc.debugger.sendCommand('Input.dispatchMouseEvent',{...value,type:'mousePressed'});
         checkAction();await wc.debugger.sendCommand('Input.dispatchMouseEvent',{...value,type:'mouseReleased'});
+      } else if(input.kind==='scroll') {
+        if(![input.deltaX,input.deltaY].every(n=>Number.isSafeInteger(n)&&Math.abs(n)<=4000))throw new Error('invalid scroll delta');
+        const [width,height]=win.getContentSize();checkAction();
+        await wc.debugger.sendCommand('Input.dispatchMouseEvent',{type:'mouseWheel',x:Math.floor(width/2),y:Math.floor(height/2),deltaX:input.deltaX,deltaY:input.deltaY});
       } else if(input.kind==='text') {
         if(typeof input.text!=='string'||input.text.length>10000)throw new Error('invalid login text');
         checkAction();await wc.debugger.sendCommand('Input.insertText',{text:input.text});
@@ -167,7 +190,7 @@ class NativeAdapter {
     if(jpeg.length>1024*1024)throw new Error('login screenshot too large');
     const driver=await this.driverFactory(inst,wc),login=await driver.isLoggedIn().catch(()=>({}));
     const [width,height]=win.getContentSize();
-    return {outcome:'success',receipt:{imageBase64:jpeg.toString('base64'),contentType:'image/jpeg',width,height,loginState:login?.loggedIn===true?'logged_in':login?.loggedIn===false?'logged_out':'unknown'}};
+    return {outcome:'success',receipt:{imageBase64:jpeg.toString('base64'),contentType:'image/jpeg',width,height,capturedAt:new Date().toISOString(),loginState:login?.loggedIn===true?'logged_in':login?.loggedIn===false?'logged_out':'unknown'}};
   }
   leaseGuard(op,context) {
     return context.checkLease||(()=>{const until=typeof op.leaseUntil==='number'?op.leaseUntil:Date.parse(op.leaseUntil);if(!Number.isFinite(until)||Date.now()>=until)throw new Error('studio operation lease expired');});
@@ -184,7 +207,7 @@ class NativeAdapter {
     if(op.kind==='send')return this.send(op,true,context);
     if(op.kind==='track')return this.track(op);
     // Input commands may have succeeded. Never replay keystrokes after interruption.
-    return this.login({...op,payload:{...op.payload,action:'frame'}},context);
+    return this.login({...op,payload:{...op.payload,action:op.payload.action==='input'?'frame':op.payload.action}},context);
   }
 }
 function readConfig(file) {
@@ -214,26 +237,28 @@ function createStudioWindow(inst,{BrowserWindow=require('electron').BrowserWindo
   const source=require('./page').buildPageScript({cfg:{profile:null,instanceId:inst.id,kernel:'embedded',enhancer}});
   // Main-process injection needs no Node-enabled preload and survives navigation.
   win.webContents.on('dom-ready',()=>{
-    if(win.webContents.isDestroyed())return;
+    if(inst.fingerprint || win.webContents.isDestroyed())return;
     win.webContents.executeJavaScript(source).catch(()=>{win.loadError='页面自动化加载失败';});
   });
   return win;
 }
 async function start() {
-  const {app,BrowserWindow,session}=require('electron');
+  const {app,BrowserWindow,session,net}=require('electron');
   const file=studioConfigFile(app);
   if(!file)throw new Error('private --studio-config file required');
   const cfg=readConfig(file);fs.mkdirSync(cfg.stateDir,{recursive:true,mode:0o700});app.setPath('userData',cfg.stateDir);app.setPath('sessionData',cfg.stateDir);
   if(!app.requestSingleInstanceLock()) {app.exit(1);return;}
   await app.whenReady();P.init({home:cfg.stateDir});store.load();
   assertDedicatedState();
-  // This entry never registers desktop HTTP/MCP/web services, proxies or fingerprint masks.
+  // Dedicated mode starts no desktop HTTP/MCP services or shared proxy handlers.
   store.get().settings.orchestrator={...store.get().settings.orchestrator,retryLimit:0,autoDownload:true,autoConfirm:true,maxParallel:Math.max(1,Math.min(8,cfg.trackingPages||2))};
   store.get().settings.downloadDir=P.dir('exports');durableSave();
   const interceptor=require('./interceptor'),driver=require('./driver'),{WebAccounts}=require('./web-accounts');
-  const prepareSession=async(inst)=>{const ses=session.fromPartition(inst.partition);interceptor.attach(ses,inst);return ses;};
+  const {StudioEnvironment}=require('./studio-environment');
+  const environment=new StudioEnvironment({app,session,net,token:cfg.token,enhancer:store.get().settings.enhancer});
+  const prepareSession=async(inst)=>{const ses=await environment.prepareStudioSession(inst);interceptor.attach(ses,inst);return ses;};
   const windowFor=(inst,height)=>createStudioWindow(inst,{BrowserWindow,enhancer:store.get().settings.enhancer,height});
-  const accounts=new WebAccounts({prepareSession,createWindow:inst=>windowFor(inst,800),wake:()=>{},publish:()=>{},log:{warn:()=>{}}});
+  const accounts=new WebAccounts({prepareSession,awaitNavigation:true,createWindow:inst=>windowFor(inst,800),prepareWindow:(win,inst)=>environment.prepareStudioWindow(win,inst),wake:()=>{},publish:()=>{},log:{warn:()=>{}}});
   const pages=new Set();
   queue.init({resolveDriver:async(inst)=>driver.open(inst,{webContents:(await accounts.open(inst.id)).webContents}),
     resolveDraftDriver:async(inst,{signal}={})=>{
@@ -242,11 +267,11 @@ async function start() {
       pages.add(win);const close=()=>{if(!win.isDestroyed())win.destroy();};
       win.on('closed',()=>{pages.delete(win);signal?.removeEventListener('abort',close);});signal?.addEventListener('abort',close,{once:true});
       win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
-      try {await win.loadURL(store.DEFAULT_URL);const instanceDriver=await driver.open(inst,{webContents:win.webContents});instanceDriver.close=close;return instanceDriver;} catch(error){close();throw error;}
+      try {await win.loadURL('about:blank');await environment.prepareStudioWindow(win,inst);await win.loadURL(store.DEFAULT_URL);const instanceDriver=await driver.open(inst,{webContents:win.webContents});instanceDriver.close=close;return instanceDriver;} catch(error){close();throw error;}
     },findWebContents:inst=>accounts.find(inst)});
   queue.recoverTemplateTasks();queue.pause('');
   const journal=new Journal(path.join(cfg.stateDir,'studio-journal.json')),client=new StudioClient(cfg);
-  const adapter=new NativeAdapter({journal,client,accounts,maxDraftPages:cfg.maxDraftPages||4});
+  const adapter=new NativeAdapter({journal,client,accounts,environment,sessionId:client.sessionId,maxDraftPages:cfg.maxDraftPages||4});
   const bridge=new StudioBridge({journal,api:client,adapter,operationConcurrency:cfg.operationConcurrency||2,onError:code=>process.stderr.write(`studio-executor: ${code}\n`)});
   const controller=new AbortController();
   app.on('window-all-closed',()=>{});

@@ -60,6 +60,7 @@ class StudioClient {
     const assignedLocalHttp=opts.allowLocalHttp===true && require('node:net').isIP(host) && Object.values(interfaces()).flat().some(item=>item?.address===host);
     if(this.site.protocol!=='https:' && !(this.site.protocol==='http:' && (['localhost','127.0.0.1','::1'].includes(host)||assignedLocalHttp))) throw new Error('HTTPS site required');
     if(!opts.executorId || !opts.token || /[\r\n]/.test(opts.token)) throw new Error('executor credentials required');
+    this.sessionId=opts.sessionId||crypto.randomUUID();
     this.executorId=opts.executorId;this.token=opts.token;this.fetch=opts.fetch||globalThis.fetch;
     this.maxResultBytes=Math.min(opts.maxResultBytes||128*1024*1024,128*1024*1024);
   }
@@ -69,7 +70,7 @@ class StudioClient {
     if(!response.ok) {const error=new Error(`studio ${action} HTTP ${response.status}`);error.status=response.status;throw error;}
     return response.json();
   }
-  heartbeat(leases) { return this.json('heartbeat',{leases}); }
+  heartbeat(leases) { return this.json('heartbeat',{leases,sessionId:this.sessionId}); }
   claim() { return this.json('claim'); }
   report(op,result) { return this.json('report',{operationId:op.id,leaseToken:op.leaseToken,...result}); }
   async upload(taskId,op,file) {
