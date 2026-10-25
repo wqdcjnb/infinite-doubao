@@ -129,22 +129,25 @@ async function confirmGeneration(driver, task, options, sb, context = {}) {
   if (intents[candidate.key] || (candidate.kind === "text" && Object.values(intents).some((intent) => intent.kind === "text"))) {
     return { waiting: true, recorded: true, reason: "确认已发送或正在等待平台响应，不会重复确认" };
   }
-  check();
+  if (task.studioTaskId && !context.checkLease) return { waiting: true, blocked: true, reason: "只读取回原对话；新的生成确认需要有效发送租约" };
+  const checkAction = () => { check(); if (task.studioTaskId) context.checkLease?.(); };
+  checkAction();
   const intent = { kind: candidate.kind, state: "pending", at: new Date().toISOString() };
   persist({ confirmationIntents: { ...intents, [candidate.key]: intent } });
   let actionAttempted = false;
   try {
     if (candidate.kind === "text") {
+      checkAction();
       const filled = await driver.setText(candidate.text || "确认，开始生成视频。");
       if (!filled?.ok) throw new Error("填写视频参数确认失败");
       const latest = await driver.call("peekGenerationConfirmation", expected);
       if (!latest?.ok || latest.key !== candidate.key) throw new Error("视频参数确认内容发生变化，已暂停确认");
-      check();
+      checkAction();
       actionAttempted = true;
-      const sent = await driver.send(candidate.text === "按要求生成" ? { nativeOnly: true } : undefined, check);
+      const sent = await driver.send(candidate.text === "按要求生成" ? { nativeOnly: true } : undefined, checkAction);
       if (!sent?.ok) { actionAttempted = false; throw new Error(`发送视频参数确认失败：${sent?.reason || "未找到发送按钮"}`); }
     } else {
-      check();
+      checkAction();
       actionAttempted = true;
       const confirmed = await driver.call("confirmGeneration", { ...expected, key: candidate.key });
       if (!confirmed?.ok) { actionAttempted = false; throw new Error(confirmed?.reason || "确认按钮已变化"); }
@@ -297,6 +300,7 @@ async function runTask(task, inst, shot, sb) {
       const confirmation = await confirmGeneration(driver, task, options, sb);
       progress = await driver.readProgress().catch(() => null);
       if (!progress) continue;
+      if (task.studioTaskId && !task.generationObservedAt && (progress.generationStarted || progress.mediaUrls?.length || progress.state === "done")) patchTask(task.id, { generationObservedAt: new Date().toISOString() }, true);
       const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
       if (task.progress !== percent) patchTask(task.id, { progress: percent });
       if (lastState !== progress.state) { lastState = progress.state; emitLog(task, `页面状态：${progress.state}`); }
@@ -307,7 +311,7 @@ async function runTask(task, inst, shot, sb) {
       } else if (progress.state === "running" && task.stage !== "generating") patchTask(task.id, { stage: "generating", waitReason: "" });
       if (progress.state === "failed") {
         const quotaFailure = /额度|免费数量|今日次数|已达上限|quota/i.test(progress.snippet || "");
-        patchTask(task.id, { submittedAt: "", generatedAt: "", submissionUncertain: false });
+        if (!task.studioTaskId) patchTask(task.id, { submittedAt: "", generatedAt: "", submissionUncertain: false });
         throw Object.assign(new Error(quotaFailure ? (task.draftBatchId ? "批次账号额度用尽，等待同一账号额度恢复" : "账号额度用尽，等待其他可用账号") : "平台明确返回生成失败"), { code: quotaFailure ? "quota" : "generation_failed" });
       }
       if (progress.state === "done") {
@@ -320,7 +324,11 @@ async function runTask(task, inst, shot, sb) {
     const message = String(error?.message || error);
     const code = error?.code;
     runtime.lastError = message;
-    if (code === "login_required" || code === "quota" || code === "model_unavailable") {
+    if (task.studioTaskId) {
+      // Server-owned tasks retain their original submission and never redispatch.
+      patchTask(task.id, { status: "failed", stage: "failed", error: message, errorCode: code || "unknown", finishedAt: new Date().toISOString() }, true);
+      storyboard.setStatus(sb.id, shot.id, "failed", { error: message });
+    } else if (code === "login_required" || code === "quota" || code === "model_unavailable") {
       if (code === "login_required") runtime.blocked.set(inst.id, { reason: message, retryAt: Date.now() + 30000 });
       else if (code === "quota") { quota.setUsed(inst.id, "video", quota.get(inst.id).perDay); quota.cool(inst.id, 0, message); }
       else task.accountExclusions = { ...(task.accountExclusions || {}), [inst.id]: message };
@@ -467,6 +475,7 @@ function templateRecords(template, executionMode = "video") {
   const sb = storyboard.normalizeStoryboard({ name: template.name, source: "task-template", shots: [{ title: template.name, videoPrompt: prompt, model: template.model, duration: template.duration, refs: template.attachments.map((a) => a.path) }] });
   const shot = sb.shots[0];
   const task = newTask({ storyboardId: sb.id, shotId: shot.id, shotIndex: 1, templateId: template.id, templateName: template.name, executionMode, model: template.model, duration: template.duration, ratio, prompt, refs: shot.refs.slice() });
+  if (template.studioTaskId) task.studioTaskId = template.studioTaskId;
   Object.assign(shot, { taskId: task.id, status: "queued" });
   return { sb, task };
 }
@@ -482,8 +491,7 @@ function commitTemplates(records, draftIds = [], startQueue = true) {
   // can escape to the page, and repeating the same request cannot send twice.
   if (!store.save()) { Object.assign(data, previous); data.settings.lastStoryboardId = previousStoryboardId; throw new Error("任务保存失败，草稿已保留，请检查磁盘空间或目录权限"); }
   records.forEach(({ task }) => emit("task", { task }));
-  if (startQueue) runtime.paused = false;
-  wakeQueue();
+  if (startQueue) { runtime.paused = false; wakeQueue(); }
   return records.map(({ task }) => ({ taskId: task.id, status: task.status }));
 }
 function submitTemplate(template) {
@@ -544,13 +552,14 @@ async function withNativeDrafts(selected, options, fn) {
   const operation = { instanceId: inst.id, instanceName: inst.name, stopped: false, controller: new AbortController() };
   runtime.busy.add(inst.id); runtime.nativeDrafts.set(inst.id, operation);
   const check = () => operation.controller.signal.throwIfAborted();
+  const checkAction = () => { check(); options.checkLease?.(); };
   try {
     emit("draft", { message: `正在连接 ${inst.name}，准备处理 ${selected.length} 条草稿…`, instanceId: inst.id });
     const driver = await draftStep(operation, "账号页面加载", () => deps.resolveDriver ? deps.resolveDriver(inst) : driverMod.open(inst, { webContents: deps.findWebContents?.(inst) }));
     const login = await draftStep(operation, "账号登录检查", () => driver.isLoggedIn());
     if (login?.loggedIn !== true) throw new Error(`请先在账号 ${inst.name} 的豆包页面登录`);
     check();
-    return await fn(driver, inst, check, operation);
+    return await fn(driver, inst, check, operation, checkAction);
   } finally {
     operation.controller.abort(new Error("草稿操作已结束"));
     runtime.nativeDrafts.delete(inst.id); runtime.busy.delete(inst.id); wakeQueue();
@@ -569,7 +578,7 @@ async function saveDrafts(ids, options = {}) {
     drafts.updateMany(Object.fromEntries(converted.map((d) => [d.id, { executionMode: "work" }])));
     converted.forEach((d) => { d.executionMode = "work"; });
   }
-  return withNativeDrafts(selected, options, async (driver, inst, check, operation) => {
+  return withNativeDrafts(selected, options, async (driver, inst, check, operation, checkAction) => {
     // Only an explicit acknowledgement of webpage deletion can discard a saved
     // binding. A failed lookup alone may just mean the page has not loaded yet.
     if (options.recreateDeleted === true) {
@@ -590,12 +599,15 @@ async function saveDrafts(ids, options = {}) {
       const draftNumber = draft.draftNumber || drafts.numberFor(draft.id);
       record.task.prompt = `【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`;
       try {
+      checkAction();
       requirePage(await driver.call("prepareNativeDraft", { executionMode: draft.executionMode, model: record.task.model, duration: record.task.duration, ratio: record.task.ratio }));
+      checkAction();
       // Save intent before uploading/filling: an interrupted save must not create duplicates.
       drafts.updateMany({ [draft.id]: { draftNumber, instanceId: inst.id, instanceName: inst.name, nativeState: "saving", nativePrompt: record.task.prompt, nativeError: "" } });
-      if (record.task.refs.length) requirePage(await driver.pasteFiles(record.task.refs));
+      if (record.task.refs.length) { checkAction(); requirePage(await driver.pasteFiles(record.task.refs)); }
+      checkAction();
       requirePage(await driver.setText(record.task.prompt));
-      check();
+      checkAction();
       const saved = requirePage(await driver.call("saveNativeDraft", { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode }));
       const patches = bindingPatches(saved.bindings);
       if (!patches[draft.id]) throw new Error("豆包未返回新草稿的位置，请在左侧草稿核对");
@@ -618,16 +630,19 @@ async function submitDrafts(ids, options = {}) {
     if (d.executionMode !== "work" && !d.submissionRecord) throw new Error(`草稿「${d.template.name}」仅支持通过云电脑提交，请先存入云电脑草稿`);
     if (!d.submissionRecord && d.nativeState !== "saved") throw new Error("请先将所选草稿存入豆包网页，再一起发送");
   }
-  return withNativeDrafts(selected, options, async (_driver, inst, check, operation) => {
+  return withNativeDrafts(selected, options, async (_driver, inst, check, operation, checkAction) => {
     const accepted = selected.filter((d) => d.submissionRecord).map((d) => ({ id: d.id, record: d.submissionRecord }));
-    const pending = selected.filter((d) => !d.submissionRecord), receipts = [], errors = [], children = new Set();
+    const pending = selected.filter((d) => !d.submissionRecord), receipts = [], errors = [], children = new Set(), pageWaiters = [];
     const bindings = nativeBindings(inst.id), draftBatchId = `draft-batch-${crypto.randomBytes(12).toString("hex")}`;
     let failure, launched = 0;
     const progress = message => {
       const confirmed = accepted.filter(a => Object.values(a.record.task.confirmationIntents || {}).some(intent => intent.state === "sent")).length;
       emit("draft", { message: `${message} · 本次发起 ${launched}/${pending.length} 条，豆包已接收 ${accepted.length}/${selected.length} 条，已回复生成确认 ${confirmed} 条，异常 ${errors.length} 条`, instanceId: inst.id });
     };
-    const abortChildren = () => { for (const child of children) child.controller.abort(operation.controller.signal.reason); };
+    const abortChildren = () => {
+      for (const child of children) child.controller.abort(operation.controller.signal.reason);
+      for (const wake of pageWaiters.splice(0)) wake();
+    };
     operation.controller.signal.addEventListener("abort", abortChildren, { once: true });
     try {
       if (pending.length && !deps.resolveDraftDriver) throw new Error("草稿投递页面未就绪，请更新并重启应用");
@@ -635,13 +650,17 @@ async function submitDrafts(ids, options = {}) {
       // soon as the click is issued, never when its receipt/confirmation arrives.
       // Each ready page sends independently, so one slow page cannot hold the rest.
       async function dispatchDraft(draft, index) {
-        check();
+        while (children.size >= (Number(options.maxPages) || Infinity)) {
+          await new Promise(resolve => pageWaiters.push(resolve));
+          check();
+        }
+        checkAction();
         const preparingAt = Date.now();
         const child = { controller: new AbortController() };
         children.add(child);
         let driver, record, issued = false, received = false, trackingReceipt = false;
         const checkDraft = () => { check(); child.controller.signal.throwIfAborted(); };
-        const cleanup = () => { children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); };
+        const cleanup = () => { children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); pageWaiters.shift()?.(); };
         const recordFailure = error => {
           const message = `${received ? "草稿已接收，生成确认未完成" : issued ? "已发起发送，接收结果未确认" : "尚未发送"}：${error.message}`;
           errors.push(message);
@@ -665,18 +684,20 @@ async function submitDrafts(ids, options = {}) {
               : `账号 ${inst.name} 的草稿页面登录状态尚未加载完成，请等待页面加载或检查网络后重试`);
             requirePage(await driver.call("restoreNativeDrafts", bindings.filter((b) => b.id === draft.id)));
             const pageOptions = { id: draft.id, prompt: draft.nativePrompt, executionMode: draft.executionMode };
+            checkAction();
             const opened = requirePage(await driver.call("openNativeDraft", pageOptions));
             const record = templateRecords(draft.template, draft.executionMode), task = record.task;
             Object.assign(task, { prompt: draft.nativePrompt, draftNumber: draft.draftNumber, draftBatchId, instanceId: inst.id, instanceName: inst.name, preferredInstanceId: inst.id, submissionUncertain: true });
             const tracking = requirePage(await driver.beginTask({ taskId: task.id, prompt: task.prompt, resume: false }));
             Object.assign(task, { baselineUrls: tracking.baselineUrls || [], baselineMessageIds: tracking.baselineMessageIds || [], baselineMediaKeys: [...new Set([...(tracking.baselineUrls || []).map(mediaKey), ...interceptor.list({ instanceId: inst.id, kind: "video", limit: 800 }).map((m) => mediaKey(m.url))])], confirmationIntents: {} });
+            checkAction();
             await driver.setGenerationOptions({ model: task.model, duration: task.duration });
             checkDraft();
             return { pageOptions, opened, record };
           }, 120000);
           const { pageOptions, opened } = prepared;
           record = prepared.record;
-          checkDraft();
+          checkAction();
           record.task.submittedAt = new Date().toISOString();
           drafts.updateMany({ [draft.id]: { nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
           // The durable intent precedes the click. Do not await this promise here.
@@ -723,13 +744,17 @@ async function submitDrafts(ids, options = {}) {
             };
             for (;;) {
               checkDraft();
-              const confirmation = await confirmGeneration(driver, record.task, settings, null, { check: checkDraft, persist });
+              options.checkLease?.();
+              const confirmation = await confirmGeneration(driver, record.task, settings, null, { check: checkDraft, persist, checkLease: options.checkLease });
               checkDraft();
               if (confirmation?.blocked) throw new Error(confirmation.reason);
               if (confirmation?.sent || confirmation?.recorded) { progress("本条已回复确认，继续跟踪其他草稿"); return; }
               const state = await driver.call("readProgress");
               checkDraft();
-              if (state?.generationStarted || state?.mediaUrls?.length) return;
+              if (state?.generationStarted || state?.mediaUrls?.length) {
+                if (record.task.studioTaskId) persist({ generationObservedAt: new Date().toISOString() });
+                return;
+              }
               if (state?.state === "failed") throw new Error(state.snippet || "平台处理失败");
               if (Date.now() - refreshedAt >= 30000) { await reopen(); refreshedAt = Date.now(); }
               // A generic '处理中' may still be planning; keep this page alive
@@ -762,7 +787,7 @@ async function submitDrafts(ids, options = {}) {
     }
     drafts.updateMany(bindingPatches(remainingDraftBindings(bindings, new Set(accepted.map((a) => a.id)))));
     accepted.sort((a, b) => selected.findIndex((d) => d.id === a.id) - selected.findIndex((d) => d.id === b.id));
-    const items = accepted.length ? commitTemplates(accepted.map((a) => a.record), accepted.map((a) => a.id), !operation.stopped) : [];
+    const items = accepted.length ? commitTemplates(accepted.map((a) => a.record), accepted.map((a) => a.id), !operation.stopped && options.startQueue !== false) : [];
     if (failure || errors.length) throw new Error(`已确认发送 ${accepted.length}/${selected.length} 条。${failure?.message || errors[0]}；各条失败原因已保存，其余草稿记录已保留`);
     return { items, count: items.length, instanceId: inst.id, instanceName: inst.name };
   });
