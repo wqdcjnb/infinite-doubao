@@ -211,6 +211,8 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
       webviewTag: true,
+      // Keep the host's scheduler alive while a Mac guest is used from the drafts panel.
+      backgroundThrottling: process.platform !== "darwin",
       spellcheck: false
     }
   });
@@ -270,6 +272,7 @@ function createWindow() {
 
 app.on("web-contents-created", (_e, contents) => {
   if (contents.getType() !== "webview") return;
+  if (process.platform === "darwin") contents.setBackgroundThrottling(false);
   contents.on("console-message", (_ev, level, message, line, source) => {
     if (level >= 2) log.warn("webview-console", { level, message: String(message).slice(0, 300), source: String(source).slice(0, 120), line });
   });
