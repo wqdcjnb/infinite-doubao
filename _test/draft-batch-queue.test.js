@@ -13,11 +13,14 @@ beforeEach(() => {
   calls = []; native = []; hook = () => null;
   liveWorkers = 0; peakWorkers = 0;
   const resolveDriver = async (inst) => {
-    let taskId, draftId, text;
+    let taskId, draftId, text, currentUrl = 'https://www.doubao.com/chat/';
     const bindings = () => native.map((id, i) => ({ id, index: i, title: id, titles: native.slice() }));
     return {
       isLoggedIn: async () => ({ loggedIn: true }),
       waitForLogin: async () => (await hook("waitForLogin")) || { loggedIn: true },
+      navigate: async url => { currentUrl = url; calls.push({ method: "navigate", url, draftId }); },
+      url: async () => currentUrl,
+      ready: async () => true,
       call: async (method, options) => {
         if (method === "openNativeDraft") draftId = options.id;
         calls.push({ method, options, instanceId: inst.id });
@@ -29,7 +32,7 @@ beforeEach(() => {
       },
       close: () => { calls.push({ method: "close", instanceId: inst.id }); },
       setGenerationOptions: async () => ({}), setText: async value => { text = value; return { ok: true }; },
-      beginTask: async (input) => { taskId = input.taskId; return { ok: true, baselineUrls: [] }; },
+      beginTask: async (input) => { taskId = input.taskId; calls.push({ method: "beginTask", input, draftId }); return { ok: true, baselineUrls: [], baselineMessageIds: ["old-route"] }; },
       send: async () => { calls.push({ method: "normalSend", instanceId: inst.id, draftId, text }); return await hook("send", { text }, { draftId, taskId }) || { ok: true }; },
       readProgress: async () => { calls.push({ method: "result" }); return { state: "done", mediaUrls: [`https://fixture.invalid/${index}/${taskId}.mp4`] }; }
     };
@@ -52,6 +55,20 @@ async function waitFor(check) {
   throw new Error("Native draft fixture timed out");
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
+
+test("接收后自动打开每条已有对话并重置旧路由基线，随后才检测生成确认", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  hook = (method, options, context) => {
+    if (method === "peekGenerationConfirmation" && context.draftId) {
+      assert.ok(calls.some(c => c.method === "navigate" && c.draftId === context.draftId));
+      const tracking = calls.filter(c => c.method === "beginTask" && c.draftId === context.draftId).at(-1).input;
+      assert.equal(tracking.resume, true); assert.equal(tracking.reset, true); assert.deepEqual(tracking.baselineMessageIds, []);
+    }
+  };
+  assert.equal((await queue.submitDrafts(ids)).count, 2);
+  assert.equal(sends().length, 2);
+  assert.ok(store.get().tasks.every(t => t.baselineMessageIds.length === 0));
+});
 
 test("同账号的确认提醒乱序到达，独立回复按要求生成且先落盘，不等第一条完成", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);

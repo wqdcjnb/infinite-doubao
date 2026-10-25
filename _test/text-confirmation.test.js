@@ -9,6 +9,7 @@ const P = require("../src/paths");
 const store = require("../src/store");
 const templates = require("../src/task-templates");
 const orchestrator = require("../src/orchestrator");
+const { Driver } = require("../src/driver");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "doubao-confirm-"));
 let serial = 0;
 beforeEach(() => {
@@ -31,6 +32,55 @@ function page() {
 const request = "我将为你生成短视频，请先确认参数：视频生成参数确认 模型：Seedance 2.0 Mini 时长：5秒 比例16:9，确认后我再开始生成视频。";
 const planRequest = "以上方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 5段分镜 / 仅环境音无配乐）是否按此开始生成？视频生成为高消耗生成。";
 const livePlanRequest = "是否按以上完整方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 6段分镜 / 仅环境音无对白）开始生成视频？视频生成为高消耗生成。";
+
+test("真实工作任务的冒号方案、请确认句式和短提醒均核对当前方案参数", () => {
+  const plan = "模型：Seedance 2.5（seedance_2.5，固定不切换） 时长：30 秒 画面比例：16:9 横屏，按六段分镜生成。";
+  const reminders = [
+    "以上为完整方案：Seedance 2.5 模型、30 秒、16:9 横屏、写实电影风、按六段分镜生成，无对白无配乐无字幕水印。视频生成为高消耗生成，是否按此参数开始生成？",
+    "视频生成为高消耗生成。请确认是否按上述方案立即调用 Seedance 2.5 生成 30 秒 16:9 横屏视频。",
+    "是否按以上参数开始生成视频？"
+  ];
+  for (const reminder of reminders) {
+    const p = page(); p.api.beginTask({ taskId: "task" });
+    p.add(p.message("plan", plan, "assistant"));
+    p.panel(p.message("reminder", reminder + " 按要求生成 暂不生成", ""));
+    const options = { model: "seedance_v2.5", duration: 30, ratio: "16:9" };
+    const candidate = p.api.peekGenerationConfirmation(options);
+    assert.equal(candidate.ok, true, reminder); assert.equal(candidate.text, "按要求生成");
+    assert.equal(p.api.peekGenerationConfirmation({ ...options, duration: 15 }).ok, false);
+    assert.equal(p.api.peekGenerationConfirmation({ ...options, ratio: "9:16" }).ok, false);
+  }
+});
+
+test("短提醒不能借用用户要求或旧回复补齐参数，当前方案冲突须停止", () => {
+  const p = page(); p.add(p.message("old", "Seedance 2.5，30 秒，16:9", "assistant"));
+  p.api.beginTask({ taskId: "task" });
+  p.add(p.message("user", "Seedance 2.5，30 秒，16:9", "user"));
+  p.panel(p.message("reminder", "是否按以上参数开始生成视频？ 按要求生成 暂不生成", ""));
+  assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.5", duration: 30, ratio: "16:9" }).ok, false);
+  p.add(p.message("new", "Seedance 2.0，15 秒，9:16", "assistant"));
+  assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.5", duration: 30, ratio: "16:9" }).ok, false);
+});
+
+test("确认问句中的实际参数优先于前文复述的用户要求", () => {
+  const p = page(); p.api.beginTask({ taskId: 'mismatch' });
+  p.add(p.message('new', '你要求 Seedance 2.5 / 30秒 / 16:9，但当前可用方案如下：以上方案（Seedance 2.0 / 15秒 / 9:16）是否按此开始生成？', 'assistant'));
+  assert.equal(p.api.peekGenerationConfirmation({ model: 'seedance_v2.5', duration: 30, ratio: '16:9' }).ok, false);
+  for (const actual of ['Seedance 2.0 / 15秒 / 9:16', 'Seedance 2.5 / 15秒 / 16:9']) {
+    p.add(p.message('conflict', `你要求 Seedance 2.5 / 30秒 / 16:9，但当前可用的完整方案：${actual}。是否按此参数开始生成？`, 'assistant'));
+    assert.equal(p.api.peekGenerationConfirmation({ model: 'seedance_v2.5', duration: 30, ratio: '16:9' }).ok, false);
+  }
+  p.add(p.message('mixed', '你要求 Seedance 2.5，时长：30秒，16:9；当前可用的完整方案：Seedance 2.5 / 15秒 / 16:9。是否按此参数开始生成？', 'assistant'));
+  assert.equal(p.api.peekGenerationConfirmation({ model: 'seedance_v2.5', duration: 30, ratio: '16:9' }).ok, false);
+});
+
+test("等待确认发送按钮期间停止，下一轮检查不能再点击", async () => {
+  const driver = new Driver({ instance: { id: 'test' } });
+  let attempts = 0, stopped = false;
+  driver.call = async () => { attempts++; stopped = true; return { ok: false, reason: '未找到对话输入框的发送按钮' }; };
+  await assert.rejects(driver.send({ nativeOnly: true }, () => { if (stopped) throw new Error('stopped'); }), /stopped/);
+  assert.equal(attempts, 1);
+});
 
 test("方案提醒在当前回复或输入区面板出现后才返回按要求生成，输入文字不改变确认身份", () => {
   for (const reminder of [planRequest, livePlanRequest]) for (const location of ["assistant", "composer"]) {

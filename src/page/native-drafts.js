@@ -151,7 +151,7 @@
     return { ok: true, source: items ? "indexeddb" : "sidebar", items: items || [], total: items ? items.length : rows().length };
   });
   api.restoreNativeDrafts = result(async function (bindings) {
-    await wait(editor, "豆包输入区尚未加载");
+    await wait(editor, "豆包输入区尚未加载", Date.now() + 60000);
     bindings = bindings || [];
     await expandDrafts();
     var full = bindings.length ? await catalog() : null;
@@ -292,11 +292,23 @@
     button.click();
     return { ok: true, clickedAt: new Date().toISOString() };
   });
+  api.readNativeDraftReceipt = function (options) {
+    var match = location.pathname.match(/^\/chat\/([^/]+)$/), id = match && match[1];
+    if (!id || (options.conversationIds || []).includes(id) || !normalize(options.prompt)) return { ok: false };
+    var number = numberIn(options.prompt);
+    var accepted = Array.from(document.querySelectorAll('[data-message-id]')).some(function (node) {
+      var owner = node.closest('[data-message-role], [data-role]');
+      // Rendered paragraphs/attachments can change whitespace and truncate the
+      // displayed body. Our complete, unique draft number survives that render.
+      return owner && (owner.getAttribute('data-message-role') || owner.getAttribute('data-role')) === 'user' &&
+        (number ? String(node.textContent || text(node)).includes('【草稿编号：' + number + '】') : text(node).includes(normalize(options.prompt)));
+    });
+    return accepted ? { ok: true, conversationUrl: location.href, bindings: snapshot() } : { ok: false };
+  };
   api.waitNativeDraftAccepted = result(async function (options) {
-    await wait(function () {
-      var match = location.pathname.match(/^\/chat\/([^/]+)$/), id = match && match[1];
-      return !rowFor(options.id) && id && !(options.conversationIds || []).includes(id) && document.getElementById("conversation_" + id);
-    }, "尚未确认豆包接收本条草稿，请核对最近任务；不会自动重发");
-    return { ok: true, conversationUrl: location.href, bindings: snapshot() };
+    return await wait(function () {
+      var receipt = api.readNativeDraftReceipt(options);
+      return receipt.ok && receipt;
+    }, "尚未确认豆包接收本条草稿，请核对最近任务；不会自动重发", Date.now() + 120000);
   });
 })();

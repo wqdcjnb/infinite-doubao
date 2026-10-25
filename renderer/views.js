@@ -538,7 +538,8 @@ function renderDrafts() {
     summary.appendChild(node("strong", "", t.name));
     summary.appendChild(node("small", "draft-number", `编号：${draft.draftNumber || "未编号"}`));
     info.appendChild(summary);
-    const state = draft.submissionRecord?.task.submissionUncertain ? "发送结果待核对" : draft.nativeState === "sent" ? "已发送，待取回结果" : draft.nativeState === "saved" ? "已存入豆包草稿" : draft.nativeState === "saving" ? "保存结果待核对" : "待存入豆包";
+    const confirmed = Object.values(draft.submissionRecord?.task.confirmationIntents || {}).some(intent => intent.state === "sent");
+    const state = draft.submissionRecord?.task.submissionUncertain ? "发送结果待核对" : draft.nativeState === "sent" ? confirmed ? "已回复生成确认，等待视频" : "豆包已接收，正在核对生成确认" : draft.nativeState === "saved" ? "已存入豆包草稿" : draft.nativeState === "saving" ? "保存结果待核对" : "待存入豆包";
     info.appendChild(node("small", "", `${state}${draft.instanceName ? ` · ${draft.instanceName}` : ""}`));
     if (draft.nativeError) info.appendChild(node("small", "attachment-missing", draft.nativeError));
     info.appendChild(node("p", "", t.prompt));
