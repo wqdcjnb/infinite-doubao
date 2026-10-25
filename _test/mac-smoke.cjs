@@ -6,7 +6,7 @@ const { CDP } = require("./cdp");
 const root = path.resolve(__dirname, "..");
 const pkg = require("../package.json");
 const out = path.join(root, "dist", `mac-${process.arch}`);
-const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "豆包工坊 安装测试-"));
+const fixture = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "豆包工坊 安装测试-")));
 const home = path.join(fixture, "用户数据"), mount = path.join(fixture, "镜像");
 const app = path.join(fixture, "Applications", pkg.productName + ".app");
 const res = path.join(app, "Contents", "Resources");
