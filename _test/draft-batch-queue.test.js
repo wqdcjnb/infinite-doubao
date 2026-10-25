@@ -5,12 +5,13 @@ const fs = require("node:fs"), os = require("node:os"), path = require("node:pat
 const P = require("../src/paths"), store = require("../src/store");
 const templates = require("../src/task-templates"), drafts = require("../src/task-drafts"), queue = require("../src/orchestrator");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "doubao-native-batch-"));
-let index = 0, calls, native, hook;
+let index = 0, calls, native, hook, liveWorkers, peakWorkers;
 beforeEach(() => {
   P.init({ home: path.join(root, String(++index)) }); store.load();
   Object.assign(store.get().settings.orchestrator, { maxParallel: 3, pollInterval: 1500, retryLimit: 0, autoDownload: false });
   store.get().settings.quota.perDay = 20;
   calls = []; native = []; hook = () => null;
+  liveWorkers = 0; peakWorkers = 0;
   const resolveDriver = async (inst) => {
     let taskId;
     const bindings = () => native.map((id, i) => ({ id, index: i, title: id, titles: native.slice() }));
@@ -31,7 +32,13 @@ beforeEach(() => {
       readProgress: async () => { calls.push({ method: "result" }); return { state: "done", mediaUrls: [`https://fixture.invalid/${index}/${taskId}.mp4`] }; }
     };
   };
-  queue.init({ sessionFor: () => ({ cookies: { get: async () => [{ name: "sessionid" }] } }), resolveDriver, resolveDraftDriver: resolveDriver });
+  queue.init({ sessionFor: () => ({ cookies: { get: async () => [{ name: "sessionid" }] } }), resolveDriver, resolveDraftDriver: async inst => {
+    const driver = await resolveDriver(inst), close = driver.close;
+    peakWorkers = Math.max(peakWorkers, ++liveWorkers);
+    let closed = false;
+    driver.close = () => { if (!closed) { closed = true; liveWorkers--; close(); } };
+    return driver;
+  } });
 });
 afterEach(async () => { queue.stopAll(); await waitFor(() => !queue.state().running.length); });
 after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -72,12 +79,12 @@ test("已存网页的旧草稿保留原提示词和旧恢复方式", async () =>
   assert.ok(sends().every(c => c.options.prompt.startsWith("旧提示词 ")));
   assert.ok(calls.filter(c => c.method === "restoreNativeDrafts").flatMap(c => c.options).every(b => !b.draftNumber));
 });
-test("整批页面先就绪，所有发送先触发，慢回执不阻塞其他发送", async () => {
+test("逐条触发后继续下一条，第一条回执不返回也不能阻塞第二条", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   let release;
   const delayed = new Promise((resolve) => { release = resolve; });
   hook = async (method, options) => {
-    if (method === "sendNativeDraft") assert.equal(calls.filter((c) => c.method === "openNativeDraft").length, 2);
+    if (method === "sendNativeDraft" && options.id === ids[0]) assert.equal(calls.filter((c) => c.method === "openNativeDraft").length, 1);
     if (method === "waitNativeDraftAccepted" && options.id === ids[0]) await delayed;
   };
   const submission = queue.submitDrafts(ids);
@@ -86,14 +93,14 @@ test("整批页面先就绪，所有发送先触发，慢回执不阻塞其他�
   assert.ok(drafts.list().every((d) => d.submissionRecord));
   release(); assert.equal((await submission).count, 2);
   assert.equal(calls.filter((c) => c.method === "close").length, 2);
-  assert.equal(new Set(store.get().tasks.map((t) => t.submittedAt)).size, 1);
+  assert.equal(new Set(store.get().tasks.map((t) => t.draftBatchId)).size, 1);
 });
-test("任一页面准备失败整批不发送，关闭所有已创建页面", async () => {
+test("一条准备失败不影响已投递任务，按条保存失败原因", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   hook = (method, options) => method === "openNativeDraft" && options.id === ids[1] ? { ok: false, reason: "附件未就绪" } : null;
-  await assert.rejects(queue.submitDrafts(ids), /整批尚未触发发送/);
-  assert.equal(sends().length, 0); assert.equal(calls.filter((c) => c.method === "close").length, 2);
-  assert.ok(drafts.list().every((d) => !d.submissionRecord));
+  await assert.rejects(queue.submitDrafts(ids), /已确认发送 1\/2/);
+  assert.equal(sends().length, 1); assert.equal(calls.filter((c) => c.method === "close").length, 2);
+  assert.match(drafts.list()[0].nativeError, /尚未发送.*附件未就绪/);
 });
 
 test("等待草稿页登录就绪再准备发送，未知页面与明确未登录分别提示且不丢记录", async () => {
@@ -126,7 +133,7 @@ test("旧版本地草稿转为云电脑，已绑定的旧版对话草稿禁止�
   assert.equal(calls.length, before); assert.equal(sends().length, 0);
 });
 
-test("18 条草稿有一页登录加载较慢时整批等待，全部就绪后各发送一次", async () => {
+test("18 条草稿最后一页登录较慢时，前 17 条已经连续投递", async () => {
   account("first");
   const ids = drafts.createMany(Array.from({ length: 18 }, (_, i) => template(String(i)).id)).map(d => d.id);
   await queue.saveDrafts(ids);
@@ -135,11 +142,52 @@ test("18 条草稿有一页登录加载较慢时整批等待，全部就绪后�
   hook = async method => { if (method === "waitForLogin" && ++loginChecks === 18) await delayed; };
   const pending = queue.submitDrafts(ids);
   await waitFor(() => loginChecks === 18);
-  assert.equal(sends().length, 0);
-  assert.ok(drafts.list().every(d => !d.submissionRecord));
+  assert.equal(sends().length, 17);
+  assert.equal(calls.some(c => c.method === "result"), false);
+  assert.ok(!drafts.list()[17].submissionRecord);
   release(); assert.equal((await pending).count, 18);
   assert.equal(new Set(sends().map(c => c.options.id)).size, 18);
   assert.equal(sends().length, 18);
+  assert.equal(liveWorkers, 0);
+});
+
+test("50 条所有回执都延迟，仍先触发全部 50 次发送，绝不按组等待", async () => {
+  account("first");
+  const ids = drafts.createMany(Array.from({ length: 50 }, (_, i) => template(String(i)).id)).map(d => d.id);
+  await queue.saveDrafts(ids);
+  let release;
+  const delayed = new Promise(resolve => { release = resolve; });
+  hook = async method => { if (method === "waitNativeDraftAccepted") await delayed; };
+  const pending = queue.submitDrafts(ids);
+  await waitFor(() => sends().length === 50);
+  assert.equal(store.get().tasks.length, 0);
+  release(); assert.equal((await pending).count, 50);
+  assert.equal(new Set(sends().map(c => c.options.id)).size, 50);
+  assert.equal(calls.some(c => c.method === "result"), false);
+  assert.equal(liveWorkers, 0);
+  assert.equal(new Set(store.get().tasks.map(t => t.draftBatchId)).size, 1);
+});
+
+test("中间一条准备失败，后续仍连续投递，失败草稿保留", async () => {
+  account("first");
+  const ids = drafts.createMany(Array.from({ length: 10 }, (_, i) => template(String(i)).id)).map(d => d.id);
+  await queue.saveDrafts(ids);
+  hook = (method, options) => method === "openNativeDraft" && options.id === ids[5] ? { ok: false, reason: "页面加载失败" } : null;
+  await assert.rejects(queue.submitDrafts(ids), /已确认发送 9\/10.*页面加载失败/);
+  assert.equal(store.get().tasks.length, 9);
+  assert.deepEqual(drafts.list().map(d => d.id), [ids[5]]);
+  assert.ok(drafts.list().every(d => !d.submissionRecord));
+  assert.equal(liveWorkers, 0);
+});
+
+test("页面调用一直不返回时，停止立即解除等待并清理页面", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  hook = method => method === "openNativeDraft" ? new Promise(() => {}) : null;
+  const pending = queue.submitDrafts(ids);
+  await waitFor(() => calls.some(c => c.method === "openNativeDraft"));
+  queue.stopAll(); await assert.rejects(pending, /已停止/);
+  assert.equal(sends().length, 0); assert.equal(liveWorkers, 0);
+  assert.equal(queue.state().running.length, 0);
 });
 test("指定账号保存和发送整批，已存原生草稿不得静默改用另一号", async () => {
   const first = account("first"), chosen = account("chosen"), ids = batch();
@@ -177,7 +225,7 @@ test("未选草稿失效不阻塞所选任务，独立页面只恢复自己的�
   hook = (method, options) => method === "restoreNativeDrafts" && options.some(b => b.id === ids[2]) ? { ok: false, reason: "未选草稿已被移除" } : null;
   assert.equal((await queue.submitDrafts(ids.slice(0, 2))).count, 2);
   const restored = calls.filter(c => c.method === "restoreNativeDrafts").map(c => c.options);
-  assert.deepEqual(restored.map(bs => bs.length), [2, 1, 1]);
+  assert.deepEqual(restored.map(bs => bs.length), [1, 1]);
   assert.ok(restored.flat().every(b => b.prompt && b.executionMode === "work"));
 });
 test("中途接收超时保留记录，已接收任务仍取回，未确认点击不重发", async () => {
@@ -208,8 +256,8 @@ test("批量操作互斥，停止阻止下一次点击", async () => {
   hook = async (method, options) => {
     if (method === "openNativeDraft" && options.id === ids[1]) { await assert.rejects(queue.submitDrafts([ids[1]]), /正在执行任务/); queue.stopAll(); }
   };
-  await assert.rejects(queue.submitDrafts(ids), /已停止/); assert.equal(sends().length, 0);
-  assert.equal(queue.state().paused, true); assert.equal(drafts.list()[0].submissionRecord, undefined);
+  await assert.rejects(queue.submitDrafts(ids), /已停止/); assert.equal(sends().length, 1);
+  assert.equal(queue.state().paused, true); assert.equal(drafts.list().find(d => d.id === ids[1]).submissionRecord, undefined);
 });
 test("并发回执更新未勾选草稿的位置，单条拒绝不影响其他已发任务", async () => {
   account("first"); const ids = [...batch(), drafts.create(template("C").id).id]; await queue.saveDrafts(ids);

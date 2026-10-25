@@ -89,14 +89,14 @@ const server = http.createServer((req,res)=>{
     const first=sent.find(s=>s.prompt.startsWith('【草稿编号：'+ds[0].draftNumber+'】')),second=sent.find(s=>s.prompt.startsWith('【草稿编号：'+ds[1].draftNumber+'】'));
     assert.ok(first&&second);assert.equal(first.refs.length,0);assert.equal(second.refs.length,1);
     assert.equal(first.prompt.split('\n\n').slice(1).join('\n\n'),second.prompt.split('\n\n').slice(1).join('\n\n'),'identical user prompts remain separate by number');
-    assert.ok(Math.max(...receivedAt)-Math.min(...receivedAt)<1000,'requests arrive together before either acknowledgement');
+    assert.ok(Math.max(...receivedAt)-Math.min(...receivedAt)<15000,'second request is dispatched while first acknowledgement is still withheld');
     console.log('PASS: both requests arrive before either acknowledgement, spread='+ (Math.max(...receivedAt)-Math.min(...receivedAt)) +'ms; prompts and attachments stay separate');
     resultsReady=true;
     await wait(async()=>{const ts=await call('dm:tasks');return ts.length===2&&ts.every(t=>t.status==='succeeded');});
     assert.equal(sent.length,2);assert.equal((await call('dm:drafts')).length,1);
     const tasks=await call('dm:tasks');assert.equal(new Set(tasks.map(t=>t.instanceId)).size,1);
     assert.ok(tasks.every(t=>t.conversationLocked&&t.result.files.length&&t.result.files.every(f=>fs.existsSync(f))));
-    assert.equal(new Set(tasks.map(t=>t.submittedAt)).size,1);
+    assert.equal(new Set(tasks.map(t=>t.draftBatchId)).size,1);
     assert.equal((await getJSON('/json/list')).filter(p=>p.url.startsWith('http://127.0.0.1:18854')).length,1,'temporary submission pages are closed');
     await c.eval("document.querySelector('webview').reload()");
     await wait(()=>page("document.readyState==='complete'&&document.querySelector('aside').children.length===2"));

@@ -85,9 +85,11 @@ test("批量删除空选择、过期选择和写盘失败时整批保留", () =>
 test("跨窗口保存进行中禁止删除，操作结束后可清理", async () => {
   const inst = require("../src/instances").create({ name: "隔离测试", url: "about:blank" });
   const d = drafts.create(template().id);
-  let release;
-  queue.init({ resolveDriver: () => new Promise(resolve => { release = resolve; }) });
+  let release, started;
+  const opening = new Promise(resolve => { started = resolve; });
+  queue.init({ resolveDriver: () => new Promise(resolve => { release = resolve; started(); }) });
   const pending = queue.saveDrafts([d.id], { instanceId: inst.id });
+  await opening;
   try {
     assert.throws(() => queue.removeDrafts([d.id]), /正在保存或发送/);
     assert.equal(drafts.list().length, 1);

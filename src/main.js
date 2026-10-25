@@ -861,8 +861,9 @@ orchestrator.init({
     const wc = await ensureAccountWebContents(inst);
     return driverMod.open(inst, { webContents: wc });
   },
-  resolveDraftDriver: async (inst) => {
+  resolveDraftDriver: async (inst, { signal } = {}) => {
     await prepareSession(inst);
+    signal?.throwIfAborted();
     if (!mainWindow || mainWindow.isDestroyed()) throw new Error("主窗口已关闭，无法准备并发草稿");
     const win = new BrowserWindow({
       parent: mainWindow, show: false, width: 1280, height: 900,
@@ -871,12 +872,14 @@ orchestrator.init({
         webSecurity: true, spellcheck: false, backgroundThrottling: false }
     });
     draftWindows.add(win);
-    win.on("closed", () => draftWindows.delete(win));
     const close = () => { if (!win.isDestroyed()) win.destroy(); };
+    win.on("closed", () => { draftWindows.delete(win); signal?.removeEventListener("abort", close); });
+    signal?.addEventListener("abort", close, { once: true });
     win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     try {
       await win.loadURL(new URL("/chat/", inst.url).href);
       const driver = await driverMod.open(inst, { webContents: win.webContents });
+      signal?.throwIfAborted();
       driver.close = close;
       return driver;
     } catch (error) { close(); throw error; }
