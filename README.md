@@ -85,7 +85,7 @@ Python 默认从 PATH 查找，也可通过环境变量 `DOLAMOD_PYTHON` 指定�
 
 在相应架构的 Mac 上运行 `npm run pack:mac`。脚本下载并校验固定版本的 Electron、可迁移 Python 和 FFmpeg，安装精确版本的 OpenCV/NumPy，生成 `dist/mac-arm64/` 或 `dist/mac-x64/` 下的 DMG 和 SHA-256 文件。构建需要网络，安装后离线视频处理不依赖系统工具。
 
-GitHub Actions 的 `macOS packages` 工作流分别使用 Apple 芯片和 Intel macOS 环境运行单元测试、构建、安装镜像、启动主窗口和视频遮脸验证。它只产出待验收附件，不自动发布更新。开发者可在 Mac 本机钥匙串准备 Developer ID，并设置 `DOLAMOD_MAC_SIGN_IDENTITY` 和可选的 `DOLAMOD_MAC_NOTARY_PROFILE` 启用正式签名及公证；凭据不入库。
+GitHub Actions 的 `macOS packages` 工作流分别使用 Apple 芯片和 Intel macOS 环境运行单元测试、构建、安装镜像、启动主窗口和视频遮脸验证。它产出待验收附件；若已有对应同一提交的 Release 草稿，会将验证通过的 DMG 附到草稿，不自动公开 Release 或发布客户端更新。开发者可在 Mac 本机钥匙串准备 Developer ID，并设置 `DOLAMOD_MAC_SIGN_IDENTITY` 和可选的 `DOLAMOD_MAC_NOTARY_PROFILE` 启用正式签名及公证；凭据不入库。
 
 Mac 剪映入口使用系统的文件打开方式寻找“应用程序”中的剪映/CapCut。不同剪映版本是否将文件插入当前工程，仍取决于该软件的文件关联支持。
 
