@@ -115,8 +115,9 @@ function setup(server) {
     return c.json(201, inst);
   });
 
-  server.patch("/api/instances/:id", (c) => {
+  server.patch("/api/instances/:id", async (c) => {
     const inst = instances.update(c.params.id, c.body || {});
+    if (inst) { await deps.prepareSession?.(inst); orchestrator.wakeQueue(inst.id); }
     return inst ? c.ok(inst) : c.fail(404, "实例不存在");
   });
 

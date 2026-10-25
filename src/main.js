@@ -63,6 +63,7 @@ if (!app.commandLine.hasSwitch("user-data-dir")) {
 }
 const instances = require("./instances");
 const sessionMod = require("./session");
+const proxyDiagnostics = require("./proxy-diagnostics");
 const driverMod = require("./driver");
 const chromium = require("./chromium");
 const interceptor = require("./interceptor");
@@ -385,9 +386,9 @@ function registerIpc() {
     return inst;
   });
 
-  ipcMain.handle("account:update", (_e, id, patch = {}) => {
+  ipcMain.handle("account:update", async (_e, id, patch = {}) => {
     const inst = instances.update(id, patch);
-    if (inst) prepareSession(inst).then(() => orchestrator.wakeQueue(inst.id)).catch(() => {});
+    if (inst) { await prepareSession(inst); orchestrator.wakeQueue(inst.id); }
     return inst;
   });
 
@@ -443,24 +444,11 @@ function registerIpc() {
   ipcMain.handle("proxy:test", async (_e, id) => {
     const inst = instances.get(id);
     if (!inst) return { ok: false, message: "实例不存在" };
-    const ses = await prepareSession(inst);
-    const started = Date.now();
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 15000);
-      const res = await ses.fetch("http://ip-api.com/json/?fields=status,message,country,regionName,city,isp,timezone,query&lang=zh-CN", {
-        signal: controller.signal,
-        headers: { accept: "application/json" }
-      });
-      clearTimeout(timer);
-      const latency = Date.now() - started;
-      const text = await res.text();
-      let j = {};
-      try { j = JSON.parse(text); } catch {}
-      if (!res.ok || j.status === "fail") return { ok: false, message: j.message || `HTTP ${res.status}`, latency, raw: text.slice(0, 200) };
-      return { ok: true, ip: j.query || "", country: j.country || "", region: j.regionName || "", city: j.city || "", isp: j.isp || "", timezone: j.timezone || "", latency };
-    } catch (error) {
-      return { ok: false, message: String((error && error.message) || error), latency: Date.now() - started };
+      const ses = await prepareSession(inst);
+      return await proxyDiagnostics.testProxy(ses, { mode: inst.proxy?.mode || "direct" });
+    } catch {
+      return { ok: false, message: "代理设置应用失败，请检查代理配置后重试" };
     }
   });
 
@@ -794,6 +782,7 @@ async function startServer() {
   const next = new httpMod.HttpServer({ port: Number(s.port) || 17823, host: "127.0.0.1", token: s.token || undefined });
   api.init({
     findWebContents,
+    prepareSession,
     notify: (channel, payload) => pushToUi(channel, payload)
   });
   api.setup(next);

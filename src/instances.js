@@ -66,19 +66,21 @@ function create(input = {}) {
 function update(id, patch = {}) {
   const before = store.find(id);
   if (!before) return null;
+  const previousProxy = { ...before.proxy };
   const inst = store.patch(id, patch);
-  if (patch && patch.proxy) applyProxyInput(id, patch.proxy);
+  if (patch && patch.proxy) applyProxyInput(id, patch.proxy, previousProxy);
   store.save();
   return store.find(id);
 }
 
 /** 代理密码单独加密落盘，store 里只留掩码 */
-function applyProxyInput(id, proxy) {
+function applyProxyInput(id, proxy, previousProxy) {
   if (!proxy || typeof proxy !== "object") return;
   const url = String(proxy.url || "");
   if (!url) return;
   const parsed = store.splitProxyPassword(url);
-  if (parsed.hasPassword) store.setProxySecret(id, parsed.password);
+  const keepPassword = parsed.password === "***" && previousProxy && previousProxy.hasPassword && parsed.maskUrl === previousProxy.url;
+  if (parsed.hasPassword && !keepPassword) store.setProxySecret(id, parsed.password);
   const inst = store.find(id);
   if (!inst) return;
   inst.proxy = {

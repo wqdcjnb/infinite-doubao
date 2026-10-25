@@ -114,6 +114,42 @@ function activeAccount() {
   return state.accounts.find((a) => a.id === state.activeId) || null;
 }
 
+function proxyConfigKey(proxy) {
+  return JSON.stringify([proxy?.mode || "direct", proxy?.url || ""]);
+}
+
+function cachedProxyResult(acc) {
+  const cached = acc && state.proxyCache[acc.id];
+  return cached?.key === proxyConfigKey(acc?.proxy) ? cached.result : null;
+}
+
+function hasProxyIp(site) {
+  return site?.ok === true && typeof site.ip === "string" && !!site.ip.trim();
+}
+
+function proxyLocation(site) {
+  if (String(site?.countryCode || "").toUpperCase() === "CN") return "国内";
+  return [...new Set([site?.country, site?.city || site?.region].filter(Boolean))].join(" ") || "位置未知";
+}
+
+function proxyExitsDiffer(result) {
+  return !!result && (result.differentExits === true || (hasProxyIp(result.domestic) && hasProxyIp(result.international) && result.domestic.ip.trim() !== result.international.ip.trim()));
+}
+
+const PROXY_SPLIT_HINT = "出口不同，可能存在分流；不代表豆包实际出口";
+
+function proxySummary(result) {
+  if (!result) return [];
+  const domestic = hasProxyIp(result.domestic);
+  const international = hasProxyIp(result.international);
+  if (domestic && international && !proxyExitsDiffer(result)) {
+    const site = result.domestic.countryCode || result.domestic.country ? result.domestic : result.international;
+    return [`${proxyLocation(site)} · ${site.ip.trim()}`];
+  }
+  return [["国内检测站", result.domestic], ["国外检测站", result.international]]
+    .filter(([, site]) => hasProxyIp(site)).map(([label, site]) => `${label}：${proxyLocation(site)} · ${site.ip.trim()}`);
+}
+
 /* -------------------------------------------------------------- 状态栏 */
 
 function renderStatus() {
@@ -121,12 +157,12 @@ function renderStatus() {
   const fp = acc && acc.fingerprint ? acc.fingerprint : null;
   $("#sbEnv").textContent = acc ? `ENV ${String(acc.name).toUpperCase().slice(0, 16)}` : "ENV —";
   $("#sbFp").textContent = fp ? `FP ${fp.chromeLabel} · ${fp.timezone} · ${fp.screen.width}×${fp.screen.height}` : "FP —";
-  const geo = acc ? state.proxyCache[acc.id] : null;
-  const drift = geo && geo.ok && geo.timezone && fp && fp.timezone !== geo.timezone;
+  const geo = cachedProxyResult(acc);
+  const summary = proxySummary(geo);
   $("#sbIp").textContent = geo
-    ? (geo.ok ? `IP ${geo.ip} · ${geo.country || ""} ${geo.city || ""}${drift ? " ⚠ TZ" : ""}`.trim() : "IP 检测失败")
+    ? (summary.length ? `IP ${summary.join(" ｜ ")}${proxyExitsDiffer(geo) ? " ｜ 出口不同" : ""}` : "IP 检测失败")
     : (acc ? "IP 未检测" : "IP —");
-  $("#sbIp").title = drift ? `出口时区 ${geo.timezone} 与指纹 ${fp.timezone} 不一致` : "";
+  $("#sbIp").title = proxyExitsDiffer(geo) ? PROXY_SPLIT_HINT : summary.join("\n");
 }
 
 function tickClock() {
@@ -175,10 +211,19 @@ function renderList() {
     const meta = el("div", "acc-meta");
     const proxyText = acc.proxy && acc.proxy.mode === "custom"
       ? `代理 ${(acc.proxy.url || "").replace(/\/\/.*@/, "//***@")}`
-      : (acc.proxy && acc.proxy.mode === "system" ? "系统代理" : "直连");
+      : (acc.proxy && acc.proxy.mode === "system" ? "系统代理" : "直连（不使用应用代理）");
     meta.appendChild(el("span", null, proxyText));
-    const geo = state.proxyCache[acc.id];
-    if (geo && geo.ok) meta.appendChild(el("span", null, geo.ip));
+    const geo = cachedProxyResult(acc);
+    for (const text of proxySummary(geo)) {
+      const address = el("span", null, text);
+      address.title = text;
+      meta.appendChild(address);
+    }
+    if (proxyExitsDiffer(geo)) {
+      const warning = el("span", "proxy-exit-warning", "出口不同");
+      warning.title = PROXY_SPLIT_HINT;
+      meta.appendChild(warning);
+    }
     meta.appendChild(el("span", null, acc.fingerprint ? acc.fingerprint.timezone : ""));
     item.appendChild(meta);
 
@@ -589,6 +634,36 @@ function field(parent, label) {
 
 /* ---- 代理面板 ---- */
 
+const proxyOperations = new Map();
+const proxyVersions = new Map();
+
+function invalidateProxyResult(id) {
+  delete state.proxyCache[id];
+  proxyVersions.set(id, (proxyVersions.get(id) || 0) + 1);
+}
+
+function renderProxyResult(box, result, operation) {
+  box.replaceChildren();
+  if (operation) { box.appendChild(el("div", "hint", operation === "test" ? "检测中…" : "保存中…")); return; }
+  if (!result) { box.appendChild(el("div", "hint", "点「测 IP」检测到两处检测站的出口")); return; }
+  for (const [label, site] of [["国内检测站", result.domestic], ["国外检测站", result.international]]) {
+    const row = el("div", "proxy-probe-site");
+    row.appendChild(el("strong", null, label));
+    const valid = hasProxyIp(site);
+    row.appendChild(el("div", valid ? "proxy-probe-address" : "proxy-probe-error", valid
+      ? `${proxyLocation(site)} · ${site.ip.trim()}` : `检测失败：${site?.message || result.message || "未获取有效 IP"}`));
+    const details = [`来源：${site?.source || "未提供"}`];
+    if (valid && site.isp) details.push(site.isp);
+    if (Number.isFinite(site?.latency)) details.push(`${site.latency}ms`);
+    row.appendChild(el("div", "hint", details.join(" · ")));
+    box.appendChild(row);
+  }
+  const time = new Date(result.checkedAt);
+  box.appendChild(el("div", "hint", `检测时间：${Number.isNaN(time.getTime()) ? "未知" : time.toLocaleString()}`));
+  box.appendChild(el("div", proxyExitsDiffer(result) ? "proxy-exit-warning" : "hint", proxyExitsDiffer(result)
+    ? PROXY_SPLIT_HINT : "检测结果仅代表到各检测站的出口，不代表豆包实际出口。"));
+}
+
 function renderProxyPanel(body) {
   const acc = activeAccount();
   if (!acc) { body.appendChild(el("div", "hint", "先在左侧选一个环境")); return; }
@@ -598,7 +673,7 @@ function renderProxyPanel(body) {
   card.appendChild(el("h4", null, "出口 IP"));
 
   const modeSel = el("select");
-  [["direct", "直连（本机 IP）"], ["system", "跟随系统代理（Clash / v2rayN）"], ["custom", "自定义代理"]].forEach(([v, t]) => {
+  [["direct", "直连（不使用应用代理）"], ["system", "跟随系统代理（Clash / v2rayN）"], ["custom", "自定义代理"]].forEach(([v, t]) => {
     const o = el("option", null, t);
     o.value = v;
     if (proxy.mode === v) o.selected = true;
@@ -621,38 +696,10 @@ function renderProxyPanel(body) {
   btnRow.appendChild(testBtn);
   card.appendChild(btnRow);
 
-  const result = el("div", "hint");
-  result.style.marginTop = "8px";
-  const geo = state.proxyCache[acc.id];
-  result.textContent = geo ? (geo.ok ? `${geo.ip} · ${geo.country} ${geo.region} ${geo.city} · ${geo.isp} · ${geo.latency}ms · ${geo.timezone}` : `失败：${geo.message}`) : "点「测 IP」检测当前出口";
+  const result = el("div", "proxy-probe-result");
+  renderProxyResult(result, cachedProxyResult(acc), proxyOperations.get(acc.id)?.kind);
   card.appendChild(result);
   body.appendChild(card);
-
-  saveBtn.addEventListener("click", async () => {
-    const patch = { proxy: { mode: modeSel.value, url: urlIn.value.trim() } };
-    const updated = await API.updateAccount(acc.id, patch);
-    if (updated) acc.proxy = updated.proxy;
-    toast("代理已保存（该环境下次打开生效）");
-    renderList();
-  });
-
-  testBtn.addEventListener("click", async () => {
-    testBtn.disabled = true;
-    result.textContent = "检测中…";
-    const patch = { proxy: { mode: modeSel.value, url: urlIn.value.trim() } };
-    await API.updateAccount(acc.id, patch);
-    acc.proxy = patch.proxy;
-    const r = await API.testProxy(acc.id);
-    state.proxyCache[acc.id] = r;
-    const mismatch = r.ok && r.timezone && acc.fingerprint && acc.fingerprint.timezone !== r.timezone;
-    result.textContent = r.ok
-      ? `✅ ${r.ip} · ${r.country} ${r.region} ${r.city} · ${r.isp} · ${r.latency}ms · ${r.timezone}`
-        + (mismatch ? ` ｜ ⚠️ 时区不一致：指纹 ${acc.fingerprint.timezone}，出口 ${r.timezone}` : "")
-      : `❌ ${r.message}（${r.latency}ms）`;
-    result.style.color = mismatch ? "#f5b544" : "";
-    testBtn.disabled = false;
-    renderList();
-  });
 
   const batch = el("div", "card");
   batch.appendChild(el("h4", null, "批量导入（一行一个，可带 # 备注）"));
@@ -672,21 +719,79 @@ function renderProxyPanel(body) {
   batch.appendChild(listBox);
   body.appendChild(batch);
 
+  const isCurrentPanel = () => card.isConnected && state.panel === "proxy" && state.activeId === acc.id;
+  function syncButtons() {
+    const operation = proxyOperations.get(acc.id);
+    for (const control of [saveBtn, testBtn, applyBtn, parseBtn, modeSel, urlIn, ta]) control.disabled = !!operation;
+    testBtn.textContent = operation?.kind === "test" ? "检测中…" : "测 IP";
+    saveBtn.textContent = operation?.kind === "save" ? "保存中…" : "保存";
+    applyBtn.textContent = operation?.kind === "apply" ? "套用中…" : "给当前环境用第一条";
+  }
+  const invalidate = () => {
+    invalidateProxyResult(acc.id);
+    renderProxyResult(result, null, proxyOperations.get(acc.id)?.kind);
+    renderList();
+  };
+  modeSel.addEventListener("change", invalidate);
+  urlIn.addEventListener("input", invalidate);
+  syncButtons();
+
+  async function saveProxy(kind) {
+    if (proxyOperations.has(acc.id)) return;
+    invalidateProxyResult(acc.id);
+    const version = proxyVersions.get(acc.id);
+    const operation = { kind };
+    proxyOperations.set(acc.id, operation);
+    syncButtons();
+    renderProxyResult(result, null, kind);
+    renderList();
+    try {
+      let nextProxy = { mode: modeSel.value, url: urlIn.value.trim() };
+      if (kind === "apply") {
+        const list = await API.parseProxyList(ta.value);
+        if (!list.length) throw new Error("没有解析到有效代理");
+        const first = list[0];
+        const url = `${first.protocol}://${first.username ? `${encodeURIComponent(first.username)}:${encodeURIComponent(first.password)}@` : ""}${first.host}:${first.port}`;
+        nextProxy = { mode: "custom", url };
+      }
+      const updated = await API.updateAccount(acc.id, { proxy: nextProxy });
+      if (!updated) throw new Error("账号已不可用，代理未保存");
+      const current = state.accounts.find((item) => item.id === acc.id);
+      if (!current) return;
+      current.proxy = updated.proxy || nextProxy;
+      if (isCurrentPanel() && kind === "apply") { urlIn.value = current.proxy.url || ""; modeSel.value = current.proxy.mode; }
+      const key = proxyConfigKey(current.proxy);
+      if (kind === "test") {
+        const report = await API.testProxy(acc.id);
+        if (state.activeId !== acc.id || proxyVersions.get(acc.id) !== version || proxyConfigKey(current.proxy) !== key) return;
+        state.proxyCache[acc.id] = { key, result: report || { ok: false, message: "未收到检测结果" } };
+      } else if (state.activeId === acc.id) {
+        toast(kind === "apply" ? "已套用第一条代理，点「测 IP」验证" : "代理已保存");
+      }
+    } catch (error) {
+      if (state.activeId === acc.id && proxyVersions.get(acc.id) === version) toast((kind === "test" ? "检测失败：" : "保存失败：") + (error?.message || error), true);
+    } finally {
+      if (proxyOperations.get(acc.id) === operation) proxyOperations.delete(acc.id);
+      renderList();
+      if (isCurrentPanel()) {
+        syncButtons();
+        renderProxyResult(result, cachedProxyResult(state.accounts.find((item) => item.id === acc.id)));
+      } else if (state.panel === "proxy" && state.activeId === acc.id) renderPanel();
+    }
+  }
+  saveBtn.addEventListener("click", () => saveProxy("save"));
+  testBtn.addEventListener("click", () => saveProxy("test"));
+  applyBtn.addEventListener("click", () => saveProxy("apply"));
+
   parseBtn.addEventListener("click", async () => {
-    const list = await API.parseProxyList(ta.value);
-    listBox.textContent = `已解析 ${list.length} 条代理`;
-    toast(`解析到 ${list.length} 条`);
-  });
-  applyBtn.addEventListener("click", async () => {
-    const list = await API.parseProxyList(ta.value);
-    if (!list.length) { toast("没有解析到有效代理", true); return; }
-    const first = list[0];
-    const url = `${first.protocol}://${first.username ? `${encodeURIComponent(first.username)}:${encodeURIComponent(first.password)}@` : ""}${first.host}:${first.port}`;
-    const updated = await API.updateAccount(acc.id, { proxy: { mode: "custom", url } });
-    if (updated) acc.proxy = updated.proxy;
-    urlIn.value = url;
-    modeSel.value = "custom";
-    toast("已套用第一条代理，点「测 IP」验证");
+    if (parseBtn.disabled) return;
+    parseBtn.disabled = true;
+    try {
+      const list = await API.parseProxyList(ta.value);
+      if (isCurrentPanel()) { listBox.textContent = `已解析 ${list.length} 条代理`; toast(`解析到 ${list.length} 条`); }
+    } catch (error) {
+      if (isCurrentPanel()) toast("解析失败：" + (error?.message || error), true);
+    } finally { if (isCurrentPanel()) syncButtons(); }
   });
 }
 

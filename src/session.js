@@ -16,6 +16,7 @@ const log = require("./logger");
 
 const proxyAuthCache = new Map();
 const appliedSessions = new WeakSet();
+const proxyStates = new WeakMap();
 
 function parseProxyUrl(input) {
   const raw = String(input || "").trim();
@@ -23,13 +24,14 @@ function parseProxyUrl(input) {
   const withScheme = /^[a-z0-9]+:\/\//i.test(raw) ? raw : `http://${raw}`;
   try {
     const u = new URL(withScheme);
-    if (!u.hostname || !u.port) return null;
     const protocol = u.protocol.replace(":", "").toLowerCase();
     if (!["http", "https", "socks4", "socks5", "socks"].includes(protocol)) return null;
+    const port = u.port || (protocol === "http" ? "80" : protocol === "https" ? "443" : "");
+    if (!u.hostname || !port) return null;
     return {
       protocol: protocol === "socks" ? "socks5" : protocol,
       host: u.hostname,
-      port: u.port,
+      port,
       username: decodeURIComponent(u.username || ""),
       password: decodeURIComponent(u.password || ""),
       raw: withScheme
@@ -45,7 +47,7 @@ function proxyRulesFor(inst) {
   if (proxy.mode === "system") return { mode: "system" };
   const full = store.proxyUrlOf(inst);
   const p = parseProxyUrl(full);
-  if (!p) return { mode: "direct" };
+  if (!p) throw new Error("代理地址格式不对，请填写有效的代理地址和端口");
   const scheme = p.protocol === "https" ? "https" : p.protocol;
   return { mode: "custom", rules: `${scheme}://${p.host}:${p.port}`, parsed: p };
 }
@@ -93,13 +95,36 @@ async function applySession(inst) {
   }
 
   const pr = proxyRulesFor(inst);
-  try {
-    if (pr.mode === "direct") await ses.setProxy({ mode: "direct" });
-    else if (pr.mode === "system") await ses.setProxy({ mode: "system" });
-    else await ses.setProxy({ proxyRules: pr.rules, proxyBypassRules: "<local>" });
+  const config = pr.mode === "custom"
+    ? { mode: "fixed_servers", proxyRules: pr.rules, proxyBypassRules: "<local>" }
+    : { mode: pr.mode };
+  const authKey = pr.parsed && (pr.parsed.username || pr.parsed.password)
+    ? JSON.stringify([pr.parsed.username, pr.parsed.password]) : "";
+  const key = JSON.stringify([config, authKey]);
+  let state = proxyStates.get(ses);
+  if (!state) {
+    state = { key: null, authKey: "", applied: false, pending: Promise.resolve() };
+    proxyStates.set(ses, state);
+  }
+  // 同一会话串行应用快照；普通 prepare / 检测不得重置正在使用的连接。
+  const pending = state.pending.catch(() => {}).then(async () => {
+    if (state.key === key) return;
+    const changed = state.applied;
+    state.key = null;
+    await ses.setProxy(config);
+    state.applied = true;
+    if (changed && state.authKey !== authKey) await ses.clearAuthCache();
+    if (changed) await ses.closeAllConnections();
     if (pr.parsed) proxyAuthCache.set(`${pr.parsed.host}:${pr.parsed.port}`, pr.parsed);
+    state.key = key;
+    state.authKey = authKey;
+  });
+  state.pending = pending;
+  try {
+    await pending;
   } catch (error) {
     log.warn("set-proxy-failed", { message: String(error && error.message), rules: pr.rules || pr.mode });
+    throw error;
   }
 
   try {
