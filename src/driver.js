@@ -76,7 +76,7 @@ class Driver {
     const result = await this.evaluate(`(() => { const enhancer = window[${JSON.stringify(this.key + "_enh")}]; if (!enhancer || !enhancer.setOptions) throw new Error("页面参数未就绪，请刷新账号页面"); return enhancer.setOptions(${JSON.stringify(options)}); })()`);
     return result;
   }
-  async send() { return this.call("send"); }
+  async send(options) { return options ? this.call("send", options) : this.call("send"); }
   async beginTask(taskId) { return this.call("beginTask", taskId); }
   async confirmGeneration() { return this.call("confirmGeneration"); }
   async readProgress() { return this.call("readProgress"); }

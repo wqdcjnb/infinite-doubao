@@ -30,9 +30,9 @@
     if (!button) throw new Error("未找到" + (work ? "新工作任务" : "新对话") + "入口");
     button.click();
   }
-  async function wait(read, message) {
-    var end = Date.now() + 20000;
-    while (Date.now() < end) { var result = read(); if (result) return result; await new Promise(function (r) { setTimeout(r, 100); }); }
+  async function wait(read, message, deadline) {
+    var end = deadline || Date.now() + 20000;
+    while (Date.now() < end) { var result = await read(); if (result) return result; await new Promise(function (r) { setTimeout(r, 100); }); }
     throw new Error(message);
   }
   function snapshot() {
@@ -40,47 +40,83 @@
     return current.filter(function (r) { return r.dataset.dmDraftId; }).map(function (r) { return { id: r.dataset.dmDraftId, index: current.indexOf(r), title: title(r), titles: titles }; });
   }
   function rowFor(id) { return rows().find(function (r) { return r.dataset.dmDraftId === id; }); }
+  function revealDrafts(clicked) {
+    // The Drafts heading can be collapsed; its expanded list initially shows
+    // only five rows. Never click a conversation or its menu to reveal more.
+    var section = document.querySelector('[data-testid="draft-conversation-section"]');
+    var controls = Array.from(document.querySelectorAll('button, [role="button"]'));
+    if (section) controls = controls.concat(Array.from(section.querySelectorAll('button, [role="button"]')));
+    var button = controls.find(function (el) {
+      var label = text(el);
+      return !clicked.has(el) && enabled(el) && (!el.getClientRects || el.getClientRects().length) &&
+        (/^展开更多草稿$/.test(label) || (!rows().length && /^草稿(?:\s*对话列表设置)?$/.test(label)));
+    });
+    if (button) { clicked.add(button); button.click(); return true; }
+    // Load older rows in the draft area or its sidebar scroll container.
+    for (var node = section, depth = 0; node && depth < 6 && node !== document.body; node = node.parentElement, depth++) {
+      if (node.scrollHeight > node.clientHeight + 2 && node.clientHeight > 0) {
+        var top = node.scrollTop || 0, next = Math.min(node.scrollHeight - node.clientHeight, top + node.clientHeight * 0.8);
+        if (next > top + 1) { node.scrollTo({ top: next, behavior: "instant" }); return true; }
+      }
+    }
+    return false;
+  }
   function result(fn) { return async function () { try { return await fn.apply(null, arguments); } catch (e) { return { ok: false, reason: String(e.message || e) }; } }; }
   api.restoreNativeDrafts = result(async function (bindings) {
     await wait(editor, "豆包输入区尚未加载");
     bindings = bindings || [];
-    var previous = "", stableAt = Date.now();
+    // Truncated labels require checking each full prompt (600ms stable per row).
+    // Keep the list-load limit at 20s, but allow the existing 60s preparation
+    // budget for large candidate sets instead of cutting off after 33 rows.
+    var previous = "", stableAt = Date.now(), revealAt = 0, revealing = false, clicked = new Set(), deadline = Date.now() + 60000;
     if (bindings.length) await wait(function () {
       var current = rows(), signature = JSON.stringify(current.map(title));
       if (signature !== previous) { previous = signature; stableAt = Date.now(); }
-      return bindings.every(function (b) { return candidatesFor(b).length; }) && Date.now() - stableAt >= 600;
-    }, "未找到所选豆包草稿，可能尚未同步或已被移除，请在账号页面核对后重试");
+      var found = bindings.every(function (b) { return candidatesFor(b).length; });
+      var shortened = bindings.some(function (b) { return b.draftNumber && !candidatesFor(b).some(function (r) { return numberIn(title(r)) === b.draftNumber; }); });
+      if ((!found || shortened) && Date.now() - revealAt >= 600) { revealAt = Date.now(); revealing = revealDrafts(clicked); }
+      return found && (!shortened || !revealing) && Date.now() - stableAt >= 600;
+    }, "未找到所选豆包草稿，可能尚未同步或已被移除，请在账号页面核对后重试", Date.now() + 20000);
     var used = new Set(), mapped = [];
     for (var binding of bindings) {
-      var candidates = candidatesFor(binding);
-      if (binding.draftNumber && candidates.filter(function (r) { return numberIn(title(r)) === binding.draftNumber; }).length > 1) throw new Error("发现重复草稿编号 " + binding.draftNumber + "，未触发发送，请核对网页草稿");
-      var row = rowFor(binding.id);
-      if (row && (!candidates.includes(row) || (binding.draftNumber && candidates.length > 1))) row = null;
-      if (!row) {
-        if (candidates.length === 1) row = candidates[0];
-        else {
+      var row = await wait(async function () {
+        var candidates = candidatesFor(binding);
+        if (!candidates.length) { revealDrafts(clicked); return null; }
+        var exact = candidates.filter(function (r) { return numberIn(title(r)) === binding.draftNumber; });
+        if (binding.draftNumber && exact.length > 1) throw new Error("发现重复草稿编号 " + binding.draftNumber + "，未触发发送，请核对网页草稿");
+        if (binding.draftNumber && !exact.length && revealDrafts(clicked)) return null;
+        var matched = rowFor(binding.id);
+        if (matched && (!candidates.includes(matched) || (binding.draftNumber && candidates.length > 1))) matched = null;
+        if (matched) return matched;
+        if (candidates.length === 1 && (!binding.draftNumber || exact.length)) return candidates[0];
+        {
           // Sidebar order is not an identity: other tabs can add or reorder drafts.
           // Equal sidebar titles must be resolved by the complete saved prompt.
           if (!normalize(binding.prompt)) throw new Error("多条草稿标题相同，缺少完整提示词，无法确认原草稿");
           var matches = [], numberMatches = 0;
           for (var candidate of candidates) {
-            if (!candidate.isConnected) throw new Error("核对期间豆包草稿列表变化，请重试");
+            if (!candidate.isConnected) return null;
             candidate.click();
             var lastContent = "", contentAt = Date.now();
             await wait(function () {
               var content = text(editor()) + "\n" + mode();
               if (content !== lastContent) { lastContent = content; contentAt = Date.now(); }
-              return candidate.isConnected && candidate.classList.contains("bg-dbx-bg-float") && text(editor()) && Date.now() - contentAt >= 600;
-            }, "草稿内容尚未加载，未触发发送，请重试");
+              return !candidate.isConnected || (candidate.classList.contains("bg-dbx-bg-float") && text(editor()) && Date.now() - contentAt >= 600);
+            }, "草稿内容尚未加载，未触发发送，请重试", deadline);
+            if (!candidate.isConnected) return null;
             if (binding.draftNumber && numberIn(text(editor())) === binding.draftNumber) numberMatches++;
             if (text(editor()) === normalize(binding.prompt) && (binding.executionMode !== "work" || mode() === "云电脑")) matches.push(candidate);
           }
           if (numberMatches > 1) throw new Error("发现重复草稿编号 " + binding.draftNumber + "，未触发发送，请核对网页草稿");
           if (matches.length > 1) throw new Error("多条豆包草稿的完整提示词相同，无法区分附件归属；请在账号页面核对并区分这些草稿后重试");
-          row = matches[0];
+          if (matches[0]) return matches[0];
         }
-      }
-      if (!row || used.has(row)) throw new Error("未找到与所选任务完整内容对应的豆包草稿，未触发发送，请在账号页面核对");
+        // Lazy rows may have arrived while we inspected the earlier candidates.
+        // Re-enumerate on the next poll until the shared deadline, never guess.
+        revealDrafts(clicked);
+        return null;
+      }, "未找到与所选任务完整内容对应的豆包草稿，未触发发送，请在账号页面核对", deadline);
+      if (used.has(row)) throw new Error("所选草稿映射到同一条网页草稿，未触发发送，请核对");
       used.add(row);
       mapped.push({ row: row, id: binding.id });
     }

@@ -114,45 +114,49 @@ async function beginTracking(driver, task, inst, resume) {
     patchTask(task.id, { baselineUrls, baselineMediaKeys, baselineMessageIds: tracking.baselineMessageIds || [], confirmationIntents: {} }, true);
   }
 }
-async function confirmGeneration(driver, task, options, sb) {
+async function confirmGeneration(driver, task, options, sb, context = {}) {
   // Older drivers/test adapters only provide the button helper.
   if (!driver.call) { if (options.autoConfirm !== false && driver.confirmGeneration) await driver.confirmGeneration(); return null; }
   const expected = { model: task.model, duration: task.duration, ratio: task.ratio };
+  const check = context.check || (() => checkStopped(sb));
+  const persist = context.persist || (values => patchTask(task.id, values, true));
   const candidate = await driver.call("peekGenerationConfirmation", expected);
+  check();
   if (!candidate?.kind) return null;
-  if (!candidate.ok) return { waiting: true, reason: candidate.reason || "请手动检查生成参数" };
-  if (options.autoConfirm === false) return { waiting: true, reason: "等待确认生成参数（自动确认已关闭）" };
+  if (!candidate.ok) return { waiting: true, blocked: true, reason: candidate.reason || "请手动检查生成参数" };
+  if (options.autoConfirm === false) return { waiting: true, blocked: true, reason: "等待确认生成参数（自动确认已关闭）" };
   const intents = task.confirmationIntents || {};
   if (intents[candidate.key] || (candidate.kind === "text" && Object.values(intents).some((intent) => intent.kind === "text"))) {
-    return { waiting: true, reason: "确认已发送或正在等待平台响应，不会重复确认" };
+    return { waiting: true, recorded: true, reason: "确认已发送或正在等待平台响应，不会重复确认" };
   }
-  checkStopped(sb);
+  check();
   const intent = { kind: candidate.kind, state: "pending", at: new Date().toISOString() };
-  patchTask(task.id, { confirmationIntents: { ...intents, [candidate.key]: intent } }, true);
+  persist({ confirmationIntents: { ...intents, [candidate.key]: intent } });
   let actionAttempted = false;
   try {
     if (candidate.kind === "text") {
-      const filled = await driver.setText("确认，开始生成视频。");
+      const filled = await driver.setText(candidate.text || "确认，开始生成视频。");
       if (!filled?.ok) throw new Error("填写视频参数确认失败");
       const latest = await driver.call("peekGenerationConfirmation", expected);
       if (!latest?.ok || latest.key !== candidate.key) throw new Error("视频参数确认内容发生变化，已暂停确认");
-      checkStopped(sb);
+      check();
       actionAttempted = true;
-      const sent = await driver.send();
+      const sent = await driver.send(candidate.text === "按要求生成" ? { nativeOnly: true } : undefined);
       if (!sent?.ok) { actionAttempted = false; throw new Error(`发送视频参数确认失败：${sent?.reason || "未找到发送按钮"}`); }
     } else {
-      checkStopped(sb);
+      check();
       actionAttempted = true;
       const confirmed = await driver.call("confirmGeneration", { ...expected, key: candidate.key });
       if (!confirmed?.ok) { actionAttempted = false; throw new Error(confirmed?.reason || "确认按钮已变化"); }
     }
-    patchTask(task.id, { confirmationIntents: { ...task.confirmationIntents, [candidate.key]: { ...intent, state: "sent" } } }, true);
+    check();
+    persist({ confirmationIntents: { ...task.confirmationIntents, [candidate.key]: { ...intent, state: "sent" } } });
     emitLog(task, candidate.kind === "text" ? "已回复确认生成视频参数" : "已确认生成视频参数");
-    return { waiting: true, reason: "确认已发送，等待平台开始生成" };
+    return { waiting: true, sent: true, reason: "确认已发送，等待平台开始生成" };
   } catch (error) {
     if (!actionAttempted) {
       const remaining = { ...task.confirmationIntents }; delete remaining[candidate.key];
-      patchTask(task.id, { confirmationIntents: remaining }, true);
+      persist({ confirmationIntents: remaining });
     }
     throw error;
   }
@@ -621,12 +625,16 @@ async function submitDrafts(ids, options = {}) {
         check();
         const child = { controller: new AbortController() };
         children.add(child);
-        let driver, issued = false, trackingReceipt = false;
+        let driver, record, issued = false, received = false, trackingReceipt = false;
         const checkDraft = () => { check(); child.controller.signal.throwIfAborted(); };
         const cleanup = () => { children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); };
         const recordFailure = error => {
-          const message = `${issued ? "已发起发送，接收结果未确认" : "尚未发送"}：${error.message}`;
+          const message = `${received ? "草稿已接收，生成确认未完成" : issued ? "已发起发送，接收结果未确认" : "尚未发送"}：${error.message}`;
           errors.push(message);
+          if (received) {
+            record.task.waitReason = message;
+            record.task.log.push({ at: new Date().toISOString(), level: "warn", message });
+          }
           drafts.updateMany({ [draft.id]: { nativeError: message } });
           log.warn("draft-dispatch-failed", { draftBatchId, draftId: draft.id, instanceId: inst.id, issued, message });
           progress("本条异常已记录，继续投递其他草稿");
@@ -652,7 +660,8 @@ async function submitDrafts(ids, options = {}) {
             checkDraft();
             return { pageOptions, opened, record };
           });
-          const { pageOptions, opened, record } = prepared;
+          const { pageOptions, opened } = prepared;
+          record = prepared.record;
           record.task.submittedAt = new Date().toISOString();
           drafts.updateMany({ [draft.id]: { nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
           // The durable intent precedes the click. Do not await this promise here.
@@ -667,16 +676,42 @@ async function submitDrafts(ids, options = {}) {
             const receipt = requirePage(await driver.call("waitNativeDraftAccepted", { ...pageOptions, conversationIds: opened.conversationIds }));
             checkDraft();
             Object.assign(record.task, { conversationUrl: receipt.conversationUrl, conversationLocked: true, submissionUncertain: false });
-            drafts.updateMany({ [draft.id]: { nativeState: "sent", nativeBinding: null, nativeError: "", submissionRecord: record } });
+            drafts.updateMany({ [draft.id]: { nativeState: "sent", nativeBinding: null, nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
+            received = true;
             accepted.push({ id: draft.id, record });
             progress("后台已确认接收");
-          }, 30000).catch(recordFailure).finally(cleanup));
+          }, 30000).then(() => draftStep(child, "等待生成确认提醒", async () => {
+            const settings = store.get().settings.orchestrator;
+            const persist = values => {
+              const snapshot = JSON.parse(JSON.stringify({ ...record, task: { ...record.task, ...values } }));
+              drafts.updateMany({ [draft.id]: { submissionRecord: snapshot } });
+              Object.assign(record.task, values);
+            };
+            for (;;) {
+              checkDraft();
+              const confirmation = await confirmGeneration(driver, record.task, settings, null, { check: checkDraft, persist });
+              checkDraft();
+              if (confirmation?.blocked) throw new Error(confirmation.reason);
+              if (confirmation?.sent || confirmation?.recorded) { progress("本条已回复确认，继续跟踪其他草稿"); return; }
+              const state = await driver.call("readProgress");
+              checkDraft();
+              if (state?.generationStarted || state?.mediaUrls?.length) return;
+              if (state?.state === "failed") throw new Error(state.snippet || "平台处理失败");
+              // A generic '处理中' may still be planning; keep this page alive
+              // until its own reminder arrives, without blocking other drafts.
+              await new Promise(resolve => {
+                const done = () => { clearTimeout(timer); child.controller.signal.removeEventListener("abort", done); resolve(); };
+                const timer = setTimeout(done, Math.max(1500, Number(settings.pollInterval) || 4000));
+                child.controller.signal.addEventListener("abort", done, { once: true });
+              });
+            }
+          }, Number(store.get().settings.orchestrator.taskTimeoutMs) || 12 * 60 * 1000)).catch(recordFailure).finally(cleanup));
         } catch (error) { recordFailure(error); }
         finally { if (!trackingReceipt) cleanup(); }
       }
     } catch (error) { failure = error; }
     finally {
-      progress("投递阶段结束，后台核对剩余回执");
+      progress("投递阶段结束，各对话独立等待回执与生成确认");
       const outcomes = await Promise.allSettled(receipts);
       failure ||= outcomes.find(o => o.status === "rejected")?.reason;
       operation.controller.signal.removeEventListener("abort", abortChildren);

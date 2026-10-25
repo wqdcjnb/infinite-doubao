@@ -13,22 +13,24 @@ beforeEach(() => {
   calls = []; native = []; hook = () => null;
   liveWorkers = 0; peakWorkers = 0;
   const resolveDriver = async (inst) => {
-    let taskId;
+    let taskId, draftId, text;
     const bindings = () => native.map((id, i) => ({ id, index: i, title: id, titles: native.slice() }));
     return {
       isLoggedIn: async () => ({ loggedIn: true }),
       waitForLogin: async () => (await hook("waitForLogin")) || { loggedIn: true },
       call: async (method, options) => {
+        if (method === "openNativeDraft") draftId = options.id;
         calls.push({ method, options, instanceId: inst.id });
-        const override = await hook(method, options); if (override) return override;
+        const override = await hook(method, options, { draftId, taskId }); if (override) return override;
         if (method === "saveNativeDraft") { native.push(options.id); return { ok: true, bindings: bindings() }; }
         if (method === "waitNativeDraftAccepted") { native = native.filter((id) => id !== options.id); return { ok: true, conversationUrl: `https://www.doubao.com/chat/${options.id}`, bindings: bindings() }; }
+        if (method === "readProgress") return { state: "running", generationStarted: true };
         return { ok: true, conversationIds: [] };
       },
       close: () => { calls.push({ method: "close", instanceId: inst.id }); },
-      setGenerationOptions: async () => ({}), setText: async () => ({ ok: true }),
+      setGenerationOptions: async () => ({}), setText: async value => { text = value; return { ok: true }; },
       beginTask: async (input) => { taskId = input.taskId; return { ok: true, baselineUrls: [] }; },
-      send: async () => { calls.push({ method: "normalSend", instanceId: inst.id }); return { ok: true }; },
+      send: async () => { calls.push({ method: "normalSend", instanceId: inst.id, draftId, text }); return await hook("send", { text }, { draftId, taskId }) || { ok: true }; },
       readProgress: async () => { calls.push({ method: "result" }); return { state: "done", mediaUrls: [`https://fixture.invalid/${index}/${taskId}.mp4`] }; }
     };
   };
@@ -50,6 +52,66 @@ async function waitFor(check) {
   throw new Error("Native draft fixture timed out");
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
+
+test("同账号的确认提醒乱序到达，独立回复按要求生成且先落盘，不等第一条完成", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  let firstReady = false;
+  const confirmed = [];
+  hook = (method, options, context) => {
+    if (method === "peekGenerationConfirmation") return context.draftId === ids[1] || firstReady
+      ? { ok: true, kind: "text", key: context.draftId, text: "按要求生成" } : { ok: false };
+    if (method === "readProgress") return { state: "running", generationStarted: false };
+    if (method === "send") {
+      const saved = JSON.parse(fs.readFileSync(path.join(P.home(), "store.json"), "utf8"));
+      const record = saved.taskDrafts.find(d => d.id === context.draftId).submissionRecord;
+      assert.equal(record.task.confirmationIntents[context.draftId].state, "pending");
+      assert.equal(options.text, "按要求生成"); confirmed.push(context.draftId);
+    }
+  };
+  const submission = queue.submitDrafts(ids);
+  // Attach a handler now so a failed assertion cannot leave a rejected promise unobserved.
+  submission.catch(() => {});
+  await waitFor(() => confirmed.includes(ids[1]) || store.get().tasks.length);
+  assert.deepEqual(confirmed, [ids[1]]);
+  assert.equal(sends().length, 2); assert.equal(liveWorkers, 1);
+  firstReady = true;
+  assert.equal((await submission).count, 2);
+  assert.deepEqual(confirmed, [ids[1], ids[0]]);
+  assert.ok(store.get().tasks.every(t => Object.values(t.confirmationIntents)[0].state === "sent"));
+  assert.equal(liveWorkers, 0);
+});
+
+test("确认发送回执丢失时保留 pending，恢复取回不重复草稿或确认", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  hook = (method, options, context) => {
+    if (method === "peekGenerationConfirmation") return { ok: true, kind: "text", key: context.draftId || "resumed", text: "按要求生成" };
+    if (method === "send") throw new Error("确认发送后的 IPC 丢失");
+  };
+  await assert.rejects(queue.submitDrafts(ids), /已接收.*确认/);
+  assert.equal(sends().length, 2);
+  assert.equal(calls.filter(c => c.method === "normalSend").length, 2);
+  assert.ok(store.get().tasks.every(t => Object.values(t.confirmationIntents)[0].state === "pending"));
+  store.load(); queue.recoverTemplateTasks(); queue.wakeQueue();
+  await waitFor(() => store.get().tasks.every(t => t.status === "succeeded"));
+  assert.equal(calls.filter(c => c.method === "normalSend").length, 2);
+});
+
+test("等待确认提醒时停止立即关闭独立页面，迟到提醒不再发送", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  let release, peeks = 0;
+  const delayed = new Promise(resolve => { release = resolve; });
+  hook = async method => {
+    if (method === "peekGenerationConfirmation") { peeks++; await delayed; return { ok: true, kind: "text", key: "late", text: "按要求生成" }; }
+    if (method === "readProgress") return { state: "unknown" };
+  };
+  const submission = queue.submitDrafts(ids); submission.catch(() => {});
+  await waitFor(() => peeks === 2 || store.get().tasks.length);
+  assert.equal(peeks, 2);
+  queue.stopAll(); await assert.rejects(submission, /已停止/);
+  assert.equal(liveWorkers, 0); release(); await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(calls.filter(c => c.method === "normalSend").length, 0);
+  assert.equal(store.get().tasks.length, 2);
+});
 
 test("新草稿和旧版本地草稿保存编号，普通提交不带草稿编号", async () => {
   account("first"); const ids = batch();

@@ -18,17 +18,46 @@ beforeEach(() => {
 });
 after(() => { orchestrator.stopAll(); assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)); fs.rmSync(root, { recursive: true, force: true }); });
 function page() {
-  let messages = [];
-  const document = { body: { innerText: "" }, querySelectorAll: (sel) => sel === "[data-message-id]" ? messages : [] };
-  const context = vm.createContext({ window: {}, document, CFG: { autoKey: "auto" }, URL, location: { href: "https://fixture.invalid/chat/1" } });
+  let messages = [], panels = [];
+  const document = { body: { innerText: "" }, querySelectorAll: (sel) => sel === "[data-message-id]" ? messages : sel.includes("#input-engine-container") ? panels : [] };
+  const context = vm.createContext({ window: {}, document, CFG: { autoKey: "auto" }, URL, getComputedStyle: () => ({}), location: { href: "https://fixture.invalid/chat/1" } });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/page/automation.js"), "utf8"), context);
   function message(id, text, role) {
     const owner = { getAttribute: (key) => key === "data-message-role" ? role : null };
-    return { id, innerText: text, getAttribute: (key) => key === "data-message-id" ? id : null, closest: () => owner, querySelectorAll: () => [] };
+    return { id, innerText: text, isConnected: true, getBoundingClientRect: () => ({ width: 500, height: 200 }), getAttribute: (key) => key === "data-message-id" ? id : null, closest: () => owner, querySelectorAll: () => [] };
   }
-  return { api: context.window.auto, message, add(node) { messages.push(node); }, reset() { messages = []; } };
+  return { api: context.window.auto, message, add(node) { messages.push(node); }, panel(node) { panels.push(node); }, reset() { messages = []; } };
 }
 const request = "我将为你生成短视频，请先确认参数：视频生成参数确认 模型：Seedance 2.0 Mini 时长：5秒 比例16:9，确认后我再开始生成视频。";
+const planRequest = "以上方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 5段分镜 / 仅环境音无配乐）是否按此开始生成？视频生成为高消耗生成。";
+const livePlanRequest = "是否按以上完整方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 6段分镜 / 仅环境音无对白）开始生成视频？视频生成为高消耗生成。";
+
+test("方案提醒在当前回复或输入区面板出现后才返回按要求生成，输入文字不改变确认身份", () => {
+  for (const reminder of [planRequest, livePlanRequest]) for (const location of ["assistant", "composer"]) {
+    const p = page(); p.api.beginTask({ taskId: "task" });
+    assert.equal(p.api.peekGenerationConfirmation().kind, undefined);
+    const node = p.message("reminder", reminder, location === "assistant" ? "assistant" : "");
+    if (location === "assistant") p.add(node); else p.panel(node);
+    const options = { model: "seedance_v2.5", duration: 30, ratio: "16:9" };
+    const result = p.api.peekGenerationConfirmation(options);
+    assert.equal(result.ok, true); assert.equal(result.kind, "text"); assert.equal(result.text, "按要求生成");
+    node.innerText += " 按要求生成 暂不生成 自定义描述 按要求生成";
+    assert.equal(p.api.peekGenerationConfirmation(options).key, result.key);
+    assert.equal(p.api.peekGenerationConfirmation({ ...options, duration: 15 }).ok, false);
+    assert.equal(p.api.peekGenerationConfirmation({ ...options, model: "seedance_v2.0" }).ok, false);
+    assert.equal(p.api.peekGenerationConfirmation({ ...options, ratio: "9:16" }).ok, false);
+    node.innerText += " 需要支付";
+    assert.equal(p.api.peekGenerationConfirmation(options).ok, false);
+  }
+});
+
+test("旧面板、历史方案、用户提示词及普通讨论不会触发确认", () => {
+  const p = page(); p.panel(p.message("old-panel", planRequest, ""));
+  p.add(p.message("history", planRequest, "assistant")); p.api.beginTask({ taskId: "task" });
+  assert.equal(p.api.peekGenerationConfirmation().kind, undefined);
+  p.add(p.message("user", planRequest, "user")); assert.equal(p.api.peekGenerationConfirmation().kind, undefined);
+  p.add(p.message("discussion", "请介绍按要求生成这个功能", "assistant")); assert.equal(p.api.peekGenerationConfirmation().kind, undefined);
+});
 test("识别真实wrapper角色的文字确认，检查模型时长并排除用户、历史及付费请求", () => {
   const p = page(); p.add(p.message("old", request, "assistant")); p.api.beginTask({ taskId: "task" });
   assert.equal(p.api.peekGenerationConfirmation().kind, undefined);
