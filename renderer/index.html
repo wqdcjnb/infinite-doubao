@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: file:; media-src 'self' file:; script-src 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: file:; media-src 'self' file:; script-src 'self'" />
   <title>豆包工坊</title>
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="views.css" />
@@ -21,7 +21,7 @@
       <div class="brand">
         <div class="brand-text">
           <strong>豆包工坊</strong>
-          <span class="brand-sub"><i class="pulse"></i>DOUBAO WORKSHOP <em id="verText">v1.4.5</em></span>
+          <span class="brand-sub"><i class="pulse"></i>DOUBAO WORKSHOP <em id="verText">v1.5.0</em></span>
         </div>
       </div>
 
@@ -59,6 +59,7 @@
         <button class="vtab" data-view="logs">日志</button>
         <button class="vtab" data-view="settings">设置</button>
         <span class="viewbar-grow"></span>
+        <button class="ghost tiny" id="btnWeb" title="在浏览器使用当前账号和任务">打开网页版</button>
         <button class="ghost tiny" id="btnUpdate" title="检查并下载最新版本">检查更新</button>
         <span class="vb-badge" id="vbServer" title="本地接口状态">API —</span>
       </nav>
@@ -373,6 +374,8 @@
   </dialog>
 
   <div class="toasts" id="toasts"></div>
+  <link rel="stylesheet" href="web.css" />
+  <script src="web-bridge.js"></script>
   <script src="dialogs.js"></script>
   <script src="app.js"></script>
   <script src="update-ui.js"></script>

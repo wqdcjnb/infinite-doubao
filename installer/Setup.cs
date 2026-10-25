@@ -41,7 +41,7 @@ namespace DolaModSetup
         internal const string AppName = "豆包工坊";
         internal const string AppExeName = "豆包工坊.exe";
         internal const string LegacyName = "无限豆包";
-        internal const string AppVersion = "1.4.5";
+        internal const string AppVersion = "1.5.0";
         internal const string Publisher = "豆包工坊";
         internal const string RegKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\InfiniteDoubao";
         internal const string Magic = "DMINST01";
@@ -176,7 +176,12 @@ namespace DolaModSetup
                 if (status != null) status("正在创建快捷方式…");
                 string exe = Path.Combine(dir, AppExeName);
                 CreateShortcut(StartMenuLnk(), exe, dir);
-                if (o.Desktop) CreateShortcut(DesktopLnk(), exe, dir);
+                CreateShortcut(Path.Combine(Path.GetDirectoryName(StartMenuLnk()), AppName + " 网页版.lnk"), exe, dir, "--web");
+                if (o.Desktop)
+                {
+                    CreateShortcut(DesktopLnk(), exe, dir);
+                    CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), AppName + " 网页版.lnk"), exe, dir, "--web");
+                }
 
                 if (status != null) status("正在登记到「应用和功能」…");
                 WriteRegistry(dir, exe);
@@ -483,7 +488,7 @@ namespace DolaModSetup
             try { File.Delete(Path.Combine(dir, LegacyName + ".exe")); } catch { }
         }
 
-        private static void CreateShortcut(string lnkPath, string target, string workDir)
+        private static void CreateShortcut(string lnkPath, string target, string workDir, string arguments = "")
         {
             try
             {
@@ -497,6 +502,7 @@ namespace DolaModSetup
                 Type lt = lnk.GetType();
                 lt.InvokeMember("TargetPath", BindingFlags.SetProperty, null, lnk, new object[] { target });
                 lt.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, lnk, new object[] { workDir });
+                lt.InvokeMember("Arguments", BindingFlags.SetProperty, null, lnk, new object[] { arguments });
                 lt.InvokeMember("IconLocation", BindingFlags.SetProperty, null, lnk, new object[] { target + ",0" });
                 lt.InvokeMember("Description", BindingFlags.SetProperty, null, lnk, new object[] { AppName + " v" + AppVersion });
                 lt.InvokeMember("Save", BindingFlags.InvokeMethod, null, lnk, null);
@@ -510,6 +516,7 @@ namespace DolaModSetup
         private static void RemoveShortcuts(string dir)
         {
             try { if (File.Exists(DesktopLnk())) File.Delete(DesktopLnk()); } catch { }
+            try { File.Delete(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), AppName + " 网页版.lnk")); } catch { }
             try
             {
                 string sm = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), AppName);

@@ -23,10 +23,13 @@ const chromium = require("./chromium");
 const log = require("./logger");
 
 const PROTOCOL = "2024-11-05";
+let deps = {};
+function init(options) { deps = { ...deps, ...options }; }
 
 /** 找到某个实例对应的内嵌 webview 的 webContents（与 main.js 同一套判定） */
 function findWebContents(inst) {
   if (!inst) return null;
+  if (deps.findWebContents) return deps.findWebContents(inst);
   let target = null;
   try { target = require("electron").session.fromPartition(inst.partition); } catch { return null; }
   for (const wc of require("electron").webContents.getAllWebContents()) {
@@ -101,7 +104,7 @@ async function callTool(name, args = {}) {
       const fpCheck = require("./fp-check");
       const inst = store.find(args.instanceId);
       if (!inst) throw new Error("实例不存在");
-      const actual = await fpCheck.read({ instance: inst });
+      const actual = await fpCheck.read({ instance: inst, webContents: findWebContents(inst) });
       return fpCheck.compare(inst.fingerprint || {}, actual);
     }
     case "open_instance": {
@@ -227,4 +230,4 @@ function setup(server) {
   return server;
 }
 
-module.exports = { setup, tools, callTool, PROTOCOL };
+module.exports = { init, setup, tools, callTool, PROTOCOL };

@@ -424,13 +424,14 @@ async function deleteTemplate() {
 
 async function attachTemplateFiles() {
   const input = q("#templateFileInput");
-  const files = Array.from(input.files || []).map((file) => DM.filePath(file));
+  const selectedFiles = Array.from(input.files || []);
   input.value = "";
-  if (!files.length) return;
+  if (!selectedFiles.length) return;
   q("#templateAddFiles").disabled = true;
   q("#templateSubmit").disabled = true;
   q("#templateAddDraft").disabled = true;
   try {
+    const files = DM.filesFor ? await DM.filesFor(selectedFiles) : selectedFiles.map((file) => DM.filePath(file));
     const template = await saveTemplate();
     await call("dm:template:attach", template.id, files);
     await refreshTemplates();
@@ -837,7 +838,7 @@ async function updateAssets() {
 function videoCard(item) {
   const card = node("article", "video-card");
   const player = document.createElement("video");
-  player.src = item.url;
+  player.src = DM.mediaUrl ? DM.mediaUrl(item.path) : item.url;
   player.controls = true;
   player.preload = "metadata";
   player.setAttribute("aria-label", item.name);

@@ -44,6 +44,7 @@
 .env
 .env.*
 api-token.txt
+web-access.txt
 secrets.json
 *private*.pem
 store.json

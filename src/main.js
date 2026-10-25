@@ -92,6 +92,13 @@ const DEFAULT_URL = store.DEFAULT_URL;
 
 let mainWindow = null;
 let server = null;
+let webServer = null;
+let webStarting = null;
+const webHandlers = new Map();
+const webAccounts = new (require("./web-accounts").WebAccounts)({
+  prepareSession, preload: webviewPreloadPath, wake: (id) => orchestrator.wakeQueue(id), log,
+  publish: (channel, payload) => pushToUi(channel, payload)
+});
 let registeredStopHotkey = "";
 let activeMaskJobs = 0;
 const openingAccounts = new Map();
@@ -132,6 +139,8 @@ function mergeDeep(base, patch) {
 /** 找到某个实例对应的内嵌 webview 的 webContents */
 function findWebContents(inst) {
   if (!inst) return null;
+  const remote = webAccounts.find(inst);
+  if (remote) return remote;
   let target = null;
   try { target = session.fromPartition(inst.partition); } catch { return null; }
   for (const wc of require("electron").webContents.getAllWebContents()) {
@@ -146,6 +155,7 @@ function findWebContents(inst) {
 async function ensureAccountWebContents(inst) {
   const existing = findWebContents(inst);
   if (existing) return existing;
+  if (webServer) return (await webAccounts.open(inst.id)).webContents;
   if (openingAccounts.has(inst.id)) return openingAccounts.get(inst.id);
   const opening = (async () => {
     await prepareSession(inst);
@@ -188,6 +198,7 @@ function applyStopHotkey(value) {
 /* ------------------------------------------------------------------ 窗口 */
 
 function pushToUi(channel, payload) {
+  webServer?.publish(channel, payload);
   try {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
   } catch {}
@@ -336,6 +347,11 @@ async function prepareAllSessions() {
 /* ------------------------------------------------------------------ IPC */
 
 function registerIpc() {
+  const desktopIpc = require("electron").ipcMain;
+  const ipcMain = {
+    on: (...args) => desktopIpc.on(...args),
+    handle: (channel, handler) => { webHandlers.set(channel, handler); desktopIpc.handle(channel, handler); }
+  };
   /* ---------------- 兼容旧界面 ---------------- */
 
   ipcMain.handle("store:load", () => {
@@ -376,6 +392,7 @@ function registerIpc() {
   });
 
   ipcMain.handle("account:remove", async (_e, id) => {
+    webAccounts.close(id);
     const inst = instances.remove(id);
     if (!inst) return { ok: false };
     try { await session.fromPartition(inst.partition).clearStorageData(); } catch {}
@@ -559,6 +576,8 @@ function registerIpc() {
   };
 
   ipcMain.handle("dm:renderer:ready", wrap(async () => { orchestrator.wakeQueue(); return true; }));
+  ipcMain.handle("dm:web:open", wrap(async () => { await openWeb(); return true; }));
+  ipcMain.handle("dm:web:status", wrap(async () => ({ running: !!webServer, url: webServer?.url() || "", port: webServer?.port || 17825 })));
   ipcMain.handle("dm:components:status", wrap(async () => componentManager.status()));
   ipcMain.handle("dm:components:install", wrap(async () => componentManager.install()));
   ipcMain.handle("dm:components:cancel", wrap(async () => componentManager.cancel()));
@@ -593,7 +612,7 @@ function registerIpc() {
     if (inst) { await prepareSession(inst); orchestrator.wakeQueue(inst.id); }
     return inst;
   }));
-  ipcMain.handle("dm:instance:remove", wrap(async (id) => instances.remove(id)));
+  ipcMain.handle("dm:instance:remove", wrap(async (id) => { webAccounts.close(id); return instances.remove(id); }));
   ipcMain.handle("dm:instance:probe", wrap(async (id) => {
     const inst = store.find(id);
     if (!inst) throw new Error("实例不存在");
@@ -607,7 +626,7 @@ function registerIpc() {
   ipcMain.handle("dm:instance:fp-check", wrap(async (id) => {
     const inst = store.find(id);
     if (!inst) throw new Error("实例不存在");
-    const actual = await fpCheck.read({ instance: inst });
+    const actual = await fpCheck.read({ instance: inst, webContents: findWebContents(inst) });
     return fpCheck.compare(inst.fingerprint || {}, actual || {});
   }));
   ipcMain.handle("dm:instance:open-external", wrap(async (id) => {
@@ -777,6 +796,7 @@ async function startServer() {
     notify: (channel, payload) => pushToUi(channel, payload)
   });
   api.setup(next);
+  mcp.init({ findWebContents });
   mcp.setup(next);
   sse.setup(next);
   await next.start();
@@ -785,6 +805,30 @@ async function startServer() {
   store.save();
   log.info("server-started", server.info());
   return server;
+}
+
+async function startWeb() {
+  if (webServer) return webServer;
+  if (webStarting) return webStarting;
+  webStarting = (async () => {
+    const { WebServer } = require("./web-server");
+    const next = new WebServer({ home: P.home(), renderer: path.join(__dirname, "..", "renderer"),
+      port: Number(app.commandLine.getSwitchValue("web-port")) || 17825, accounts: webAccounts,
+      invoke: (channel, args, event) => {
+        const handler = webHandlers.get(channel);
+        if (!handler || channel === "dm:web:open") throw new Error("不允许的网页通道");
+        return handler(event, ...args);
+      } });
+    await next.start(); webServer = next;
+    log.info("web-started", { url: next.url() });
+    return next;
+  })();
+  try { return await webStarting; } finally { webStarting = null; }
+}
+
+async function openWeb() {
+  const service = await startWeb();
+  await require("./web-launcher").openBrowser(service.openUrl(), { app, shell });
 }
 
 async function stopServer(opts = {}) {
@@ -851,8 +895,9 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, argv) => {
     try { showMainWindow(); } catch (error) { reportStartupFailure(error); }
+    if (argv?.includes("--web")) openWeb().catch((error) => dialog.showErrorBox("网页版启动失败", error.message));
   });
 
   app.whenReady().then(async () => {
@@ -873,6 +918,10 @@ if (!gotLock) {
     startupReady = true;
     createWindow();
     await prepareAllSessions();
+    if (app.commandLine.hasSwitch("web") || app.commandLine.hasSwitch("web-server")) {
+      try { if (app.commandLine.hasSwitch("web")) await openWeb(); else await startWeb(); }
+      catch (error) { dialog.showErrorBox("网页版启动失败", error.message); }
+    }
     log.info("app-ready", { instances: store.get().instances.length, home: P.home(), version: brand.version });
 
     const s = store.get().settings.server || {};
@@ -889,6 +938,8 @@ if (!gotLock) {
   }).catch(reportStartupFailure);
 
   app.on("will-quit", () => {
+    webAccounts.stop();
+    webServer?.stop().catch(() => {});
     try { globalShortcut.unregisterAll(); } catch {}
     try { interceptor.saveResources(); } catch {}
     stopServer({ persist: false }).catch(() => {});

@@ -143,7 +143,7 @@ function setup(server) {
   server.post("/api/instances/:id/fp-check", async (c) => {
     const inst = store.find(c.params.id);
     if (!inst) return c.fail(404, "实例不存在");
-    const actual = await fpCheck.read({ instance: inst });
+    const actual = await fpCheck.read({ instance: inst, webContents: deps.findWebContents?.(inst) });
     return c.ok(fpCheck.compare(inst.fingerprint || {}, actual));
   });
 

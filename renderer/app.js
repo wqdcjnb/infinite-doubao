@@ -75,6 +75,12 @@ async function boot() {
   });
 
   $("#btnNew").addEventListener("click", createAccount);
+  if (!API.isWeb) $("#btnWeb").addEventListener("click", async () => {
+    try {
+      const result = await API.call("dm:web:open");
+      if (!result?.ok) throw new Error(result?.error || "网页版启动失败");
+    } catch (error) { toast(error.message, true); }
+  });
   $("#accClose").addEventListener("click", closeAddModal);
   $("#accCancel").addEventListener("click", closeAddModal);
   $("#accOk").addEventListener("click", submitAddModal);
@@ -278,7 +284,7 @@ function openAccount(acc, opts = {}) {
   }
   $("#welcome").style.display = "none";
   const targetUrl = acc.url || state.settings.defaultUrl || "https://www.doubao.com/chat/";
-  const view = document.createElement("webview");
+  const view = API.createAccountView ? API.createAccountView(acc) : document.createElement("webview");
   view.setAttribute("partition", acc.partition);
   // preload 必须传磁盘绝对路径：Electron 43 的 webview 对 file:// URL 形式的 preload
   // 会静默不加载（既不报错也不执行），只有绝对路径可靠。
@@ -687,6 +693,7 @@ function renderProxyPanel(body) {
 /* ---- 遮脸面板 ---- */
 
 function maskImageUrl(file) {
+  if (API.mediaUrl) return API.mediaUrl(file);
   const encoded = String(file).replace(/\\/g, "/").split("/")
     .map((part, index) => index === 0 && /^[a-z]:$/i.test(part) ? part : encodeURIComponent(part)).join("/");
   const url = encoded.startsWith("//") ? "file:" + encoded : "file://" + (encoded.startsWith("/") ? encoded : "/" + encoded);

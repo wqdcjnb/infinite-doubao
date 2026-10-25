@@ -48,7 +48,7 @@ test("opening a queued account requests its background tab once and reuses its w
   let found = null;
   const requests = [];
   let prepared = 0;
-  const context = vm.createContext({ openingAccounts: new Map(), Date, mainWindow: { isDestroyed: () => false }, store: { find: () => inst }, findWebContents: () => found, prepareSession: async () => { prepared++; }, pushToUi: (name, payload) => { requests.push({name, payload}); found = wc; }, driverMod: { sleep: async () => {} } });
+  const context = vm.createContext({ webServer: null, openingAccounts: new Map(), Date, mainWindow: { isDestroyed: () => false }, store: { find: () => inst }, findWebContents: () => found, prepareSession: async () => { prepared++; }, pushToUi: (name, payload) => { requests.push({name, payload}); found = wc; }, driverMod: { sleep: async () => {} } });
   vm.runInContext(functionSource("async function ensureAccountWebContents", "function applyStopHotkey"), context);
   const first = context.ensureAccountWebContents(inst);
   const second = context.ensureAccountWebContents(inst);

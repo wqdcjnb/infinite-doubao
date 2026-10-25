@@ -1,6 +1,8 @@
 # 豆包工坊
 
-Windows / macOS 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.4.5**。
+Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.5.0**。
+
+网页版：安装后双击桌面「豆包工坊 网页版」，或在软件顶部点击「打开网页版」。浏览器使用原账号、任务、素材和设置，本机服务地址为 `http://127.0.0.1:17825/`。使用方式、功能对应与验收说明见 [本机网页版](docs/web.md)。
 
 ## 下载与安装
 
@@ -8,9 +10,9 @@ Windows / macOS 桌面应用，使用 Electron、JavaScript 和 Python 构建。
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | `DoubaoWorkshop-1.4.5-Setup.exe` | 双击安装，通过桌面「豆包工坊」启动 |
-| macOS 13+，Apple 芯片 | `DoubaoWorkshop-1.4.5-mac-arm64.dmg` | 打开镜像，将应用拖入 Applications |
-| macOS 13+，Intel | `DoubaoWorkshop-1.4.5-mac-x64.dmg` | 打开镜像，将应用拖入 Applications |
+| Windows x64 | `DoubaoWorkshop-1.5.0-Setup.exe` | 双击安装，通过桌面「豆包工坊」或「豆包工坊 网页版」启动 |
+| macOS 13+，Apple 芯片 | 最新 Release 中已验收的 `mac-arm64.dmg` | 打开镜像，将应用拖入 Applications |
+| macOS 13+，Intel | 最新 Release 中已验收的 `mac-x64.dmg` | 打开镜像，将应用拖入 Applications |
 
 主安装包只包含应用和 Chromium 内核。账号、任务提交、视频下载及预览可直接使用；遮脸、图片合成和剪映草稿导出的运行环境移入可选的“本地素材处理组件”。在设置或遮脸页面点击“下载并安装”后才会下载，提供进度、取消和失败重试。组件安装在用户数据目录，后续升级复用相同组件；旧完整版已内置的组件继续使用。无需用户手动安装 Python 或配置命令行。
 
@@ -21,7 +23,7 @@ Mac 包使用临时签名，**尚未经过 Apple Developer ID 签名和公证**�
 发行附件中的 `SHA256SUMS.txt` 用于校验下载文件。在 PowerShell 中运行：
 
 ```powershell
-Get-FileHash .\DoubaoWorkshop-1.4.5-Setup.exe -Algorithm SHA256
+Get-FileHash .\DoubaoWorkshop-1.5.0-Setup.exe -Algorithm SHA256
 ```
 
 新安装默认使用 `%LOCALAPPDATA%\Programs\豆包工坊`。升级已有版本会沿用原安装位置和用户数据目录，保留账号、会话、任务、素材和设置。
