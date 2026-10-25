@@ -28,10 +28,20 @@ async function sha256(file) {
 async function download(url, digest) {
   const target = path.join(cache, path.basename(new URL(url).pathname));
   if (fs.existsSync(target) && await sha256(target) === digest) return target;
-  console.log(`Downloading ${path.basename(target)}`);
-  const res = await fetch(url, { signal: AbortSignal.timeout(600000) });
-  if (!res.ok || !res.body) throw new Error(`Download failed: ${res.status} ${url}`);
-  await pipeline(res.body, fs.createWriteStream(target + ".part"));
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    console.log(`Downloading ${path.basename(target)} (${attempt}/3)`);
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(600000) });
+      if (!res.ok || !res.body) throw new Error(`Download failed: ${res.status} ${url}`);
+      await pipeline(res.body, fs.createWriteStream(target + ".part"));
+      break;
+    } catch (error) {
+      fs.rmSync(target + ".part", { force: true });
+      if (attempt === 3) throw error;
+      console.warn(`Download interrupted; retrying: ${error.message}`);
+      await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+    }
+  }
   if (await sha256(target + ".part") !== digest) throw new Error(`Checksum mismatch: ${url}`);
   fs.renameSync(target + ".part", target);
   return target;
