@@ -39,7 +39,11 @@ const server = http.createServer((req,res)=>{
     await call('dm:template:attach',items[1].id,[path.join(__dirname,'clip.mp4')]);
     for (let i=0;i<3;i++) await c.eval(`document.querySelectorAll('.template-select-row input')[${i}].click()`);
     await click('#templatesAddDrafts');
-    await wait(()=>c.eval("document.querySelector('#view-drafts').classList.contains('active')&&!document.querySelector('#templateAddDraft').disabled"));
+    await wait(()=>c.eval("document.querySelector('#templateDraftStatus').checkVisibility()&&!document.querySelector('#templateAddDraft').disabled"));
+    assert.equal(await c.eval("document.querySelector('#view-templates').classList.contains('active')"),true,'batch collection stays on the template page');
+    assert.match(await c.eval("document.querySelector('#templateDraftStatus').textContent"),/3 条任务已加入草稿箱/);
+    await click('[data-view="drafts"]');
+    await wait(()=>c.eval("document.querySelectorAll('.draft-row').length===3"));
     assert.equal((await call('dm:drafts')).length,3);
     assert.ok((await call('dm:drafts')).every(d=>d.executionMode==='work'&&!d.instanceId&&!d.nativeState));
     assert.equal(await c.eval("document.querySelector('#draftSave').disabled&&document.querySelector('#draftSubmit').disabled"),true);
@@ -78,5 +82,15 @@ const server = http.createServer((req,res)=>{
     assert.ok(tasks.every(t=>t.conversationLocked&&t.result.files.length&&t.result.files.every(f=>fs.existsSync(f))));
     assert.equal((await c.eval(`DM.call('dm:drafts:submit',${JSON.stringify(ds.slice(0,2).map(d=>d.id))})`)).ok,false);
     console.log('PASS: reload restores ambiguous titles safely, accepted tasks retrieve separate videos without resending; unselected draft retained');
+    await click('[data-view="templates"]');
+    await wait(()=>c.eval("!document.querySelector('#templateEditor').classList.contains('hidden')"));
+    await click('#templateAddDraft');
+    await wait(async()=>(await call('dm:drafts')).length===2);
+    await wait(()=>c.eval("!document.querySelector('#templateAddDraft').disabled"));
+    assert.equal(await c.eval("document.querySelector('#view-templates').classList.contains('active')"),true,'current template collection does not navigate');
+    assert.equal(await c.eval("document.querySelector('#templateDraftStatus').checkVisibility()"),true);
+    assert.match(await c.eval("document.querySelector('#templateDraftStatus').textContent"),/已加入草稿箱/);
+    assert.equal(sent.length,2);
+    console.log('PASS: adding current or multiple templates keeps the editor open and displays a success information bar');
   }finally{c.close();server.closeAllConnections();server.close();}
 })().catch(e=>{console.error(e);server.closeAllConnections();server.close();process.exitCode=1;});

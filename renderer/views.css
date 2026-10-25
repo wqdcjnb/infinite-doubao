@@ -94,6 +94,7 @@
 .template-submit-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
 .template-submit-bar > div { flex: 1; min-width: 160px; font-size: 11px; color: var(--text-dim); }
 .template-submit-bar p { margin: 5px 0 0; color: var(--text-mute); font-size: 10.5px; line-height: 1.6; }
+.template-draft-status { margin: 14px 0 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--cyan); font-size: 12px; line-height: 1.7; }
 .template-empty { text-align: center; padding: 90px 25px; }
 .template-page-head > button { margin-bottom: 16px; }
 .draft-box { width: 100%; max-width: 1060px; box-sizing: border-box; margin: 10px auto; padding: 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }

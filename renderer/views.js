@@ -512,13 +512,15 @@ function renderDrafts() {
 
 async function addTemplateDraft(multiple = false) {
   if (V.draftBusy) return;
+  const status = q("#templateDraftStatus");
+  status.classList.add("hidden");
   V.draftBusy = true; renderDrafts(); renderTemplateList();
   try {
     const template = await saveTemplate();
     const added = await call("dm:drafts:collect", multiple ? [...V.selectedTemplates] : [template.id]);
     V.selectedDrafts = new Set(added.map((d) => d.id));
-    say(`${added.length} 条已加入草稿箱，请选择账号后统一存入豆包草稿`);
-    await setView("drafts");
+    status.textContent = `${multiple ? `${added.length} 条任务` : `「${template.name}」`}已加入草稿箱。可继续编辑和添加，发送时打开顶部「草稿箱」选择账号。`;
+    status.classList.remove("hidden");
   } finally { V.draftBusy = false; await refreshDrafts(); renderTemplateList(); }
 }
 
