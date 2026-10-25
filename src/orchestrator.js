@@ -12,10 +12,11 @@ const interceptor = require("./interceptor");
 const driverMod = require("./driver");
 const accountProbe = require("./account-probe");
 const templates = require("./task-templates");
+const drafts = require("./task-drafts");
 const log = require("./logger");
 
 const events = new EventEmitter();
-const runtime = { running: new Map(), busy: new Set(), blocked: new Map(), paused: false, stopped: new Set(), timer: null, lastError: "" };
+const runtime = { running: new Map(), nativeDrafts: new Map(), busy: new Set(), blocked: new Map(), paused: false, stopped: new Set(), timer: null, lastError: "" };
 let deps = { resolveDriver: null, findWebContents: null };
 function init(d) { deps = { ...deps, ...(d || {}) }; }
 function emit(type, payload) {
@@ -426,6 +427,7 @@ function stopTask(id) {
 }
 function stopAll() {
   runtime.paused = true;
+  for (const operation of runtime.nativeDrafts.values()) operation.stopped = true;
   if (runtime.timer) { clearTimeout(runtime.timer); runtime.timer = null; }
   for (const task of store.get().tasks) if (["queued", "running"].includes(task.status)) stopTask(task.id);
   emit("stopped", {}); return { ok: true, running: runtime.running.size };
@@ -462,7 +464,7 @@ function templateRecords(template, executionMode = "video") {
   Object.assign(shot, { taskId: task.id, status: "queued" });
   return { sb, task };
 }
-function commitTemplates(records, draftIds = []) {
+function commitTemplates(records, draftIds = [], startQueue = true) {
   const data = store.get();
   const previous = { storyboards: data.storyboards, tasks: data.tasks, taskDrafts: data.taskDrafts };
   const previousStoryboardId = data.settings.lastStoryboardId;
@@ -474,28 +476,129 @@ function commitTemplates(records, draftIds = []) {
   // can escape to the page, and repeating the same request cannot send twice.
   if (!store.save()) { Object.assign(data, previous); data.settings.lastStoryboardId = previousStoryboardId; throw new Error("任务保存失败，草稿已保留，请检查磁盘空间或目录权限"); }
   records.forEach(({ task }) => emit("task", { task }));
-  runtime.paused = false;
+  if (startQueue) runtime.paused = false;
   wakeQueue();
   return records.map(({ task }) => ({ taskId: task.id, status: task.status }));
 }
 function submitTemplate(template) {
   return commitTemplates([templateRecords(templates.validateSnapshot(template))])[0];
 }
-function submitDrafts(ids) {
+function selectedDrafts(ids) {
   if (!Array.isArray(ids) || !ids.length) throw new Error("请先勾选要提交的草稿");
-  const selected = [...new Set(ids)];
-  const draftBatchId = `draft-batch-${crypto.randomBytes(12).toString("hex")}`;
-  const records = selected.map((id) => {
-    const draft = store.get().taskDrafts.find((d) => d.id === id);
+  return [...new Set(ids)].map((id) => {
+    const draft = drafts.list().find((d) => d.id === id);
     if (!draft) throw new Error("部分草稿不存在或已提交，请刷新草稿箱");
-    try {
-      if (!["video", "work"].includes(draft.executionMode)) throw new Error("任务模式无效");
-      const record = templateRecords(templates.validateSnapshot(draft.template), draft.executionMode);
-      record.task.draftBatchId = draftBatchId;
-      return record;
-    } catch (error) { throw new Error(`草稿「${draft.template?.name || id}」：${error.message}`); }
+    return draft;
   });
-  return { items: commitTemplates(records, selected), count: records.length };
+}
+function requirePage(result) {
+  if (!result?.ok) throw new Error(result?.reason || "豆包页面未完成操作，请检查账号页面");
+  return result;
+}
+function nativeBindings(instanceId) {
+  return drafts.list().filter((d) => d.instanceId === instanceId && d.nativeState === "saved" && d.nativeBinding).map((d) => d.nativeBinding);
+}
+function bindingPatches(bindings) {
+  return Object.fromEntries((bindings || []).map((binding) => [binding.id, { nativeBinding: binding }]));
+}
+async function withNativeDrafts(selected, options, fn) {
+  const fixed = [...new Set(selected.map((d) => d.instanceId).filter(Boolean))];
+  if (fixed.length > 1) throw new Error("请选择同一个豆包号里的草稿一起发送");
+  const chosen = String(options.instanceId || "");
+  if (chosen && fixed.length && chosen !== fixed[0]) throw new Error(`所选草稿已存入 ${selected.find((d) => d.instanceId)?.instanceName || "原账号"}，请使用该账号发送；若需更换账号，请将模板存入目标账号的草稿`);
+  if (chosen && !store.find(chosen)) throw new Error("指定的豆包账号不存在，请重新选择");
+  const inst = chosen || fixed.length ? store.find(chosen || fixed[0]) :
+    store.find(drafts.list().find((d) => d.nativeState === "saved" && !runtime.busy.has(d.instanceId))?.instanceId) ||
+    pickInstance() || store.get().instances.find((i) => !runtime.busy.has(i.id));
+  if (!inst) throw new Error("请先添加并登录一个豆包号；草稿记录已保留");
+  if (runtime.busy.has(inst.id)) throw new Error(`账号 ${inst.name} 正在执行任务，请空闲后重试`);
+  const operation = { instanceId: inst.id, instanceName: inst.name, stopped: false };
+  runtime.busy.add(inst.id); runtime.nativeDrafts.set(inst.id, operation);
+  const check = () => { if (operation.stopped) throw new Error("已停止批量操作；已发送的任务不会重发"); };
+  try {
+    const driver = deps.resolveDriver ? await deps.resolveDriver(inst) : await driverMod.open(inst, { webContents: deps.findWebContents?.(inst) });
+    const login = await driver.isLoggedIn();
+    if (login?.loggedIn !== true) throw new Error(`请先在账号 ${inst.name} 的豆包页面登录`);
+    check();
+    requirePage(await driver.call("restoreNativeDrafts", nativeBindings(inst.id)));
+    return await fn(driver, inst, check, operation);
+  } finally {
+    runtime.nativeDrafts.delete(inst.id); runtime.busy.delete(inst.id); wakeQueue();
+  }
+}
+async function saveDrafts(ids, options = {}) {
+  const selected = selectedDrafts(ids);
+  for (const d of selected) {
+    if (d.nativeState === "saving" || d.submissionRecord) throw new Error(`草稿「${d.template.name}」上次操作未确认，请先在豆包页面核对，避免重复保存或发送`);
+    if (!d.nativeBinding) templates.validateSnapshot(d.template);
+  }
+  return withNativeDrafts(selected, options, async (driver, inst, check) => {
+    let count = 0;
+    for (const draft of selected) {
+      check();
+      if (draft.nativeState === "saved") { count++; continue; }
+      const record = templateRecords(draft.template, draft.executionMode);
+      try {
+      requirePage(await driver.call("prepareNativeDraft", { executionMode: draft.executionMode, model: record.task.model, duration: record.task.duration }));
+      // Save intent before uploading/filling: an interrupted save must not create duplicates.
+      drafts.updateMany({ [draft.id]: { instanceId: inst.id, instanceName: inst.name, nativeState: "saving", nativePrompt: record.task.prompt, nativeError: "" } });
+      if (record.task.refs.length) requirePage(await driver.pasteFiles(record.task.refs));
+      requirePage(await driver.setText(record.task.prompt));
+      check();
+      const saved = requirePage(await driver.call("saveNativeDraft", { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode }));
+      const patches = bindingPatches(saved.bindings);
+      if (!patches[draft.id]) throw new Error("豆包未返回新草稿的位置，请在左侧草稿核对");
+      patches[draft.id].nativeState = "saved";
+      drafts.updateMany(patches);
+      count++;
+      emit("draft", { message: `已存入豆包草稿 ${count}/${selected.length}`, instanceId: inst.id });
+      } catch (error) {
+        drafts.updateMany({ [draft.id]: { nativeError: error.message } });
+        throw new Error(`已存入 ${count}/${selected.length} 条。${error.message}`);
+      }
+    }
+    return { count, instanceId: inst.id, instanceName: inst.name };
+  });
+}
+async function submitDrafts(ids, options = {}) {
+  const selected = selectedDrafts(ids);
+  for (const d of selected) {
+    if (d.submissionRecord?.task.submissionUncertain) throw new Error(`草稿「${d.template.name}」发送结果尚未确认，请核对豆包最近任务，不会自动重发`);
+    if (!d.submissionRecord && d.nativeState !== "saved") throw new Error("请先将所选草稿存入豆包网页，再一起发送");
+  }
+  return withNativeDrafts(selected, options, async (driver, inst, check, operation) => {
+    const accepted = [], draftBatchId = `draft-batch-${crypto.randomBytes(12).toString("hex")}`;
+    let failure;
+    try {
+      for (const draft of selected) {
+        check();
+        if (draft.submissionRecord) { accepted.push({ id: draft.id, record: draft.submissionRecord }); continue; }
+        const options = { id: draft.id, prompt: draft.nativePrompt, executionMode: draft.executionMode };
+        const opened = requirePage(await driver.call("openNativeDraft", options));
+        const record = templateRecords(draft.template, draft.executionMode), task = record.task;
+        Object.assign(task, { prompt: draft.nativePrompt, draftBatchId, instanceId: inst.id, instanceName: inst.name, preferredInstanceId: inst.id, submittedAt: new Date().toISOString(), submissionUncertain: true });
+        const tracking = requirePage(await driver.beginTask({ taskId: task.id, prompt: task.prompt, resume: false }));
+        Object.assign(task, { baselineUrls: tracking.baselineUrls || [], baselineMessageIds: tracking.baselineMessageIds || [], baselineMediaKeys: [...new Set([...(tracking.baselineUrls || []).map(mediaKey), ...interceptor.list({ instanceId: inst.id, kind: "video", limit: 800 }).map((m) => mediaKey(m.url))])], confirmationIntents: {} });
+        const previousOptions = await driver.setGenerationOptions({ model: task.model, duration: task.duration });
+        try {
+          check();
+          drafts.updateMany({ [draft.id]: { submissionRecord: JSON.parse(JSON.stringify(record)) } });
+          const sent = await driver.call("sendNativeDraft", options);
+          if (!sent?.ok) { drafts.updateMany({ [draft.id]: { submissionRecord: null } }); requirePage(sent); }
+          const receipt = requirePage(await driver.call("waitNativeDraftAccepted", { ...options, conversationIds: opened.conversationIds }));
+          Object.assign(task, { conversationUrl: receipt.conversationUrl, conversationLocked: true, submissionUncertain: false });
+          drafts.updateMany({ ...bindingPatches(receipt.bindings), [draft.id]: { nativeState: "sent", nativeBinding: null, submissionRecord: record } });
+          accepted.push({ id: draft.id, record });
+          emit("draft", { message: `豆包已接收 ${accepted.length}/${selected.length} 条`, instanceId: inst.id });
+        } finally { await driver.setGenerationOptions(previousOptions).catch(() => {}); }
+      }
+    } catch (error) { failure = error; }
+    // Start result retrieval only AFTER all sends (or a partial failure). A slow
+    // generation can never hold up the next draft's send. Receipts survive a crash.
+    const items = accepted.length ? commitTemplates(accepted.map((a) => a.record), accepted.map((a) => a.id), !operation.stopped) : [];
+    if (failure) throw new Error(`已发送 ${accepted.length}/${selected.length} 条。${failure.message}；其余草稿记录已保留`);
+    return { items, count: items.length, instanceId: inst.id, instanceName: inst.name };
+  });
 }
 function recoverTemplateTasks() {
   for (const task of store.get().tasks) {
@@ -515,7 +618,7 @@ function state() {
   const stats = {};
   for (const sb of store.get().storyboards) stats[sb.id] = storyboard.stats(sb);
   return { paused: runtime.paused, queued: store.get().tasks.filter((t) => t.status === "queued").length, failed: store.get().tasks.filter((t) => t.status === "failed").length,
-    running: [...runtime.running.values()].map((c) => ({ taskId: c.task.id, instanceId: c.inst.id, instanceName: c.inst.name, shotId: c.shot.id, shotIndex: c.shot.index, storyboardId: c.sb.id })),
+    running: [...runtime.running.values()].map((c) => ({ taskId: c.task.id, instanceId: c.inst.id, instanceName: c.inst.name, shotId: c.shot.id, shotIndex: c.shot.index, storyboardId: c.sb.id })).concat([...runtime.nativeDrafts.values()].map((c) => ({ ...c, taskId: "native-drafts", storyboardId: "" }))),
     busy: [...runtime.busy], parallel: maxParallel(), stopped: [...runtime.stopped], lastError: runtime.lastError, stats, tasks: taskList({ limit: 50 }) };
 }
-module.exports = { init, submitTemplate, submitDrafts, stopTask, recoverTemplateTasks, wakeQueue, events, state, start, pause, resume, stop, stopAll, pump, dispatchOne, retryTask, redispatch, taskList, getTask, patchTask, pickInstance, buildShotPayload, quota };
+module.exports = { init, submitTemplate, saveDrafts, submitDrafts, stopTask, recoverTemplateTasks, wakeQueue, events, state, start, pause, resume, stop, stopAll, pump, dispatchOne, retryTask, redispatch, taskList, getTask, patchTask, pickInstance, buildShotPayload, quota };
