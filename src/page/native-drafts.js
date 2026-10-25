@@ -229,8 +229,6 @@
     return { ok: true, bindings: snapshot() };
   });
   api.prepareNativeDraft = result(async function (options) {
-    await wait(editor, "豆包输入区尚未加载");
-    await expandDrafts();
     // Re-clicking New work on an unsent work composer does not save it.
     // Leaving for the opposite composer does, including the user's current text.
     if (text(editor())) {
@@ -239,6 +237,7 @@
     }
     var prepared = await api[options.executionMode === "work" ? "prepareWorkTask" : "prepareVideoGeneration"](options);
     if (!prepared.ok) return prepared;
+    await expandDrafts();
     // The mode label can switch before React replaces the composer. Filling
     // that outgoing node loses the prompt when the new work editor mounts.
     var previousEditor = null, stableAt = 0;

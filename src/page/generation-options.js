@@ -102,16 +102,17 @@
     return entry;
   }
   api.prepareWorkTask = async function () {
+    function newWorkEntry() { return nodes('button, [role="button"]').find(function (el) { return /^新工作任务(?:\s|$)/.test(text(el)); }); }
     function cloudMode() {
       return nodes('[data-testid="chat_input_action_mode"]', editorRoot()).find(function (el) { return /^云电脑\s*[>›»]?$/.test(text(el)) && !unavailable(el); });
     }
     try {
-      await waitFor(editor, "页面输入区尚未就绪，请等待网页加载后重试", LOAD_TIMEOUT);
-      if (hasDraft() || hasMessages() || /\/chat\/[^/?#]+/.test(location.pathname) || !cloudMode()) {
+      await waitFor(function () { return editor() || newWorkEntry(); }, "页面输入区尚未就绪，请等待网页加载后重试", LOAD_TIMEOUT);
+      if (!editor() || hasDraft() || hasMessages() || /\/chat\/[^/?#]+/.test(location.pathname) || !cloudMode()) {
         var previousUrl = location.href;
         var inConversation = /\/chat\/[^/?#]+/.test(location.pathname);
         var previousMode = text(nodes('[data-testid="chat_input_action_mode"]', editorRoot())[0]);
-        var entry = nodes('button, [role="button"]').find(function (el) { return /^新工作任务(?:\s|$)/.test(text(el)); });
+        var entry = newWorkEntry();
         if (!entry || unavailable(entry)) throw new Error("未找到可用的新工作任务入口，请在豆包页面检查工作任务权限");
         activate(entry);
         await waitFor(function () {

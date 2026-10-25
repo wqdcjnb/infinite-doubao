@@ -40,6 +40,7 @@ function leave(){if(editor.value.trim()){
   const existing=saved.drafts.find(d=>d.id===current);if(existing)Object.assign(existing,item);else saved.drafts.unshift(item);persist();
 }}
 function fresh(work){
+  if(!editor.isConnected)document.querySelector('form').prepend(editor);
   if(!/\/chat\/./.test(location.pathname)&&editor.value&&mode.textContent===(work?'云电脑':'对话'))return;
   leave();current=null;refs=[];editor.value='';document.querySelector('[type="file"]').value='';mode.textContent=work?'云电脑':'对话';messages.replaceChildren();history.pushState({},'','/chat');render();
   if(work)setTimeout(()=>{const next=editor.cloneNode();next.value='';editor.replaceWith(next);editor=next;},150);
@@ -57,5 +58,7 @@ document.querySelector('form').onsubmit=async e=>{e.preventDefault();send.disabl
  history.pushState({},'','/chat/'+c.id);render();send.disabled=false;show(c);
 };
 render();const previous=saved.conversations.find(c=>location.pathname==='/chat/'+c.id);if(previous)show(previous);
+if(new URLSearchParams(location.search).has('no-composer'))editor.remove();
+window.fixtureReady=true;
 })();
 </script></body></html>

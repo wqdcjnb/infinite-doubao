@@ -1,6 +1,8 @@
 # 豆包工坊
 
-Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、JavaScript 和 Python 构建。当前源码版本为 **1.5.9**，公开安装包版本以 Releases 为准。
+Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、JavaScript 和 Python 构建。当前源码版本为 **1.5.10**，公开安装包版本以 Releases 为准。
+
+1.5.10 修复新草稿保存时等待旧会话输入框的问题：直接进入新工作任务，再等待云电脑输入区。保存期间分别显示连接、准备、上传、填写和确认进度；单步超时及时退出，失败原因保留在草稿页。已保存的草稿继续按原编号核对，保存结果不确定时不会自动重复写入。包含 GitHub 同事合入的服务器执行器、工作室窗口和启动参数修复。
 
 1.5.9 提前加载后续草稿页面，就绪一条即投递一条；页面加载、回执或生成确认较慢都不会挡住其他就绪草稿。按账号线路显示单一 IP，并保留工作任务确认面板的识别和文字发送修复：在已核对的新对话中继续检查提醒，避免再次加载每个页面，参数一致后回复“按要求生成”；接收回执按完整草稿编号核对，等待侧栏延迟时不会重复发送。进度分别显示发起发送、豆包已接收和已回复生成确认的数量。
 
@@ -12,7 +14,7 @@ Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、J
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | `DoubaoWorkshop-1.5.9-Setup.exe` | 双击安装，通过桌面「豆包工坊」或「豆包工坊 网页版」启动 |
+| Windows x64 | `DoubaoWorkshop-1.5.10-Setup.exe` | 双击安装，通过桌面「豆包工坊」或「豆包工坊 网页版」启动 |
 | macOS 13+，Apple 芯片 | 最新 Release 中已验收的 `mac-arm64.dmg` | 打开镜像，将应用拖入 Applications |
 | macOS 13+，Intel | 最新 Release 中已验收的 `mac-x64.dmg` | 打开镜像，将应用拖入 Applications |
 
@@ -25,7 +27,7 @@ Mac 包使用临时签名，**尚未经过 Apple Developer ID 签名和公证**�
 发行附件中的 `SHA256SUMS.txt` 用于校验下载文件。在 PowerShell 中运行：
 
 ```powershell
-Get-FileHash .\DoubaoWorkshop-1.5.9-Setup.exe -Algorithm SHA256
+Get-FileHash .\DoubaoWorkshop-1.5.10-Setup.exe -Algorithm SHA256
 ```
 
 新安装默认使用 `%LOCALAPPDATA%\Programs\豆包工坊`。升级已有版本会沿用原安装位置和用户数据目录，保留账号、会话、任务、素材和设置。

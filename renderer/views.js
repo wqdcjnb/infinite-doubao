@@ -600,6 +600,9 @@ async function saveSelectedDrafts(recreateDeleted = false) {
   try {
     const result = await call("dm:drafts:save", ids, { instanceId, recreateDeleted });
     draftSuccess(`保存成功：${result.count} 条任务已存入 ${result.instanceName} 的豆包草稿`);
+  } catch (error) {
+    V.draftError = error.message;
+    throw error;
   } finally { V.draftBusy = false; await refreshDrafts(); renderTemplateList(); }
 }
 

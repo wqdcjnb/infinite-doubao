@@ -56,6 +56,49 @@ async function waitFor(check) {
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
 
+test("新草稿直接准备云电脑，不等待旧会话输入框或恢复空绑定", async () => {
+  account("first"); const ids = batch(), progress = [];
+  const onProgress = event => progress.push(event.message);
+  queue.events.on("draft", onProgress);
+  hook = method => { assert.notEqual(method, "restoreNativeDrafts"); };
+  try { assert.equal((await queue.saveDrafts(ids)).count, 2); }
+  finally { queue.events.off("draft", onProgress); }
+  assert.ok(progress.some(s => s.includes("已连接")));
+  for (const phase of ["准备云电脑", "填写草稿提示词", "确认豆包草稿保存"])
+    assert.ok(progress.some(s => s.includes(phase) && s.includes("1/2")), phase);
+});
+
+test("准备草稿页面不响应时 60 秒退出并释放账号，迟到结果不能填写提示词", async t => {
+  account("first"); const ids = batch();
+  let release, entered;
+  const started = new Promise(r => { entered = r; });
+  hook = method => method === "prepareNativeDraft" ? new Promise(r => { release = r; entered(); }) : null;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const saving = queue.saveDrafts(ids);
+  const failed = assert.rejects(saving, /准备云电脑草稿 1\/2超时/);
+  await started; t.mock.timers.tick(60001); await failed;
+  assert.equal(queue.state().running.length, 0);
+  assert.ok(drafts.list().every(d => !d.nativeState && !d.instanceId));
+  release({ ok: true }); await new Promise(r => setImmediate(r));
+  assert.equal(calls.some(c => c.method === "saveNativeDraft"), false);
+  assert.ok(drafts.list().every(d => !d.nativeState));
+  t.mock.timers.reset();
+});
+
+test("保存回执卡住时停止立即退出，保留待核对记录并禁止重复保存", async () => {
+  account("first"); const ids = batch();
+  let release;
+  hook = method => method === "saveNativeDraft" ? new Promise(r => { release = r; }) : null;
+  const saving = queue.saveDrafts(ids); saving.catch(() => {});
+  await waitFor(() => !!release);
+  queue.stopAll(); await assert.rejects(saving, /已停止/);
+  assert.equal(queue.state().running.length, 0);
+  assert.equal(drafts.list()[0].nativeState, "saving");
+  await assert.rejects(queue.saveDrafts(ids), /上次操作未确认/);
+  release({ ok: true, bindings: [] }); await new Promise(r => setImmediate(r));
+  assert.equal(calls.filter(c => c.method === "saveNativeDraft").length, 1);
+});
+
 test("接收后在已核对的新对话重置基线，直接检测生成确认而不重复加载", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   hook = (method, options, context) => {

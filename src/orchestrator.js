@@ -556,6 +556,7 @@ async function withNativeDrafts(selected, options, fn) {
   try {
     emit("draft", { message: `正在连接 ${inst.name}，准备处理 ${selected.length} 条草稿…`, instanceId: inst.id });
     const driver = await draftStep(operation, "账号页面加载", () => deps.resolveDriver ? deps.resolveDriver(inst) : driverMod.open(inst, { webContents: deps.findWebContents?.(inst) }));
+    emit("draft", { message: `已连接 ${inst.name}，正在检查登录状态…`, instanceId: inst.id });
     const login = await draftStep(operation, "账号登录检查", () => driver.isLoggedIn());
     if (login?.loggedIn !== true) throw new Error(`请先在账号 ${inst.name} 的豆包页面登录`);
     check();
@@ -579,6 +580,13 @@ async function saveDrafts(ids, options = {}) {
     converted.forEach((d) => { d.executionMode = "work"; });
   }
   return withNativeDrafts(selected, options, async (driver, inst, check, operation, checkAction) => {
+    const step = async (label, run) => {
+      emit("draft", { message: label + "…", instanceId: inst.id });
+      log.info("draft-save-step", { instanceId: inst.id, stage: label });
+      const result = await draftStep(operation, label, run);
+      checkAction();
+      return requirePage(result);
+    };
     // Only an explicit acknowledgement of webpage deletion can discard a saved
     // binding. A failed lookup alone may just mean the page has not loaded yet.
     if (options.recreateDeleted === true) {
@@ -589,8 +597,13 @@ async function saveDrafts(ids, options = {}) {
       }
     }
     const selectedIds = new Set(selected.map((d) => d.id));
-    const restored = requirePage(await draftStep(operation, "草稿列表核对", () => driver.call("restoreNativeDrafts", nativeBindings(inst.id).filter((b) => selectedIds.has(b.id)))));
-    if (restored.bindings?.length) drafts.updateMany(bindingPatches(restored.bindings));
+    const bindings = nativeBindings(inst.id).filter((b) => selectedIds.has(b.id));
+    // New local drafts have no website bindings to restore. An old conversation
+    // may not expose a composer until New work task is clicked.
+    if (bindings.length) {
+      const restored = await step("正在核对已保存的豆包草稿", () => driver.call("restoreNativeDrafts", bindings));
+      if (restored.bindings?.length) drafts.updateMany(bindingPatches(restored.bindings));
+    }
     let count = 0;
     for (const draft of selected) {
       check();
@@ -600,15 +613,16 @@ async function saveDrafts(ids, options = {}) {
       record.task.prompt = `【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`;
       try {
       checkAction();
-      requirePage(await driver.call("prepareNativeDraft", { executionMode: draft.executionMode, model: record.task.model, duration: record.task.duration, ratio: record.task.ratio }));
+      const position = `${count + 1}/${selected.length}`;
+      await step(`正在准备云电脑草稿 ${position}`, () => driver.call("prepareNativeDraft", { executionMode: draft.executionMode, model: record.task.model, duration: record.task.duration, ratio: record.task.ratio }));
       checkAction();
       // Save intent before uploading/filling: an interrupted save must not create duplicates.
       drafts.updateMany({ [draft.id]: { draftNumber, instanceId: inst.id, instanceName: inst.name, nativeState: "saving", nativePrompt: record.task.prompt, nativeError: "" } });
-      if (record.task.refs.length) { checkAction(); requirePage(await driver.pasteFiles(record.task.refs)); }
+      if (record.task.refs.length) { checkAction(); await step(`正在上传草稿素材 ${position}`, () => driver.pasteFiles(record.task.refs)); }
       checkAction();
-      requirePage(await driver.setText(record.task.prompt));
+      await step(`正在填写草稿提示词 ${position}`, () => driver.setText(record.task.prompt));
       checkAction();
-      const saved = requirePage(await driver.call("saveNativeDraft", { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode }));
+      const saved = await step(`正在确认豆包草稿保存 ${position}`, () => driver.call("saveNativeDraft", { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode }));
       const patches = bindingPatches(saved.bindings);
       if (!patches[draft.id]) throw new Error("豆包未返回新草稿的位置，请在左侧草稿核对");
       patches[draft.id].nativeState = "saved";
@@ -616,6 +630,7 @@ async function saveDrafts(ids, options = {}) {
       count++;
       emit("draft", { message: `已存入豆包草稿 ${count}/${selected.length}`, instanceId: inst.id });
       } catch (error) {
+        log.warn("draft-save-failed", { instanceId: inst.id, draftId: draft.id, saved: count, total: selected.length, message: error.message });
         drafts.updateMany({ [draft.id]: { nativeError: error.message } });
         throw new Error(`已存入 ${count}/${selected.length} 条。${error.message}`);
       }
