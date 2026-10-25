@@ -84,6 +84,22 @@ class Driver {
   async clickText(labels) { return this.call("clickText", labels); }
   async appeal(script) { return this.call("appeal", script); }
   async isLoggedIn() { return this.call("isLoggedIn"); }
+  async waitForLogin({ timeoutMs = 30000, check = () => {} } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    let result = { loggedIn: false, by: "unknown" };
+    do {
+      check();
+      try { result = await this.isLoggedIn(); }
+      catch (error) {
+        if (this.webContents?.isDestroyed?.()) throw error;
+        result = { loggedIn: false, by: "page-loading" };
+      }
+      if (result?.loggedIn === true) return result;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return result;
+      await sleep(Math.min(300, remaining));
+    } while (true);
+  }
   async loginStage() { return this.call("loginStage"); }
   async fillLogin(account, password) { return this.call("fillLogin", account, password); }
 

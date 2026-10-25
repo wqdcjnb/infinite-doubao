@@ -605,7 +605,13 @@ async function submitDrafts(ids, options = {}) {
         const driver = await deps.resolveDraftDriver(inst);
         workers.push(driver);
         check();
-        if ((await driver.isLoggedIn())?.loggedIn !== true) throw new Error(`账号 ${inst.name} 的草稿页面登录已失效`);
+        const login = await driver.waitForLogin({ check });
+        if (login?.loggedIn !== true) {
+          log.warn("draft-login-unconfirmed", { instanceId: inst.id, by: login?.by || "unknown" });
+          throw new Error(login?.by === "login-button"
+            ? `账号 ${inst.name} 的草稿页面仍显示登录入口，请在该账号页面确认登录后重试`
+            : `账号 ${inst.name} 的草稿页面登录状态尚未加载完成，请等待页面加载或检查网络后重试`);
+        }
         requirePage(await driver.call("restoreNativeDrafts", bindings.filter((b) => b.id === draft.id)));
         const options = { id: draft.id, prompt: draft.nativePrompt, executionMode: draft.executionMode };
         const opened = requirePage(await driver.call("openNativeDraft", options));

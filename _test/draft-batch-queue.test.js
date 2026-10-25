@@ -16,6 +16,7 @@ beforeEach(() => {
     const bindings = () => native.map((id, i) => ({ id, index: i, title: id, titles: native.slice() }));
     return {
       isLoggedIn: async () => ({ loggedIn: true }),
+      waitForLogin: async () => (await hook("waitForLogin")) || { loggedIn: true },
       call: async (method, options) => {
         calls.push({ method, options, instanceId: inst.id });
         const override = await hook(method, options); if (override) return override;
@@ -93,6 +94,24 @@ test("任一页面准备失败整批不发送，关闭所有已创建页面", as
   await assert.rejects(queue.submitDrafts(ids), /整批尚未触发发送/);
   assert.equal(sends().length, 0); assert.equal(calls.filter((c) => c.method === "close").length, 2);
   assert.ok(drafts.list().every((d) => !d.submissionRecord));
+});
+
+test("等待草稿页登录就绪再准备发送，未知页面与明确未登录分别提示且不丢记录", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  for (const by of ["unknown", "login-button"]) {
+    hook = method => method === "waitForLogin" ? { loggedIn: false, by } : null;
+    await assert.rejects(queue.submitDrafts(ids), by === "unknown" ? /尚未加载完成/ : /仍显示登录入口/);
+    assert.equal(sends().length, 0);
+    assert.equal(drafts.list().length, 2);
+    assert.ok(drafts.list().every(d => !d.submissionRecord));
+  }
+  let release;
+  const ready = new Promise(resolve => { release = resolve; });
+  hook = async method => { if (method === "waitForLogin") await ready; };
+  const pending = queue.submitDrafts(ids);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(sends().length, 0);
+  release(); assert.equal((await pending).count, 2);
 });
 test("旧版本地草稿转为云电脑，已绑定的旧版对话草稿禁止保存和发送", async () => {
   const chosen = account("chosen"), ids = batch();
