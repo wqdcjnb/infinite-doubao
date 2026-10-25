@@ -42,3 +42,22 @@ test('studio account lifecycle uses the same sandbox window factory before blank
   const win=await accounts.open(inst.id);assert.equal(win,created);assert.equal(win.options.webPreferences.sandbox,true);
   const actual=await driver.open(inst,{webContents:win.webContents,timeoutMs:1000});assert.equal(await actual.title(),inst.url);accounts.stop();
 });
+
+test('dedicated lifecycle awaits document-start hook before target and waits for completed target navigation',async()=>{
+  const order=[],inst={id:'ordered',partition:'persist:ordered',url:'https://www.doubao.com/chat/'};
+  const source=fs.readFileSync(path.join(__dirname,'../src/web-accounts.js'),'utf8'),module={exports:{}};
+  vm.runInNewContext(source,{module,require:name=>name==='electron'?{}:name==='./store'?{find:()=>inst,get:()=>({settings:{}})}:name==='./driver'?driver:require(name)});
+  const win=new BrowserBoundary({});win.webContents.loadURL=async url=>{order.push(url);if(url===inst.url)await new Promise(resolve=>setImmediate(()=>{order.push('loaded');resolve();}));};
+  const accounts=new module.exports.WebAccounts({prepareSession:async()=>order.push('session'),createWindow:()=>win,prepareWindow:async()=>order.push('document-start'),awaitNavigation:true,wake:()=>{},publish:()=>{},log:{warn:()=>{}}});
+  await accounts.open(inst.id);assert.deepEqual(order,['session','about:blank','document-start',inst.url,'loaded']);accounts.stop();
+});
+
+test('failed dedicated preparation destroys partial window and does not return it on retry',async()=>{
+  const inst={id:'failed',partition:'persist:failed',url:'https://www.doubao.com/chat/'};
+  const source=fs.readFileSync(path.join(__dirname,'../src/web-accounts.js'),'utf8'),module={exports:{}};
+  vm.runInNewContext(source,{module,require:name=>name==='electron'?{}:name==='./store'?{find:()=>inst,get:()=>({settings:{}})}:name==='./driver'?driver:require(name)});
+  let created=0;const windows=[];
+  const accounts=new module.exports.WebAccounts({prepareSession:async()=>{},createWindow:()=>{created++;const win=new BrowserBoundary({});windows.push(win);return win;},prepareWindow:async()=>{throw Error('preparation failed');},awaitNavigation:true,wake:()=>{},publish:()=>{},log:{warn:()=>{}}});
+  await assert.rejects(accounts.open(inst.id),/preparation/);assert.equal(windows[0].isDestroyed(),true);
+  await assert.rejects(accounts.open(inst.id),/preparation/);assert.equal(created,2);assert.equal(accounts.find(inst),null);
+});

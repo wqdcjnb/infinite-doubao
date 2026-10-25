@@ -54,7 +54,8 @@ test('client uses exact v1 JSON protocol and MP4 lease upload headers',async()=>
   assert.equal(typeof StudioClient,'function','missing client');
   const calls=[], client=new StudioClient({siteUrl:'https://studio.example',executorId:'executor1',token:'private-token',fetch:async(url,opts)=>{calls.push({url:String(url),opts});return new Response('{}',{status:200});}});
   await client.heartbeat([{operationId:'op1',leaseToken:'lease-private'}]);
-  assert.deepEqual(JSON.parse(calls[0].opts.body),{action:'heartbeat',executorId:'executor1',version:'doubao-workbench/1',leases:[{operationId:'op1',leaseToken:'lease-private'}]});
+  assert.deepEqual(JSON.parse(calls[0].opts.body),{action:'heartbeat',executorId:'executor1',version:'doubao-workbench/1',sessionId:client.sessionId,leases:[{operationId:'op1',leaseToken:'lease-private'}]});
+  assert.match(client.sessionId,/^[a-f0-9-]{36}$/);
   const file=path.join(root,'result.mp4'), data=Buffer.from('0000ftypisom0123456789'); fs.writeFileSync(file,data);
   await client.upload('task1',operation('track'),file);
   assert.equal(calls[1].url,'https://studio.example/api/studio/doubao/executor/result?taskId=task1');
@@ -327,4 +328,27 @@ test('HTTP non-loopback site requires explicit opt-in and a literal IP assigned 
   assert.throws(()=>new StudioClient({...config,siteUrl:'http://172.1.254.100'}),/HTTPS/);
   for(const siteUrl of ['http://172.1.254.101','http://192.168.1.100','http://server.local','http://user:password@172.1.254.100'])assert.throws(()=>new StudioClient({...config,siteUrl,allowLocalHttp:true}));
   assert.doesNotThrow(()=>new StudioClient({...config,siteUrl:'https://studio.example'}));
+});
+
+test('interrupted read-only probe recovers as probe, while unknown input recovers as frame without replay',async()=>{
+  const adapter=new executorModule.NativeAdapter({journal:journal(),client:{},accounts:{}}),actions=[];
+  adapter.login=async op=>{actions.push(op.payload.action);return {};};
+  await adapter.recover({...operation('account'),payload:{account:{id:'account1'},action:'probe'}});
+  await adapter.recover({...operation('account'),payload:{account:{id:'account1'},action:'input'}});
+  assert.deepEqual(actions,['probe','frame']);
+});
+test('account scrolling is bounded and screenshots include capture time',async()=>{
+  setupNative();const commands=[],wc={debugger:{sendCommand:async(method,value)=>commands.push({method,value})},capturePage:async()=>({toJPEG:()=>Buffer.from('jpeg')})};
+  const adapter=new executorModule.NativeAdapter({journal:journal(),client:{token:'private-token'},accounts:{open:async()=>({webContents:wc,getContentSize:()=>[1280,900]})},driverFactory:async()=>({isLoggedIn:async()=>({})})});
+  const op={...operation('account'),payload:{account:{id:'account1'},action:'input',inputEncrypted:encryptedInput({kind:'scroll',deltaX:0,deltaY:120})}};
+  const result=await adapter.execute(op);assert.equal(Number.isFinite(Date.parse(result.receipt.capturedAt)),true);
+  assert.deepEqual(commands,[{method:'Input.dispatchMouseEvent',value:{type:'mouseWheel',x:640,y:450,deltaX:0,deltaY:120}}]);
+  for(const delta of [4001,1.2,Infinity])await assert.rejects(adapter.execute({...op,payload:{...op.payload,inputEncrypted:encryptedInput({kind:'scroll',deltaX:0,deltaY:delta})}}),/scroll/);
+  assert.equal(commands.length,1);queue.stopAll();
+});
+test('probe returns version and executor generation even when browser proxy navigation fails',async()=>{
+  setupNative();const adapter=new executorModule.NativeAdapter({journal:journal(),sessionId:'session-fixture',client:{token:'private-token'},environment:{configure(inst){inst.studioEnvironment={version:'version-fixture'};}},accounts:{open:async()=>{throw Error('synthetic secret');}}});
+  const result=await adapter.execute({...operation('account'),payload:{account:{id:'account1'},action:'probe'}});
+  assert.equal(result.receipt.environmentVersion,'version-fixture');assert.equal(result.receipt.executorSessionId,'session-fixture');
+  assert.equal(result.receipt.environmentCheck.proxy.ok,false);assert.equal(JSON.stringify(result).includes('synthetic secret'),false);queue.stopAll();
 });
