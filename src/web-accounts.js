@@ -21,7 +21,7 @@ class WebAccounts {
   }
   async create(inst) {
     await this.opts.prepareSession(inst);
-    const win = new BrowserWindow({ show: false, width: 1280, height: 800, useContentSize: true,
+    const win = this.opts.createWindow ? this.opts.createWindow(inst) : new BrowserWindow({ show: false, width: 1280, height: 800, useContentSize: true,
       webPreferences: { partition: inst.partition, preload: this.opts.preload(), contextIsolation: false,
         nodeIntegration: false, nodeIntegrationInSubFrames: false, sandbox: false, webSecurity: true,
         backgroundThrottling: false, spellcheck: false } });

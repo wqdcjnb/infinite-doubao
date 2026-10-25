@@ -2,7 +2,7 @@
 
 本入口是豆包工坊的独立运行模式：`electron . --studio-executor --studio-config /absolute/private/executor.json`。不加载桌面主窗口，不启动原有 HTTP、MCP 或网页版端口。需要 Linux 原生 Electron、服务用户可用的图形显示（例如已经准备好的虚拟显示）和独立、可写的持久目录；不能把 Windows EXE 当成 Linux 服务。
 
-代码已通过283项纯 Node 离线测试。Ubuntu24.04/x86_64 的 Electron43.2.0 已在启用 Chromium 沙箱、关闭TCP监听并认证的Xvfb显示下通过本地空白页截图（9463字节）及正常退出；这只验证运行时。账号人工登录、100条真实任务、下载上传与重启后的真实对话恢复由部署后的真实业务验收确认，不能用空白页或模拟测试代替成片验收。
+代码已通过285项纯 Node 离线测试。Ubuntu24.04/x86_64 的 Electron43.2.0 已在启用 Chromium 沙箱、关闭TCP监听并认证的Xvfb显示下通过空白页及真实服务窗口/驱动验证：自动化脚本正常加载、二次导航重新注入、只读获取标题成功、截图10247字节。实际renderer的NoNewPrivs=1、Seccomp=2，页面无require/process。账号人工登录、100条真实任务、下载上传与重启后的真实对话恢复由部署后的真实业务验收确认，不能用本地HTML或模拟测试代替成片验收。
 
 ## 私有配置
 
