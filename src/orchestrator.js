@@ -141,7 +141,7 @@ async function confirmGeneration(driver, task, options, sb, context = {}) {
       if (!latest?.ok || latest.key !== candidate.key) throw new Error("视频参数确认内容发生变化，已暂停确认");
       check();
       actionAttempted = true;
-      const sent = await driver.send(candidate.text === "按要求生成" ? { nativeOnly: true } : undefined);
+      const sent = await driver.send(candidate.text === "按要求生成" ? { nativeOnly: true } : undefined, check);
       if (!sent?.ok) { actionAttempted = false; throw new Error(`发送视频参数确认失败：${sent?.reason || "未找到发送按钮"}`); }
     } else {
       check();
@@ -623,7 +623,10 @@ async function submitDrafts(ids, options = {}) {
     const pending = selected.filter((d) => !d.submissionRecord), receipts = [], errors = [], children = new Set();
     const bindings = nativeBindings(inst.id), draftBatchId = `draft-batch-${crypto.randomBytes(12).toString("hex")}`;
     let failure, launched = 0;
-    const progress = message => emit("draft", { message: `${message} · 已发起 ${launched}/${pending.length} 条，已接收 ${accepted.length}/${selected.length} 条，异常 ${errors.length} 条`, instanceId: inst.id });
+    const progress = message => {
+      const confirmed = accepted.filter(a => Object.values(a.record.task.confirmationIntents || {}).some(intent => intent.state === "sent")).length;
+      emit("draft", { message: `${message} · 本次发起 ${launched}/${pending.length} 条，豆包已接收 ${accepted.length}/${selected.length} 条，已回复生成确认 ${confirmed} 条，异常 ${errors.length} 条`, instanceId: inst.id });
+    };
     const abortChildren = () => { for (const child of children) child.controller.abort(operation.controller.signal.reason); };
     operation.controller.signal.addEventListener("abort", abortChildren, { once: true });
     try {
@@ -670,7 +673,7 @@ async function submitDrafts(ids, options = {}) {
             await driver.setGenerationOptions({ model: task.model, duration: task.duration });
             checkDraft();
             return { pageOptions, opened, record };
-          });
+          }, 120000);
           const { pageOptions, opened } = prepared;
           record = prepared.record;
           checkDraft();
@@ -687,13 +690,24 @@ async function submitDrafts(ids, options = {}) {
             record.task.sentAt = clicked.clickedAt || record.task.submittedAt;
             const receipt = requirePage(await driver.call("waitNativeDraftAccepted", { ...pageOptions, conversationIds: opened.conversationIds }));
             checkDraft();
-            Object.assign(record.task, { conversationUrl: receipt.conversationUrl, conversationLocked: true, submissionUncertain: false });
+            Object.assign(record.task, { conversationUrl: receipt.conversationUrl, conversationLocked: true, submissionUncertain: false, baselineMessageIds: [] });
             drafts.updateMany({ [draft.id]: { nativeState: "sent", nativeBinding: null, nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
             received = true;
             accepted.push({ id: draft.id, record });
             progress("后台已确认接收");
-          }, 30000).then(() => draftStep(child, "等待生成确认提醒", async () => {
+          }, 125000).then(() => draftStep(child, "等待生成确认提醒", async () => {
             const settings = store.get().settings.orchestrator;
+            // The accepted conversation has its own message history. The draft
+            // composer's baseline may belong to the previous route entirely.
+            const reopen = async () => {
+              if (!driver.navigate) return;
+              await driver.navigate(record.task.conversationUrl);
+              checkDraft();
+              if (driver.ready && !await driver.ready()) throw new Error("已接收对话尚未加载完成");
+              requirePage(await driver.beginTask({ taskId: record.task.id, prompt: record.task.prompt, resume: true, reset: true, baselineMessageIds: [], baselineUrls: record.task.baselineUrls || [], confirmedKeys: Object.keys(record.task.confirmationIntents || {}) }));
+            };
+            await reopen();
+            let refreshedAt = Date.now();
             const persist = values => {
               const snapshot = JSON.parse(JSON.stringify({ ...record, task: { ...record.task, ...values } }));
               drafts.updateMany({ [draft.id]: { submissionRecord: snapshot } });
@@ -709,6 +723,7 @@ async function submitDrafts(ids, options = {}) {
               checkDraft();
               if (state?.generationStarted || state?.mediaUrls?.length) return;
               if (state?.state === "failed") throw new Error(state.snippet || "平台处理失败");
+              if (Date.now() - refreshedAt >= 30000) { await reopen(); refreshedAt = Date.now(); }
               // A generic '处理中' may still be planning; keep this page alive
               // until its own reminder arrives, without blocking other drafts.
               await new Promise(resolve => {

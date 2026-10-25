@@ -36,6 +36,10 @@
   }
 
   function findEditor() {
+    var custom = all('textarea[placeholder]').find(function (el) {
+      return /^自定义描述/.test(el.getAttribute("placeholder") || "") && visible(el) && !el.disabled && !el.readOnly && el.closest("section");
+    });
+    if (custom) return custom;
     var sels = [
       '[contenteditable="true"][role="textbox"]',
       'div[contenteditable="true"]',
@@ -138,7 +142,8 @@
 
   api.send = function (options) {
     var ed = findEditor();
-    var native = all('#input-engine-container button[data-testid="chat_input_send_button"]').find(visible);
+    var panel = ed && /^自定义描述/.test(ed.getAttribute("placeholder") || "") && ed.closest("section");
+    var native = panel ? all('[data-testid="chat_input_send_button"]', panel).find(visible) : all('#input-engine-container button[data-testid="chat_input_send_button"]').find(visible);
     if (options && options.nativeOnly && (!ed || !native)) return { ok: false, reason: "未找到对话输入框的发送按钮" };
     if (native) {
       if (native.disabled || ["aria-disabled", "aria-busy", "data-loading"].some(function (attr) { return native.getAttribute(attr) === "true"; })) return { ok: false, reason: "发送按钮尚未就绪" };
@@ -231,7 +236,14 @@
       return id ? tracking.messageIds.indexOf(id) < 0 : tracking.nodes.indexOf(node) < 0;
     });
   }
-  function confirmationPanels() { return all('[role="dialog"], dialog, #input-engine-container').filter(visible); }
+  function confirmationPanels() {
+    var panels = all('[role="dialog"], dialog, #input-engine-container').filter(visible);
+    all('textarea[placeholder]').filter(visible).forEach(function (editor) {
+      var panel = /^自定义描述/.test(editor.getAttribute("placeholder") || "") && editor.closest("section");
+      if (panel && visible(panel) && panels.indexOf(panel) < 0) panels.push(panel);
+    });
+    return panels;
+  }
   function panelText(root) {
     if (!root.cloneNode) return txt(root);
     var copy = root.cloneNode(true);
@@ -240,11 +252,12 @@
   }
   function planQuestion(content) {
     var match = content.match(/(?:以上方案\s*[（(][^?？]{1,800}[）)]\s*是否按此开始生成|是否按(?:以上|上述)(?:完整)?方案\s*[（(][^?？]{1,800}[）)]\s*开始生成视频)[？?]/);
+    if (!match) match = content.match(/(?:请确认)?是否按(?:此|以上|上述)[^?？。]{0,240}(?:生成|调用)[^?？。]{0,100}[？?。]/);
     return match ? match[0] : "";
   }
   api.beginTask = function (input) {
     var opts = typeof input === "string" ? { taskId: input } : input || {};
-    if (tracking && tracking.taskId === opts.taskId && opts.resume) return { ok: true, baselineUrls: tracking.urls, baselineMessageIds: tracking.messageIds };
+    if (tracking && tracking.taskId === opts.taskId && opts.resume && !opts.reset) return { ok: true, baselineUrls: tracking.urls, baselineMessageIds: tracking.messageIds };
     var nodes = messages();
     var urls = opts.resume && Array.isArray(opts.baselineUrls) ? opts.baselineUrls : videoUrls();
     var ids = opts.resume && Array.isArray(opts.baselineMessageIds) ? opts.baselineMessageIds : nodes.map(messageId).filter(Boolean);
@@ -315,12 +328,30 @@
       var reason = blocked ? "确认涉及付费或升级，请手动检查" : "";
       if (textRequest && options && options.model) {
         var labels = { "seedance_v2.5": "Seedance 2.5", "seedance_v2.0": "Seedance 2.0", "seedance_v2.0_fast": "Seedance 2.0 Fast", "seedance_v2.0_mini": "Seedance 2.0 Mini" };
-        var parameters = planRequest ? question : content;
-        var model = parameters.match(/Seedance\s*2\.\d+(?:\s+(?:Fast|Mini))?/i);
-        var seconds = parameters.match(planRequest ? /(?:[/／]|时长\s*[:：]?)\s*(\d+)\s*秒/ : /时长\s*[:：]?\s*(\d+)\s*秒/);
+        // Short work-task reminders refer to the latest assistant plan. Never
+        // borrow parameters from the user's prompt or an older reply.
+        var latest = current.length && messageRole(current[current.length - 1]) === "assistant" ? txt(current[current.length - 1]) : "";
+        var modelPattern = /Seedance\s*2\.\d+(?:\s+(?:Fast|Mini))?/i;
+        var secondsPattern = /(?:时长\s*[:：]?\s*)(\d+)\s*秒/;
+        function parameter(pattern, value, preferred) {
+          var sources = [question, content, planRequest ? latest : ""];
+          for (var s = 0; s < sources.length; s += 1) {
+            // Only the separate plan fallback may contain shot timings. In a
+            // reminder itself every stated duration must agree, labelled or not.
+            var rule = s === 2 && preferred && preferred.test(sources[s]) ? preferred : pattern;
+            var matches = Array.from(sources[s].matchAll(new RegExp(rule.source, rule.ignoreCase ? "gi" : "g")));
+            // A question/plan with conflicting values must never be approved
+            // merely because its first value repeats the user's request.
+            if (matches.length) return new Set(matches.map(value)).size === 1 ? matches[0] : null;
+          }
+          return null;
+        }
+        var model = parameter(modelPattern, function (m) { return m[0].replace(/\s+/g, " ").toLowerCase(); });
+        var seconds = parameter(planRequest ? /(\d+)\s*秒/ : secondsPattern, function (m) { return Number(m[1]); }, secondsPattern);
         if (!model || model[0].replace(/\s+/g, " ").toLowerCase() !== String(labels[options.model] || "").toLowerCase() || !seconds || Number(seconds[1]) !== Number(options.duration)) reason = "平台确认的模型或时长与任务不一致，请手动检查";
         if (options.ratio && options.ratio !== "adaptive") {
-          var ratio = parameters.match(planRequest ? /(?:[/／]|画面比例|宽高比|比例)\s*[:：]?\s*(\d+)\s*[:：]\s*(\d+)/ : /(?:画面比例|宽高比|比例)\s*[:：]?\s*(\d+)\s*[:：]\s*(\d+)/);
+          var ratioPattern = /(\d+)\s*[:：]\s*(\d+)/;
+          var ratio = parameter(ratioPattern, function (m) { return m[1] + ":" + m[2]; });
           if (!ratio || ratio[1] + ":" + ratio[2] !== options.ratio) reason = "平台未确认所选画面比例，请手动检查";
         }
       }

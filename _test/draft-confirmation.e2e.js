@@ -12,7 +12,11 @@ let win;
 app.whenReady().then(async () => {
   win = new BrowserWindow({ show: false, width: 1200, height: 900, webPreferences: { backgroundThrottling: false } });
   await win.loadFile(fixture);
-  const evaluate = source => win.webContents.executeJavaScript(source, true);
+  const evaluate = async source => {
+    const result = await win.webContents.executeJavaScript(`(async()=>{try{return await eval(${JSON.stringify(source)})}catch(e){return {fixtureError:e.stack}}})()`, true);
+    if (result?.fixtureError) throw new Error(result.fixtureError);
+    return result;
+  };
   await evaluate('window.CFG = { autoKey: "fixtureAutomation" };');
   for (const name of ["automation", "native-drafts"]) await evaluate(fs.readFileSync(path.join(__dirname, `../src/page/${name}.js`), "utf8"));
   const call = (method, ...args) => evaluate(`window.fixtureAutomation.${method}(${args.map(a => JSON.stringify(a)).join(",")})`);
@@ -64,6 +68,29 @@ app.whenReady().then(async () => {
   assert.equal(finalEvents.filter(e => e.type === "option-click").length, 0);
   report.checks.push("real contenteditable reply uses send button; zero confirmation-panel option clicks");
   report.checks.push("user input ignored; reminder identity stable; disabled/missing send button rejected");
+  // Real work-task reminder: heading outside the composer, duplicate composer
+  // ids, and a textarea whose send button mounts only after a React input turn.
+  await evaluate(`(()=>{window.reset();
+    const panel = document.createElement('section');
+    panel.innerHTML = '<h3>以上为完整方案：Seedance 2.5 模型、30 秒、16:9 横屏。是否按此参数开始生成？</h3><div>按要求生成 暂不生成</div><div id="input-engine-container"><textarea placeholder="自定义描述..."></textarea></div>';
+    document.body.append(panel);
+    const editor = panel.querySelector('textarea');
+    editor.addEventListener('input', () => setTimeout(() => {
+      if (!editor.value || panel.querySelector('button')) return;
+      const send = document.createElement('button'); send.dataset.testid = 'chat_input_send_button'; send.textContent = '发送';
+      send.onclick = () => window.events.push({type:'custom-confirmation', text:editor.value}); panel.append(send);
+    }, 200));})()`);
+  await call("beginTask", { taskId: "custom-reminder", resume: true, baselineMessageIds: [] });
+  const custom = await call("peekGenerationConfirmation", expected);
+  assert.equal(custom.ok, true); assert.equal(custom.text, "按要求生成");
+  assert.equal((await call("setText", custom.text)).kind, "input");
+  assert.equal((await call("peekGenerationConfirmation", expected)).key, custom.key);
+  const Driver = require('../src/driver').Driver;
+  const driver = new Driver({ instance: { id: 'fixture' }, webContents: win.webContents }); driver.key = 'fixtureAutomation';
+  assert.equal((await driver.send({ nativeOnly: true })).ok, true);
+  const customEvents = await evaluate("window.events.filter(e => e.type === 'custom-confirmation')");
+  assert.deepEqual(customEvents, [{ type: 'custom-confirmation', text: '按要求生成' }]);
+  report.checks.push("work section/textarea selected over normal editor; delayed native send appears and receives exactly one reply");
   report.passed = true;
 }).catch(error => { report.error = error.stack; }).finally(() => {
   if (win && !win.isDestroyed()) win.destroy();
