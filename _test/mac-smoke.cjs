@@ -70,7 +70,15 @@ let c, mounted = false;
   assert.equal(fs.readFileSync(marker, "utf8"), "keep user data");
   report.checks.push("Closing and reopening from LaunchServices restores the main window and preserves user data");
   report.ok = true;
-})().catch((error) => { report.ok = false; report.error = error.stack; process.exitCode = 1; }).finally(() => {
+})().catch(async (error) => {
+  report.ok = false; report.error = error.stack; process.exitCode = 1;
+  if (c) {
+    try {
+      report.diagnostics = await c.eval(`(async()=>({draftStatus:document.querySelector('#draftStatus')?.textContent,drafts:await DM.call('dm:drafts'),logs:await DM.call('dm:logs',30),guest:document.querySelector('webview')?await document.querySelector('webview').executeJavaScript('document.body.innerText'):null}))()`);
+      fs.writeFileSync(path.join(out, "mac-main-window.png"), Buffer.from((await c.send("Page.captureScreenshot", { format: "png" })).data, "base64"));
+    } catch (diagnosticError) { report.diagnosticError = String(diagnosticError); }
+  }
+}).finally(() => {
   c?.close();
   try { run("/usr/bin/osascript", ["-e", `tell application ${JSON.stringify(app)} to quit`]); } catch {}
   if (mounted) try { run("hdiutil", ["detach", mount]); } catch {}
