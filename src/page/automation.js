@@ -325,7 +325,7 @@
       var kind = planRequest ? "text" : buttons.length ? "button" : textRequest ? "text" : "";
       if (!kind) continue;
       var key = confirmationKey(root, planRequest ? question : content, kind);
-      var reason = blocked ? "确认涉及付费或升级，请手动检查" : "";
+      var reason = blocked ? "确认涉及付费或升级，请手动检查" : "", pending = false;
       if (textRequest && options && options.model) {
         var labels = { "seedance_v2.5": "Seedance 2.5", "seedance_v2.0": "Seedance 2.0", "seedance_v2.0_fast": "Seedance 2.0 Fast", "seedance_v2.0_mini": "Seedance 2.0 Mini" };
         // Short work-task reminders refer to the latest assistant plan. Never
@@ -333,6 +333,7 @@
         var latest = current.length && messageRole(current[current.length - 1]) === "assistant" ? txt(current[current.length - 1]) : "";
         var modelPattern = /Seedance\s*2\.\d+(?:\s+(?:Fast|Mini))?/i;
         var secondsPattern = /(?:时长\s*[:：]?\s*)(\d+)\s*秒/;
+        var conflicting = false;
         function parameter(pattern, value, preferred) {
           var sources = [question, content, planRequest ? latest : ""];
           for (var s = 0; s < sources.length; s += 1) {
@@ -342,20 +343,26 @@
             var matches = Array.from(sources[s].matchAll(new RegExp(rule.source, rule.ignoreCase ? "gi" : "g")));
             // A question/plan with conflicting values must never be approved
             // merely because its first value repeats the user's request.
-            if (matches.length) return new Set(matches.map(value)).size === 1 ? matches[0] : null;
+            if (matches.length) {
+              if (new Set(matches.map(value)).size === 1) return matches[0];
+              conflicting = true; return null;
+            }
           }
           return null;
         }
         var model = parameter(modelPattern, function (m) { return m[0].replace(/\s+/g, " ").toLowerCase(); });
         var seconds = parameter(planRequest ? /(\d+)\s*秒/ : secondsPattern, function (m) { return Number(m[1]); }, secondsPattern);
-        if (!model || model[0].replace(/\s+/g, " ").toLowerCase() !== String(labels[options.model] || "").toLowerCase() || !seconds || Number(seconds[1]) !== Number(options.duration)) reason = "平台确认的模型或时长与任务不一致，请手动检查";
+        if (!model || !seconds) {
+          pending = !blocked && !conflicting;
+          reason = pending ? "平台尚未给出完整的模型或时长，等待确认内容加载" : "平台确认的模型或时长相互冲突，请手动检查";
+        } else if (model[0].replace(/\s+/g, " ").toLowerCase() !== String(labels[options.model] || "").toLowerCase() || Number(seconds[1]) !== Number(options.duration)) reason = "平台确认的模型或时长与任务不一致，请手动检查";
         if (options.ratio && options.ratio !== "adaptive") {
           var ratioPattern = /(\d+)\s*[:：]\s*(\d+)/;
           var ratio = parameter(ratioPattern, function (m) { return m[1] + ":" + m[2]; });
           if (!ratio || ratio[1] + ":" + ratio[2] !== options.ratio) reason = "平台未确认所选画面比例，请手动检查";
         }
       }
-      return { ok: !reason, kind: kind, key: key, text: planRequest ? "按要求生成" : kind === "text" ? "确认，开始生成视频。" : txt(buttons[0]), reason: reason, button: buttons[0] || null, alreadyConfirmed: tracking.confirmed.indexOf(key) >= 0 };
+      return { ok: !reason, pending: pending, kind: kind, key: key, text: planRequest ? "按要求生成" : kind === "text" ? "确认，开始生成视频。" : txt(buttons[0]), reason: reason, button: buttons[0] || null, alreadyConfirmed: tracking.confirmed.indexOf(key) >= 0 };
     }
     return { ok: false };
   };

@@ -156,11 +156,18 @@
   function result(fn) { return async function () { try { return await fn.apply(null, arguments); } catch (e) { return { ok: false, reason: String(e.message || e) }; } }; }
   api.readNativeDrafts = result(async function () {
     var data = await catalog();
-    return { ok: true, source: data ? "indexeddb" : "sidebar", items: data ? data.items : [], total: data ? data.items.length : rows().length };
+    return { ok: true, source: data ? "indexeddb" : "sidebar", accountScope: data && data.accountScope, items: data ? data.items : [], total: data ? data.items.length : rows().length };
   });
   api.restoreNativeDrafts = result(async function (bindings, options) {
     bindings = bindings || [];
-    var data = bindings.length ? await catalog() : null;
+    var data = options && options.catalog;
+    if (data) {
+      // The batch reads once in the account page. Each sender must still be in
+      // that account, and opening/sending rechecks the exact ID and full body.
+      var identity = "";
+      try { identity = String(localStorage.getItem("flow_tea_user_id") || "").trim(); } catch (_) {}
+      if (!identity || identity !== data.accountScope) throw new Error("当前投递页面的豆包账号与草稿账号不一致，未触发发送");
+    } else data = bindings.length ? await catalog() : null;
     if (data) {
       if (bindings.some(function (b) { return b.accountScope && data.accountScope && b.accountScope !== data.accountScope; })) throw new Error("当前登录的豆包账号与原草稿账号不一致，请切回原账号");
       if (options && options.allowMissing && bindings.some(function (b) { return b.accountScope; }) && !data.accountScope) throw new Error("尚未确认当前豆包账号，不能重新存入草稿，请等待账号登录完成");
@@ -284,6 +291,11 @@
     await wait(async function () {
       if (!enabled(sendButton())) { readyAt = 0; return false; }
       if (!readyAt) readyAt = Date.now();
+      // The mounted editor's document, unlike DOM text alone, has already
+      // consumed the input transaction. Navigation flushes its draft; verify
+      // the full persisted body below before reporting success.
+      var rich = editor() && editor().editor;
+      if (rich && !rich.isDestroyed && typeof rich.getText === "function" && normalize(rich.getText()) === normalize(options.prompt)) return true;
       if (Date.now() - readyAt >= 600) return true;
       // A freshly persisted full document is stronger evidence than a timer.
       // Older/unchanged documents cannot satisfy this fast path.
@@ -324,7 +336,8 @@
     row.click();
     var stableAt = 0;
     await wait(function () {
-      var ready = row.isConnected && row.classList.contains("bg-dbx-bg-float") && text(editor()) === normalize(options.prompt) && enabled(sendButton()) &&
+      row = rowFor(options.id);
+      var ready = row && row.isConnected && row.classList.contains("bg-dbx-bg-float") && text(editor()) === normalize(options.prompt) && enabled(sendButton()) &&
         (options.executionMode !== "work" || mode() === "云电脑");
       if (!ready) { stableAt = 0; return false; }
       if (!stableAt) stableAt = Date.now();

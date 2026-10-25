@@ -23,6 +23,7 @@ document.addEventListener('click',e=>{if(e.target.tagName==='BUTTON')trace('clic
 function persist(){localStorage.setItem('fixture',JSON.stringify(saved));if(draftStore)draftStore.sync(saved);}
 window.addEventListener('storage',e=>{if(e.key==='fixture'){saved=JSON.parse(e.newValue);render();}});
 function render(){
+  if(window.fixtureRemountRows)box.replaceChildren();
   const visible=expanded?saved.drafts:saved.drafts.slice(0,5);
   for(const el of [...box.children])if(!visible.some(d=>d.id===el.id))el.remove();
   visible.forEach((d,i)=>{
@@ -44,7 +45,7 @@ function fresh(work){
   if(!editor.isConnected)document.querySelector('form').prepend(editor);
   if(!/\/chat\/./.test(location.pathname)&&editor.value&&mode.textContent===(work?'云电脑':'对话'))return;
   leave();current=null;refs=[];editor.value='';document.querySelector('[type="file"]').value='';mode.textContent=work?'云电脑':'对话';messages.replaceChildren();history.pushState({},'','/chat');render();
-  if(work)setTimeout(()=>{const next=editor.cloneNode();next.classList.add('tiptap','ProseMirror');next.value='';editor.replaceWith(next);editor=next;},Number(window.fixtureEditorDelay)||150);
+  if(work)setTimeout(()=>{const next=editor.cloneNode();next.classList.add('tiptap','ProseMirror');next.value='';if(window.fixtureEditorModel){let documentText='';next.addEventListener('input',()=>{documentText=next.value;});next.editor={getText:()=>documentText};}editor.replaceWith(next);editor=next;},Number(window.fixtureEditorDelay)||150);
 }
 document.querySelector('#new-work').onclick=()=>fresh(true);document.querySelector('#new-chat').onclick=()=>fresh(false);
 document.querySelector('[type="file"]').onchange=e=>{send.disabled=true;trace('upload-start');refs=[...e.target.files].map(f=>f.name);setTimeout(()=>{render();send.disabled=false;trace('upload-ready');},300);};

@@ -33,6 +33,19 @@ const request = "我将为你生成短视频，请先确认参数：视频生成
 const planRequest = "以上方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 5段分镜 / 仅环境音无配乐）是否按此开始生成？视频生成为高消耗生成。";
 const livePlanRequest = "是否按以上完整方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 6段分镜 / 仅环境音无对白）开始生成视频？视频生成为高消耗生成。";
 
+test("流式确认先出现问句但尚无参数时等待，参数齐全后才允许确认", () => {
+  const p = page(); p.api.beginTask({ taskId: "streaming" });
+  const node = p.message("new", "视频生成参数确认，确认后开始生成视频。", "assistant"); p.add(node);
+  const options = { model: "seedance_v2.0", duration: 15 };
+  const pending = p.api.peekGenerationConfirmation(options);
+  assert.equal(pending.ok, false); assert.equal(pending.pending, true);
+  node.innerText += " 模型：seedance 2.0 总时长：15 秒";
+  assert.equal(p.api.peekGenerationConfirmation(options).ok, true);
+  node.innerText = node.innerText.replace("15 秒", "10 秒");
+  const changed = p.api.peekGenerationConfirmation(options);
+  assert.equal(changed.ok, false); assert.equal(changed.pending, false);
+});
+
 test("真实工作任务的冒号方案、请确认句式和短提醒均核对当前方案参数", () => {
   const plan = "模型：Seedance 2.5（seedance_2.5，固定不切换） 时长：30 秒 画面比例：16:9 横屏，按六段分镜生成。";
   const reminders = [

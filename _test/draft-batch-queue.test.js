@@ -113,6 +113,45 @@ test("接收后在已核对的新对话重置基线，直接检测生成确认�
   assert.ok(store.get().tasks.every(t => t.baselineMessageIds.length === 0));
 });
 
+test("整批只读取一次完整草稿，投递页复用快照而非重复访问数据库", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  const catalog = { accountScope: "test-account", items: [] };
+  hook = (method, options, context) => {
+    if (method === "readNativeDrafts") return { ok: true, source: "indexeddb", ...catalog };
+    if (method === "restoreNativeDrafts") assert.deepEqual(context.restoreOptions, { catalog });
+  };
+  assert.equal((await queue.submitDrafts(ids)).count, 2);
+  assert.equal(calls.filter(c => c.method === "readNativeDrafts").length, 1);
+});
+
+test("确认参数未加载或填写时仍在流式变化，等待下一轮且只发送一次确认", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  const seen = new Map();
+  hook = (method, options, context) => {
+    if (method === "peekGenerationConfirmation") {
+      const n = (seen.get(context.draftId) || 0) + 1; seen.set(context.draftId, n);
+      if (n === 1) return { ok: false, pending: true, kind: "text", reason: "尚未给出完整参数" };
+      return { ok: true, kind: "text", key: n === 2 ? "streaming" : "complete", text: "按要求生成" };
+    }
+    if (method === "readProgress") return { state: "running", generationStarted: false };
+  };
+  assert.equal((await queue.submitDrafts(ids, { startQueue: false })).count, 2);
+  assert.equal(calls.filter(c => c.method === "normalSend").length, 2);
+  assert.ok(store.get().tasks.every(t => !t.confirmationIntents.streaming && t.confirmationIntents.complete.state === "sent"));
+});
+
+test("未发送、接收未知与已接收确认异常分别计数，不能混成发送失败数", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids); const progress = [];
+  hook = (method, options, context) => {
+    if (method === "openNativeDraft" && options.id === ids[0]) return { ok: false, reason: "未就绪" };
+    if (method === "peekGenerationConfirmation") return { ok: false, kind: "text", reason: "明确的参数不一致" };
+  };
+  const onProgress = e => progress.push(e.message); queue.events.on("draft", onProgress);
+  try { await assert.rejects(queue.submitDrafts(ids, { startQueue: false }), /未发送 1 条，接收待核对 0 条，已接收但确认异常 1 条/); }
+  finally { queue.events.off("draft", onProgress); }
+  assert.ok(progress.some(s => /豆包已接收 1\/2.*未发送 1 条.*已接收但确认异常 1 条/.test(s)));
+});
+
 test("回执后页面离开已接收对话时，恢复正确会话再核对生成确认", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   hook = (method, options) => method === "waitNativeDraftAccepted"

@@ -32,7 +32,7 @@ if (process.argv.includes("--prepare")) {
   let pageLoads = 0, peakPages = 0;
   const serviceState = { drafts: fixture.native, conversations: [], version: 0 };
   const indexed = process.env.DM_TEST_NATIVE_STORE === "1";
-  const seed = `<script>window.fixtureSidebarDelay=${Number(process.env.DM_TEST_SIDEBAR_DELAY_MS)||0};if(!localStorage.getItem('fixture'))localStorage.setItem('fixture',${JSON.stringify(JSON.stringify({ drafts: fixture.native, conversations: [] }))});${indexed ? fs.readFileSync(path.join(__dirname, "native-drafts-indexeddb.js"), "utf8") : ""}</script>`;
+  const seed = `<script>window.fixtureRemountRows=${process.env.DM_TEST_REMOUNT_ROWS === "1"};window.fixtureSidebarDelay=${Number(process.env.DM_TEST_SIDEBAR_DELAY_MS)||0};if(!localStorage.getItem('fixture'))localStorage.setItem('fixture',${JSON.stringify(JSON.stringify({ drafts: fixture.native, conversations: [] }))});${indexed ? fs.readFileSync(path.join(__dirname, "native-drafts-indexeddb.js"), "utf8") : ""}</script>`;
   const html = fs.readFileSync(path.join(__dirname, "native-drafts-fixture.html"), "utf8")
     .replace("<script>", seed + "<script>").replace("d.prompt.slice(0,8)", `d.prompt.slice(0,${fixture.labelChars})`)
     // Real drafts are stored atomically by the service. Do not let concurrent

@@ -18,7 +18,7 @@ let sends = 0, child, c;
 const server = http.createServer((req, res) => {
   if (req.url === "/submit") { sends++; res.writeHead(500); return res.end("must not send"); }
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessionid=fixture-only; Path=/" });
-  const seed = `<script>if(!localStorage.getItem('fixture'))localStorage.setItem('fixture','{"drafts":[],"conversations":[]}');${fs.readFileSync(path.join(__dirname, "native-drafts-indexeddb.js"), "utf8")}</script>`;
+  const seed = `<script>window.fixtureEditorModel=true;if(!localStorage.getItem('fixture'))localStorage.setItem('fixture','{"drafts":[],"conversations":[]}');${fs.readFileSync(path.join(__dirname, "native-drafts-indexeddb.js"), "utf8")}</script>`;
   res.end(fs.readFileSync(path.join(__dirname, "native-drafts-fixture.html"), "utf8").replace("<script>", seed + "<script>"));
 });
 const pause = ms => new Promise(r => setTimeout(r, ms));
@@ -82,12 +82,14 @@ async function wait(fn, timeout = 15000) {
     await wait(()=>c.eval("!document.querySelector('#draftSave').disabled"));
     assert.match(await c.eval("document.querySelector('#draftStatus').textContent"), /找不到.*24.*重新存入/);
     assert.ok(Date.now()-missingStart < 3000, "missing drafts must not wait for a nonexistent sidebar");
+    const recoveryStart = Date.now();
     const recovered = await c.eval(`DM.call('dm:drafts:save',${JSON.stringify(ids)},{instanceId:${JSON.stringify(account.id)},recreateDeleted:true})`);
+    const recoveryMs = Date.now() - recoveryStart;
     assert.equal(recovered.ok, true, recovered.error); assert.equal(recovered.data.count, 25);
     const native = await page("JSON.parse(localStorage.getItem('fixture')).drafts.map(d=>({id:d.id,prompt:d.prompt,refs:d.refs}))");
     assert.equal(native.length, 25); assert.equal(native.filter(d=>d.id===retained).length, 1);
     assert.equal(new Set(native.map(d=>d.prompt)).size, 25); assert.equal(sends, 0);
     assert.equal(native.filter(d=>d.refs.length===1).length,12);
-    console.log(JSON.stringify({ saved:25, templates:2, uniqueNumbers:25, sends, firstSaveMs, elapsedMs:Date.now()-start, missingComposerRecovered:true, persistentError:true, hiddenSidebarVerified:25, restoredMissing:24, retainedExisting:1, retryDuplicates:0, withAttachments:12 }));
+    console.log(JSON.stringify({ saved:25, templates:2, uniqueNumbers:25, sends, firstSaveMs, recoveryMs, elapsedMs:Date.now()-start, missingComposerRecovered:true, persistentError:true, hiddenSidebarVerified:25, restoredMissing:24, retainedExisting:1, retryDuplicates:0, withAttachments:12 }));
   } finally { c?.close(); child?.kill(); server.closeAllConnections(); server.close(); }
 })().catch(e => { console.error(e); process.exitCode=1; });

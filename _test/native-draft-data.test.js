@@ -63,6 +63,26 @@ test("新投递页面先读到完整数据、侧栏延迟挂载时等待原生 I
   assert.equal((await p.api.sendNativeDraft(binding)).ok, true); assert.equal(p.sends(), 1);
 });
 
+test("投递页面复用本批完整数据，不重复打开数据库；仍核对当前账号和完整正文", async () => {
+  const original = page(), catalog = await original.api.readNativeDrafts();
+  const sender = page({ empty: true });
+  assert.equal((await sender.api.restoreNativeDrafts([original.bindings[0]], { catalog })).ok, true);
+  assert.equal(sender.reads(), 0);
+  assert.equal((await sender.api.openNativeDraft(original.bindings[0])).ok, true);
+  const wrong = page({ currentScope: "account-b" });
+  assert.equal((await wrong.api.restoreNativeDrafts([original.bindings[0]], { catalog })).ok, false);
+  assert.equal((await sender.api.restoreNativeDrafts([{ ...original.bindings[0], prompt: "changed" }], { catalog })).ok, false);
+});
+
+test("其他投递页改变侧栏使原行重新挂载时，按原生 ID 继续核对，不能误报未就绪", async () => {
+  const p = page(), binding = p.bindings[0], old = p.rows[0];
+  await p.api.restoreNativeDrafts([binding]);
+  const click = old.click;
+  old.click = () => { click(); old.isConnected = false; p.rows[0] = { ...old, isConnected: true }; };
+  assert.equal((await p.api.openNativeDraft(binding)).ok, true);
+  assert.equal((await p.api.sendNativeDraft(binding)).ok, true); assert.equal(p.sends(), 1);
+});
+
 test("核对后侧栏始终不出现时明确超时，不点击发送或按标题猜测", async () => {
   const p = page({ noSidebar: true }); const binding = p.bindings[0];
   assert.equal((await p.api.restoreNativeDrafts([binding])).ok, true);

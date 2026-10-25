@@ -123,6 +123,7 @@ async function confirmGeneration(driver, task, options, sb, context = {}) {
   const candidate = await driver.call("peekGenerationConfirmation", expected);
   check();
   if (!candidate?.kind) return null;
+  if (candidate.pending) return { waiting: true, reason: candidate.reason };
   if (!candidate.ok) return { waiting: true, blocked: true, reason: candidate.reason || "请手动检查生成参数" };
   if (options.autoConfirm === false) return { waiting: true, blocked: true, reason: "等待确认生成参数（自动确认已关闭）" };
   const intents = task.confirmationIntents || {};
@@ -141,7 +142,13 @@ async function confirmGeneration(driver, task, options, sb, context = {}) {
       const filled = await driver.setText(candidate.text || "确认，开始生成视频。");
       if (!filled?.ok) throw new Error("填写视频参数确认失败");
       const latest = await driver.call("peekGenerationConfirmation", expected);
-      if (!latest?.ok || latest.key !== candidate.key) throw new Error("视频参数确认内容发生变化，已暂停确认");
+      if (!latest?.ok || latest.key !== candidate.key) {
+        // Streaming replies can change between inspection and filling. No
+        // click was issued: discard this intent and inspect again next poll.
+        const remaining = { ...task.confirmationIntents }; delete remaining[candidate.key];
+        persist({ confirmationIntents: remaining });
+        return { waiting: true, reason: "生成确认内容仍在更新，等待完整参数" };
+      }
       checkAction();
       actionAttempted = true;
       const sent = await driver.send(candidate.text === "按要求生成" ? { nativeOnly: true } : undefined, checkAction);
@@ -651,7 +658,8 @@ async function submitDrafts(ids, options = {}) {
     let failure, launched = 0;
     const progress = message => {
       const confirmed = accepted.filter(a => Object.values(a.record.task.confirmationIntents || {}).some(intent => intent.state === "sent")).length;
-      emit("draft", { message: `${message} · 本次发起 ${launched}/${pending.length} 条，豆包已接收 ${accepted.length}/${selected.length} 条，已回复生成确认 ${confirmed} 条，异常 ${errors.length} 条`, instanceId: inst.id });
+      const count = phase => errors.filter(e => e.phase === phase).length;
+      emit("draft", { message: `${message} · 本次发起 ${launched}/${pending.length} 条，豆包已接收 ${accepted.length}/${selected.length} 条，已回复生成确认 ${confirmed} 条；未发送 ${count("prepare")} 条，接收待核对 ${count("receipt")} 条，已接收但确认异常 ${count("confirmation")} 条`, instanceId: inst.id });
     };
     const abortChildren = () => {
       for (const child of children) child.controller.abort(operation.controller.signal.reason);
@@ -660,6 +668,8 @@ async function submitDrafts(ids, options = {}) {
     operation.controller.signal.addEventListener("abort", abortChildren, { once: true });
     try {
       if (pending.length && !deps.resolveDraftDriver) throw new Error("草稿投递页面未就绪，请更新并重启应用");
+      const data = pending.length ? requirePage(await draftStep(operation, "读取本批完整草稿", () => _driver.call("readNativeDrafts"))) : null;
+      const catalog = data?.source === "indexeddb" ? { accountScope: data.accountScope, items: data.items } : null;
       // Keep page loading ahead of sending. A preparation slot is released as
       // soon as the click is issued, never when its receipt/confirmation arrives.
       // Each ready page sends independently, so one slow page cannot hold the rest.
@@ -677,7 +687,7 @@ async function submitDrafts(ids, options = {}) {
         const cleanup = () => { children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); pageWaiters.shift()?.(); };
         const recordFailure = error => {
           const message = `${received ? "草稿已接收，生成确认未完成" : issued ? "已发起发送，接收结果未确认" : "尚未发送"}：${error.message}`;
-          errors.push(message);
+          errors.push({ message, phase: received ? "confirmation" : issued ? "receipt" : "prepare" });
           if (received) {
             record.task.waitReason = message;
             record.task.log.push({ at: new Date().toISOString(), level: "warn", message });
@@ -696,7 +706,7 @@ async function submitDrafts(ids, options = {}) {
             if (login?.loggedIn !== true) throw new Error(login?.by === "login-button"
               ? `账号 ${inst.name} 的草稿页面仍显示登录入口，请在该账号页面确认登录后重试`
               : `账号 ${inst.name} 的草稿页面登录状态尚未加载完成，请等待页面加载或检查网络后重试`);
-            requirePage(await driver.call("restoreNativeDrafts", bindings.filter((b) => b.id === draft.id)));
+            requirePage(await driver.call("restoreNativeDrafts", bindings.filter((b) => b.id === draft.id), catalog ? { catalog } : undefined));
             const pageOptions = { id: draft.id, prompt: draft.nativePrompt, executionMode: draft.executionMode };
             checkAction();
             const opened = requirePage(await driver.call("openNativeDraft", pageOptions));
@@ -802,7 +812,7 @@ async function submitDrafts(ids, options = {}) {
     drafts.updateMany(bindingPatches(remainingDraftBindings(bindings, new Set(accepted.map((a) => a.id)))));
     accepted.sort((a, b) => selected.findIndex((d) => d.id === a.id) - selected.findIndex((d) => d.id === b.id));
     const items = accepted.length ? commitTemplates(accepted.map((a) => a.record), accepted.map((a) => a.id), !operation.stopped && options.startQueue !== false) : [];
-    if (failure || errors.length) throw new Error(`已确认发送 ${accepted.length}/${selected.length} 条。${failure?.message || errors[0]}；各条失败原因已保存，其余草稿记录已保留`);
+    if (failure || errors.length) throw new Error(`已确认发送 ${accepted.length}/${selected.length} 条。未发送 ${errors.filter(e => e.phase === "prepare").length} 条，接收待核对 ${errors.filter(e => e.phase === "receipt").length} 条，已接收但确认异常 ${errors.filter(e => e.phase === "confirmation").length} 条。${failure?.message || errors[0].message}；各条失败原因已保存，其余草稿记录已保留`);
     return { items, count: items.length, instanceId: inst.id, instanceName: inst.name };
   });
 }
