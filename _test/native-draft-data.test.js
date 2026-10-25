@@ -3,7 +3,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path"), vm = require("node:vm");
 
-function page({ collapsed = false, duplicate = false, missingBody = false, wrongScope = false, noSidebar = false, empty = false, currentScope = "account-a" } = {}) {
+function page({ collapsed = false, duplicate = false, missingBody = false, wrongScope = false, noSidebar = false, sidebarDelayMs = 0, empty = false, currentScope = "account-a" } = {}) {
   let now = 1000, expanded = false, active = null, sends = 0, reads = 0;
   const items = Array.from({ length: 50 }, (_, i) => {
     const draftNumber = "DB-" + (duplicate && i === 49 ? 0 : i).toString(16).toUpperCase().padStart(24, "0");
@@ -23,11 +23,12 @@ function page({ collapsed = false, duplicate = false, missingBody = false, wrong
     __reactFiber$test: { memoizedProps: { draft: index[i].data } },
     classList: { contains: () => active === d.id }, click() { active = d.id; editor.value = d.prompt; }
   }));
-  const visible = () => noSidebar || collapsed ? [] : rows.slice(0, expanded ? 50 : 5);
+  const pendingSidebar = () => noSidebar || now - 1000 < sidebarDelayMs;
+  const visible = () => pendingSidebar() || collapsed ? [] : rows.slice(0, expanded ? 50 : 5);
   const more = { isConnected: true, click() { expanded = true; this.isConnected = false; } };
   const section = { querySelector: s => s.includes("section-header") ? { click: () => { collapsed = false; } } : expanded ? null : more };
   const document = {
-    querySelector: s => noSidebar ? null : s.includes("draft-conversation-section") ? section : s.includes("chat_input_action_mode") ? mode : s.includes("chat_input_send_button") ? button : editor,
+    querySelector: s => pendingSidebar() ? null : s.includes("draft-conversation-section") ? section : s.includes("chat_input_action_mode") ? mode : s.includes("chat_input_send_button") ? button : editor,
     querySelectorAll: s => s.includes("draft-conversation-section") ? visible() : []
   };
   const indexedDB = {
@@ -51,6 +52,24 @@ function page({ collapsed = false, duplicate = false, missingBody = false, wrong
   return { api: context.window.auto, items, rows, index, elapsed: () => now - 1000, reads: () => reads, sends: () => sends, visible: () => visible().length,
     bindings: items.map(d => ({ id: "app-" + d.id, draftNumber: d.draftNumber, prompt: d.prompt, title: "旧标题", executionMode: "work" })) };
 }
+
+test("新投递页面先读到完整数据、侧栏延迟挂载时等待原生 ID，不能让整批提前失败", async () => {
+  const p = page({ sidebarDelayMs: 1800 });
+  const binding = p.bindings[49];
+  assert.equal((await p.api.restoreNativeDrafts([binding])).ok, true);
+  assert.equal(p.visible(), 0); assert.equal(p.elapsed(), 0);
+  const result = await p.api.openNativeDraft(binding);
+  assert.equal(result.ok, true, result.reason); assert.ok(p.elapsed() >= 1800);
+  assert.equal((await p.api.sendNativeDraft(binding)).ok, true); assert.equal(p.sends(), 1);
+});
+
+test("核对后侧栏始终不出现时明确超时，不点击发送或按标题猜测", async () => {
+  const p = page({ noSidebar: true }); const binding = p.bindings[0];
+  assert.equal((await p.api.restoreNativeDrafts([binding])).ok, true);
+  const result = await p.api.openNativeDraft(binding);
+  assert.equal(result.ok, false); assert.match(result.reason, /尚未显示对应条目/);
+  assert.equal(p.sends(), 0); assert.equal(p.elapsed(), 20000);
+});
 
 test("侧栏与输入框均未挂载时，直接核对 50 条完整草稿并返回全部绑定", async () => {
   const p = page({ noSidebar: true });

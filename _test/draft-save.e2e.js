@@ -10,7 +10,10 @@ const store = require("../src/store"), templates = require("../src/task-template
 store.load(); store.get().settings.server.enabled = false; store.get().settings.web = { enabled: false };
 const account = store.add({ id: "save-fixture", name: "草稿保存测试", url: `http://127.0.0.1:${port}/chat/read-only?no-composer=1` });
 const items = [templates.create({ name: "模板 A", prompt: "同样的视频正文", duration: 5 }), templates.create({ name: "模板 B", prompt: "另一模板的视频正文", duration: 5 })];
-const ids = Array.from({ length: 25 }, (_, i) => drafts.create(items[i % 2].id).id); store.save();
+const ids = [];
+const initialized = templates.importAttachments(items[1].id, [path.join(__dirname, "clip.mp4")]).then(() => {
+  ids.push(...Array.from({ length: 25 }, (_, i) => drafts.create(items[i % 2].id).id)); store.save();
+});
 let sends = 0, child, c;
 const server = http.createServer((req, res) => {
   if (req.url === "/submit") { sends++; res.writeHead(500); return res.end("must not send"); }
@@ -25,6 +28,7 @@ async function wait(fn, timeout = 15000) {
   throw new Error("Save fixture timed out");
 }
 (async () => {
+  await initialized;
   await new Promise(r => server.listen(port, "127.0.0.1", r));
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
   child = spawn(process.env.DM_TEST_RUNTIME, [`--user-data-dir=${home}`, `--remote-debugging-port=${process.env.DM_TEST_CDP_PORT}`, "--remote-debugging-address=127.0.0.1"], { env, stdio: "ignore", windowsHide: true });
@@ -53,6 +57,7 @@ async function wait(fn, timeout = 15000) {
       const result = await c.eval("DM.call('dm:drafts')");
       return result.ok && result.data.length===25 && result.data.every(d=>d.nativeState==='saved');
     }, 150000);
+    const firstSaveMs = Date.now() - start;
     const saved = (await c.eval("DM.call('dm:drafts')")).data;
     assert.equal(new Set(saved.map(d=>d.draftNumber)).size, 25);
     assert.ok(saved.every(d=>d.instanceId===account.id && d.nativeBinding && !d.nativeError));
@@ -79,9 +84,10 @@ async function wait(fn, timeout = 15000) {
     assert.ok(Date.now()-missingStart < 3000, "missing drafts must not wait for a nonexistent sidebar");
     const recovered = await c.eval(`DM.call('dm:drafts:save',${JSON.stringify(ids)},{instanceId:${JSON.stringify(account.id)},recreateDeleted:true})`);
     assert.equal(recovered.ok, true, recovered.error); assert.equal(recovered.data.count, 25);
-    const native = await page("JSON.parse(localStorage.getItem('fixture')).drafts.map(d=>({id:d.id,prompt:d.prompt}))");
+    const native = await page("JSON.parse(localStorage.getItem('fixture')).drafts.map(d=>({id:d.id,prompt:d.prompt,refs:d.refs}))");
     assert.equal(native.length, 25); assert.equal(native.filter(d=>d.id===retained).length, 1);
     assert.equal(new Set(native.map(d=>d.prompt)).size, 25); assert.equal(sends, 0);
-    console.log(JSON.stringify({ saved:25, templates:2, uniqueNumbers:25, sends, elapsedMs:Date.now()-start, missingComposerRecovered:true, persistentError:true, hiddenSidebarVerified:25, restoredMissing:24, retainedExisting:1, retryDuplicates:0 }));
+    assert.equal(native.filter(d=>d.refs.length===1).length,12);
+    console.log(JSON.stringify({ saved:25, templates:2, uniqueNumbers:25, sends, firstSaveMs, elapsedMs:Date.now()-start, missingComposerRecovered:true, persistentError:true, hiddenSidebarVerified:25, restoredMissing:24, retainedExisting:1, retryDuplicates:0, withAttachments:12 }));
   } finally { c?.close(); child?.kill(); server.closeAllConnections(); server.close(); }
 })().catch(e => { console.error(e); process.exitCode=1; });

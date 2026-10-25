@@ -44,7 +44,7 @@ function fresh(work){
   if(!editor.isConnected)document.querySelector('form').prepend(editor);
   if(!/\/chat\/./.test(location.pathname)&&editor.value&&mode.textContent===(work?'云电脑':'对话'))return;
   leave();current=null;refs=[];editor.value='';document.querySelector('[type="file"]').value='';mode.textContent=work?'云电脑':'对话';messages.replaceChildren();history.pushState({},'','/chat');render();
-  if(work)setTimeout(()=>{const next=editor.cloneNode();next.value='';editor.replaceWith(next);editor=next;},150);
+  if(work)setTimeout(()=>{const next=editor.cloneNode();next.classList.add('tiptap','ProseMirror');next.value='';editor.replaceWith(next);editor=next;},Number(window.fixtureEditorDelay)||150);
 }
 document.querySelector('#new-work').onclick=()=>fresh(true);document.querySelector('#new-chat').onclick=()=>fresh(false);
 document.querySelector('[type="file"]').onchange=e=>{send.disabled=true;trace('upload-start');refs=[...e.target.files].map(f=>f.name);setTimeout(()=>{render();send.disabled=false;trace('upload-ready');},300);};
@@ -61,5 +61,6 @@ document.querySelector('form').onsubmit=async e=>{e.preventDefault();send.disabl
 render();const previous=saved.conversations.find(c=>location.pathname==='/chat/'+c.id);if(previous)show(previous);
 if(new URLSearchParams(location.search).has('no-composer'))editor.remove();
 window.fixtureReady=true;
+if(window.fixtureSidebarDelay){const parent=box.parentNode,next=box.nextSibling;box.remove();setTimeout(()=>parent.insertBefore(box,next),window.fixtureSidebarDelay);}
 })();
 </script></body></html>

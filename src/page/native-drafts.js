@@ -3,6 +3,7 @@
   var api = window[CFG.autoKey];
   if (!api) return;
   var beforeSave = [];
+  var preparedAt = 0, inputScope = "";
   var storedBindings = new Map();
   function text(el) { return String(el && (/^(TEXTAREA|INPUT)$/.test(el.tagName) ? el.value : el.innerText || el.textContent) || "").replace(/\s+/g, " ").trim(); }
   function editor() { return document.querySelector('#input-engine-container .tiptap[contenteditable="true"], #input-engine-container textarea, .tiptap.ProseMirror[contenteditable="true"]'); }
@@ -251,29 +252,50 @@
       switchTo(mode() !== "云电脑");
       await wait(function () { return editor() && !text(editor()); }, "当前草稿尚未保存，请在豆包页面检查");
     }
+    var outgoingEditor = editor();
     var prepared = await api[options.executionMode === "work" ? "prepareWorkTask" : "prepareVideoGeneration"](options);
     if (!prepared.ok) return prepared;
     await expandDrafts();
-    // The mode label can switch before React replaces the composer. Filling
-    // that outgoing node loses the prompt when the new work editor mounts.
+    // The mode label can precede the new composer. Once React has replaced the
+    // outgoing editor, do not add another fixed second. Reused editors retain
+    // the stability guard because their route transition has no node boundary.
     var previousEditor = null, stableAt = 0;
     await wait(function () {
       var current = editor();
       if (!current || text(current) || current !== previousEditor || (options.executionMode === "work" && mode() !== "云电脑")) {
         previousEditor = current; stableAt = Date.now(); return false;
       }
-      return Date.now() - stableAt >= 1000;
+      var mountedRichEditor = current !== outgoingEditor && current.classList && current.classList.contains("ProseMirror");
+      return Date.now() - stableAt >= (mountedRichEditor ? 100 : 1000);
     }, "工作任务输入区仍在切换，请等待豆包加载完成后重试");
     beforeSave = rows();
+    preparedAt = Date.now(); inputScope = "";
+    if (typeof indexedDB !== "undefined" && indexedDB.databases) {
+      var databases = await indexedDB.databases();
+      if (databases.some(function (db) { return db.name === "samantha-web"; })) {
+        try { inputScope = String(localStorage.getItem("flow_tea_user_id") || "").trim(); } catch (_) {}
+      }
+    }
     return { ok: true };
   });
   api.saveNativeDraft = result(async function (options) {
     await wait(function () { return text(editor()) === normalize(options.prompt); }, "提示词未完整填入，草稿尚未保存，请检查账号输入区");
     var readyAt = 0;
-    await wait(function () {
+    await wait(async function () {
       if (!enabled(sendButton())) { readyAt = 0; return false; }
       if (!readyAt) readyAt = Date.now();
-      return Date.now() - readyAt >= 600;
+      if (Date.now() - readyAt >= 600) return true;
+      // A freshly persisted full document is stronger evidence than a timer.
+      // Older/unchanged documents cannot satisfy this fast path.
+      if (inputScope) {
+        var input = await readStore("samantha-web", "store", "input-engine-draft:v3:account:" + encodeURIComponent(inputScope));
+        return input && input.state && input.state.accountScope === inputScope && Array.isArray(input.state.records) && input.state.records.some(function (r) {
+          var unit = r.units && r.units["input.document"], payload = unit && !unit.tombstone && unit.payload;
+          var prompt = payload && (payload.format === "plain-text" ? payload.text : payload.plainTextFallback);
+          return r.address && r.address.accountScope === inputScope && r.updatedAt >= preparedAt && unit && unit.updatedAt >= preparedAt && normalize(prompt) === normalize(options.prompt);
+        });
+      }
+      return false;
     }, "素材尚未上传完成或提示词不可提交，请检查豆包输入区");
     switchTo(options.executionMode !== "work");
     var row = await wait(function () {
@@ -283,13 +305,22 @@
       var prefix = title(added[0]).replace(/[.…]+$/, "");
       return prefix && normalize(options.prompt).startsWith(prefix) ? added[0] : null;
     }, "未确认豆包原生草稿已保存，请在左侧草稿中核对，避免重复存入");
+    var native = rowDraft(row);
+    if (native) await wait(async function () {
+      var saved = await catalog();
+      return saved && saved.items.some(function (d) { return d.nativeId === native.id && d.accountScope === native.inputDraftIndex.accountScope && normalize(d.prompt) === normalize(options.prompt); });
+    }, "豆包草稿完整正文尚未保存，请核对后重试，避免重复存入");
     row.dataset.dmDraftId = options.id;
     return { ok: true, bindings: snapshot() };
   });
   api.openNativeDraft = result(async function (options) {
-    await expandDrafts();
-    var row = rowFor(options.id);
-    if (!row) throw new Error("未找到这条豆包草稿，请刷新账号页面后重试");
+    // IndexedDB can finish before the sidebar mounts in a fresh sender page.
+    // Wait for this verified native ID, rather than treating a missing DOM row
+    // as a deleted draft or selecting a similar title.
+    var row = await wait(async function () {
+      if (!rowFor(options.id)) await expandDrafts();
+      return rowFor(options.id);
+    }, "草稿数据已核对，但网页尚未显示对应条目，请检查豆包侧栏后重试；尚未发送");
     row.click();
     var stableAt = 0;
     await wait(function () {

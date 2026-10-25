@@ -38,3 +38,17 @@ test("旧会话没有输入框时先打开新工作任务，再等待云电脑�
   assert.equal(result.ok, true, result.reason); assert.equal(clicks, 1); assert.equal(mounted, true);
   assert.ok(now < 2000, "must not wait for the old missing composer");
 });
+
+test("云电脑标签先出现、富文本编辑器后挂载时，不能把过渡输入框当作准备完成", async () => {
+  let now = 1000, switching = false;
+  const old = { tagName: "TEXTAREA", value: "" }, placeholder = { tagName: "TEXTAREA", value: "", classList: { contains: () => false } };
+  const rich = { tagName: "DIV", innerText: "", classList: { contains: () => true } };
+  const current = () => !switching ? old : now < 1400 ? placeholder : rich;
+  const api = { prepareWorkTask: async () => { switching = true; return { ok: true }; } };
+  const document = { querySelector: s => s.includes("draft-conversation-section") ? null : s.includes("chat_input_action_mode") ? { innerText: "云电脑" } : current(), querySelectorAll: () => [] };
+  class Clock extends Date { static now() { return now; } }
+  const context = vm.createContext({ window: { auto: api }, CFG: { autoKey: "auto" }, document, Date: Clock, setTimeout(fn, ms) { now += ms; queueMicrotask(fn); } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/page/native-drafts.js"), "utf8"), context);
+  const result = await api.prepareNativeDraft({ executionMode: "work" });
+  assert.equal(result.ok, true, result.reason); assert.equal(current(), rich); assert.equal(now, 1500);
+});

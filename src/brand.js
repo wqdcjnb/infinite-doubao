@@ -14,7 +14,7 @@ const DEFAULTS = {
   name: "豆包工坊",
   englishName: "Doubao Workshop",
   productKey: "infinite-doubao",
-  version: "1.5.11",
+  version: "1.5.12",
   slogan: "多账号 AI 素材流水线",
   // 首页问候等地方用到的外链，全部可关
   links: {
