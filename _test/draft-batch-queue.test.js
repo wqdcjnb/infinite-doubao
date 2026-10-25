@@ -199,7 +199,6 @@ test("逐条触发后继续下一条，第一条回执不返回也不能阻塞�
   let release;
   const delayed = new Promise((resolve) => { release = resolve; });
   hook = async (method, options) => {
-    if (method === "sendNativeDraft" && options.id === ids[0]) assert.equal(calls.filter((c) => c.method === "openNativeDraft").length, 1);
     if (method === "waitNativeDraftAccepted" && options.id === ids[0]) await delayed;
   };
   const submission = queue.submitDrafts(ids);
@@ -281,6 +280,34 @@ test("50 条所有回执都延迟，仍先触发全部 50 次发送，绝不按�
   assert.equal(calls.some(c => c.method === "result"), false);
   assert.equal(liveWorkers, 0);
   assert.equal(new Set(store.get().tasks.map(t => t.draftBatchId)).size, 1);
+});
+
+test("滚动提前准备：前两页加载卡住、所有回执挂起，其余 48 条仍连续投递", async () => {
+  account("first");
+  const ids = drafts.createMany(Array.from({ length: 50 }, (_, i) => template(String(i)).id)).map(d => d.id);
+  await queue.saveDrafts(ids);
+  let releasePages, releaseReceipts, checking = 0, peakChecking = 0, checks = 0;
+  const pages = new Promise(resolve => { releasePages = resolve; });
+  const receipts = new Promise(resolve => { releaseReceipts = resolve; });
+  hook = async method => {
+    if (method === "waitForLogin") {
+      peakChecking = Math.max(peakChecking, ++checking);
+      if (++checks <= 2) await pages;
+      checking--;
+    }
+    if (method === "waitNativeDraftAccepted") await receipts;
+  };
+  const pending = queue.submitDrafts(ids); pending.catch(() => {});
+  try {
+    await waitFor(() => sends().length === 48);
+    assert.equal(checks, 50);
+    assert.equal(peakChecking, 3, "limit simultaneous page preparation without grouping sends");
+    assert.equal(store.get().tasks.length, 0, "no receipt released yet");
+    releasePages(); await waitFor(() => sends().length === 50);
+    assert.equal(new Set(sends().map(c => c.options.id)).size, 50);
+    releaseReceipts(); assert.equal((await pending).count, 50);
+    assert.equal(liveWorkers, 0);
+  } finally { releasePages(); releaseReceipts(); }
 });
 
 test("中间一条准备失败，后续仍连续投递，失败草稿保留", async () => {
@@ -369,9 +396,11 @@ test("保存中断不重复存入", async () => {
 test("批量操作互斥，停止阻止下一次点击", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   hook = async (method, options) => {
-    if (method === "openNativeDraft" && options.id === ids[1]) { await assert.rejects(queue.submitDrafts([ids[1]]), /正在执行任务/); queue.stopAll(); }
+    if (method === "sendNativeDraft" && options.id === ids[0]) { queue.stopAll(); }
   };
-  await assert.rejects(queue.submitDrafts(ids), /已停止/); assert.equal(sends().length, 1);
+  const pending = queue.submitDrafts(ids);
+  await assert.rejects(queue.submitDrafts([ids[1]]), /正在执行任务/);
+  await assert.rejects(pending, /已停止/); assert.equal(sends().length, 1);
   assert.equal(queue.state().paused, true); assert.equal(drafts.list().find(d => d.id === ids[1]).submissionRecord, undefined);
 });
 test("并发回执更新未勾选草稿的位置，单条拒绝不影响其他已发任务", async () => {

@@ -628,10 +628,12 @@ async function submitDrafts(ids, options = {}) {
     operation.controller.signal.addEventListener("abort", abortChildren, { once: true });
     try {
       if (pending.length && !deps.resolveDraftDriver) throw new Error("草稿投递页面未就绪，请更新并重启应用");
-      // Prepare the next draft immediately after issuing a send. Receipt promises
-      // run independently and never gate admission of a subsequent draft.
-      for (const [index, draft] of pending.entries()) {
+      // Keep page loading ahead of sending. A preparation slot is released as
+      // soon as the click is issued, never when its receipt/confirmation arrives.
+      // Each ready page sends independently, so one slow page cannot hold the rest.
+      async function dispatchDraft(draft, index) {
         check();
+        const preparingAt = Date.now();
         const child = { controller: new AbortController() };
         children.add(child);
         let driver, record, issued = false, received = false, trackingReceipt = false;
@@ -671,12 +673,13 @@ async function submitDrafts(ids, options = {}) {
           });
           const { pageOptions, opened } = prepared;
           record = prepared.record;
+          checkDraft();
           record.task.submittedAt = new Date().toISOString();
           drafts.updateMany({ [draft.id]: { nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
           // The durable intent precedes the click. Do not await this promise here.
           const sent = driver.call("sendNativeDraft", pageOptions);
           issued = true; launched++; trackingReceipt = true;
-          log.info("draft-dispatch-started", { draftBatchId, draftId: draft.id, instanceId: inst.id, index: index + 1, total: pending.length });
+          log.info("draft-dispatch-started", { draftBatchId, draftId: draft.id, instanceId: inst.id, index: index + 1, total: pending.length, preparationMs: Date.now() - preparingAt });
           progress("已发起发送，后台核对回执");
           receipts.push(draftStep(child, "豆包接收回执", async () => {
             const clicked = await sent;
@@ -718,6 +721,15 @@ async function submitDrafts(ids, options = {}) {
         } catch (error) { recordFailure(error); }
         finally { if (!trackingReceipt) cleanup(); }
       }
+      let next = 0;
+      const preparing = await Promise.allSettled(Array.from({ length: Math.min(3, pending.length) }, async () => {
+        while (next < pending.length) {
+          check();
+          const index = next++;
+          await dispatchDraft(pending[index], index);
+        }
+      }));
+      failure = preparing.find(o => o.status === "rejected")?.reason;
     } catch (error) { failure = error; }
     finally {
       progress("投递阶段结束，各对话独立等待回执与生成确认");
