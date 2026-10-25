@@ -37,6 +37,11 @@
   function modelButton() { return nodes(CONTROLS, editorRoot()).find(function (el) { return modelName(el); }); }
   function durationButton() { return nodes(CONTROLS, editorRoot()).find(function (el) { return /(?:\d+\s*s\b|\d+\s*秒)/i.test(text(el)) && !modelName(el); }); }
   function durationOf(el) { var m = text(el).match(/(\d+)\s*(?:s\b|秒)/i); return m ? Number(m[1]) : 0; }
+  function ratioOf(el) {
+    var label = text(el).replace(/：/g, ":");
+    var match = label.match(/(?:^|\s)(3:4|4:3|9:16|16:9|1:1|21:9)(?=\s|·|$)/);
+    return match ? match[1] : /自动/.test(label) ? "adaptive" : "";
+  }
   function activate(el) {
     var r = el.getBoundingClientRect();
     var init = { bubbles: true, cancelable: true, pointerType: "mouse", button: 0, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
@@ -135,7 +140,9 @@
     try {
       var label = MODELS[options && options.model];
       var duration = Number(options && options.duration);
-      if (!label || !Number.isInteger(duration) || duration < 1) throw new Error("视频模型或时长无效");
+      var ratio = String(options && options.ratio || "adaptive");
+      if (!label || !Number.isInteger(duration) || duration < 4 || duration > (options.model === "seedance_v2.5" ? 30 : 15)) throw new Error("视频模型或时长无效");
+      if (["adaptive", "3:4", "4:3", "9:16", "16:9", "1:1", "21:9"].indexOf(ratio) < 0) throw new Error("视频画面比例无效");
       await waitFor(editor, "页面输入区尚未就绪，请等待网页加载后重试", LOAD_TIMEOUT);
       // An empty home composer is already a new conversation. Resetting it can
       // race with the asynchronously loaded video editor and discard its controls.
@@ -172,8 +179,22 @@
         activate(option);
         await waitFor(function () { return modelName(modelButton()) === label.toLowerCase(); }, "豆包未接受所选视频模型");
       }
-      phase = "duration";
+      phase = "ratio";
       var durationControl = await waitFor(durationButton, "未找到豆包视频时长控件", LOAD_TIMEOUT);
+      if (ratioOf(durationControl) !== ratio) {
+        if (durationControl.getAttribute("aria-expanded") !== "true") activate(durationControl);
+        var ratioOption = await waitFor(function () {
+          var panel = nodes('[role="menu"], [role="dialog"], [data-state="open"]').find(function (el) { return /比例/.test(text(el)) && /时长/.test(text(el)); });
+          return panel && nodes('button, [role="radio"], [role="option"], [role="menuitem"]', panel).find(function (el) { return text(el) === (ratio === "adaptive" ? "自动" : ratio); });
+        }, "未找到所选画面比例，请在豆包页面检查", LOAD_TIMEOUT);
+        if (unavailable(ratioOption)) throw new Error("当前账号不能使用所选画面比例");
+        activate(ratioOption);
+        await waitFor(function () { return ratioOf(durationButton()) === ratio; }, "豆包未接受所选画面比例");
+        durationControl = durationButton();
+        if (durationControl.getAttribute("aria-expanded") === "true") activate(durationControl);
+      }
+      phase = "duration";
+      durationControl = durationButton();
       if (durationOf(durationControl) !== duration) {
         activate(durationControl);
         var durationOption = await waitFor(function () {
@@ -216,11 +237,12 @@
         await waitFor(function () { return durationOf(durationButton()) === duration; }, "豆包未接受所选视频时长");
         if (durationControl.getAttribute("aria-expanded") === "true") activate(durationControl);
       }
-      return { ok: true, model: options.model, duration: duration, verified: "page-controls" };
+      if (ratioOf(durationButton()) !== ratio) throw new Error("豆包画面比例发生变化，任务尚未发送");
+      return { ok: true, model: options.model, duration: duration, ratio: ratio, verified: "page-controls" };
     } catch (error) {
       return { ok: false, code: error.code || "prepare_failed", reason: String(error && error.message || error), diagnostics: {
         phase: phase, readyState: document.readyState, editorFound: !!editor(), videoEntryFound: !!videoEntry(),
-        modelControl: modelName(modelButton()), durationControl: durationOf(durationButton()),
+        modelControl: modelName(modelButton()), durationControl: durationOf(durationButton()), ratioControl: ratioOf(durationButton()),
         openMenus: nodes('[role="menu"], [role="dialog"]').length
       } };
     }

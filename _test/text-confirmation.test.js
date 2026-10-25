@@ -39,6 +39,8 @@ test("识别真实wrapper角色的文字确认，检查模型时长并排除用�
   assert.equal(p.api.readProgress().state, "waiting_confirmation");
   assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.0_mini", duration: 10 }).ok, false);
   assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.0", duration: 5 }).ok, false);
+  assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.0_mini", duration: 5, ratio: "16:9" }).ok, true);
+  assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.0_mini", duration: 5, ratio: "9:16" }).ok, false);
   p.add(p.message("paid", request + "需要购买会员升级后支付。", "assistant"));
   assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.0_mini", duration: 5 }).ok, false);
 });

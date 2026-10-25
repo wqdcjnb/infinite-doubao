@@ -1,6 +1,6 @@
 # 豆包工坊
 
-Windows / macOS 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.4.1**。
+Windows / macOS 桌面应用，使用 Electron、JavaScript 和 Python 构建。当前版本为 **1.4.2**。
 
 ## 下载与安装
 
@@ -8,16 +8,16 @@ Windows / macOS 桌面应用，使用 Electron、JavaScript 和 Python 构建。
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | `DoubaoWorkshop-1.4.1-Setup.exe` | 双击安装，通过桌面「豆包工坊」启动 |
-| macOS 13+，Apple 芯片 | `DoubaoWorkshop-1.4.1-mac-arm64.dmg` | 打开镜像，将应用拖入 Applications |
-| macOS 13+，Intel | `DoubaoWorkshop-1.4.1-mac-x64.dmg` | 打开镜像，将应用拖入 Applications |
+| Windows x64 | `DoubaoWorkshop-1.4.2-Setup.exe` | 双击安装，通过桌面「豆包工坊」启动 |
+| macOS 13+，Apple 芯片 | `DoubaoWorkshop-1.4.2-mac-arm64.dmg` | 打开镜像，将应用拖入 Applications |
+| macOS 13+，Intel | `DoubaoWorkshop-1.4.2-mac-x64.dmg` | 打开镜像，将应用拖入 Applications |
 
 Mac 包内置 Python、OpenCV、FFmpeg 和 ffprobe，无需另装开发环境。首版使用临时签名，**尚未经过 Apple Developer ID 签名和公证**，系统可能提示无法验证开发者。项目不修改系统安全设置。Mac 更新时退出旧版，拖入并替换应用，再重新打开；用户数据位于 `~/Library/Application Support/无限豆包`，替换应用不会删除该目录。此内部目录名用于兼容数据。
 
 发行附件中的 `SHA256SUMS.txt` 用于校验下载文件。在 PowerShell 中运行：
 
 ```powershell
-Get-FileHash .\DoubaoWorkshop-1.4.1-Setup.exe -Algorithm SHA256
+Get-FileHash .\DoubaoWorkshop-1.4.2-Setup.exe -Algorithm SHA256
 ```
 
 新安装默认使用 `%LOCALAPPDATA%\Programs\豆包工坊`。升级已有版本会沿用原安装位置和用户数据目录，保留账号、会话、任务、素材和设置。
@@ -37,6 +37,10 @@ Get-FileHash .\DoubaoWorkshop-1.4.1-Setup.exe -Algorithm SHA256
 - 本地 REST API、MCP、SSE 和命令行入口。
 
 生成能力和额度以对应服务实际提供的权限为准。
+
+任务模板的视频时长使用拖动滑块，按 1 秒递增：Seedance 2.5 为 4–30 秒，Seedance 2.0 / Fast / Mini 为 4–15 秒。切换模型时自动收回超出上限的时长；旧版保存的 1–3 秒模板会调整到 4 秒，历史任务和已保存草稿快照保持不变。范围已与豆包页面及 [Seedance 官方文档](https://docs.volcengine.com/docs/ark/video-generation-tutorial?lang=zh)核对。
+
+画面比例提供与豆包一致的七种选项：自动、3:4、4:3、9:16、16:9、1:1、21:9。比例随模板和草稿快照保存；直接生成前核对网页实际选择，云电脑任务则在提示词中注明指定比例。旧模板默认为自动。
 
 在“任务提交”左侧勾选多个不同模板，点击“所选模板加入草稿箱”，添加成功后停留在当前模板，显示成功信息条，方便继续编辑和添加。发送时打开顶部“任务提交”和“任务队列”之间的独立“草稿箱”页面。在页面顶部的“保存 / 发送账号”下拉框指定一个豆包号，点击“① 存入所选账号的豆包草稿”，将所选提示词和参考素材一起保存到该账号网页左侧的原生“草稿”。保存完成后点击“② 一起发送所选草稿”：固定通过工作任务云电脑，由所属账号同时提交。应用先准备全部所选草稿，全部就绪后统一触发发送，再分别核对回执；任何一条的接收或生成耗时都不会阻塞其他条的发送。整批发送后复用现有任务队列取回各条视频；“直接生成视频”和其他正常提交仍按原规则分配账号。
 

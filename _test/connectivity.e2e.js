@@ -27,7 +27,7 @@ if (process.argv.includes("--prepare")) {
   Object.assign(store.get().settings, { downloadDir: path.join(home, "videos") });
   Object.assign(store.get().settings.server, { enabled: false });
   Object.assign(store.get().settings.orchestrator, { maxParallel: 1, pollInterval: 1500, autoDownload: true, taskTimeoutMs: 20000, retryLimit: 1, stopHotkey: "CommandOrControl+Alt+Shift+F9", appeal: false });
-  require("../src/task-templates").create({ name: templateName, prompt, model: "seedance_v2.0_mini", duration: 5 });
+  require("../src/task-templates").create({ name: templateName, prompt, model: "seedance_v2.0_mini", duration: 5, ratio: "9:16" });
   assert.equal(store.save(), true);
   console.log(JSON.stringify({ home, url: base, debugPort: process.env.DM_TEST_CDP_PORT }));
 } else {
@@ -52,7 +52,7 @@ if (process.argv.includes("--prepare")) {
           let response;
           if (submissions.length === 1 && submission.prompt.includes(prompt)) {
             generationRequests++;
-            response = { ok: true, state: "confirmation_required", messageId: "parameter-confirmation-" + Date.now(), text: "视频生成参数确认：模型：Seedance 2.0 Mini；时长：5秒。确认后我再开始生成视频。" };
+            response = { ok: true, state: "confirmation_required", messageId: "parameter-confirmation-" + Date.now(), text: "视频生成参数确认：模型：Seedance 2.0 Mini；时长：5秒；画面比例：9:16。确认后我再开始生成视频。" };
           } else if (generationRequests === 1 && confirmationRequests === 0 && submission.prompt === confirmationPrompt) {
             confirmationRequests++;
             response = { ok: true, state: "generating", messageId: "video-result-" + Date.now(), mediaUrl: "/generated-" + Date.now() + ".mp4?lr=watermark" };
@@ -71,7 +71,7 @@ if (process.argv.includes("--prepare")) {
       <div id="video-options" hidden><button type="button" id="model-picker" role="button" aria-expanded="false">模型 Seedance 2.0 Fast</button><button type="button" id="duration-picker" role="button" aria-expanded="false">自动 · 10s</button></div><div id="menus"></div>
       <form id="composer"><textarea placeholder="输入提示词"></textarea>${menuEntry ? '<button type="button" id="chat-mode" aria-haspopup="menu" aria-expanded="false">对话</button><button type="button" id="skills" aria-haspopup="menu" aria-expanded="false">技能</button>' : ''}<button type="submit">生成</button></form>
       <script>
-      let selectedModel='Seedance 2.0 Fast', selectedDuration=10;
+      let selectedModel='Seedance 2.0 Fast', selectedDuration=10, selectedRatio='adaptive';
       const controlEvents={modelPointerDown:0,durationPointerDown:0,durationKeys:[],skillsOpened:0};
       document.querySelector('#new-chat').onclick=()=>document.querySelector('#messages').replaceChildren();
       const chatMode=document.querySelector('#chat-mode'), skills=document.querySelector('#skills');
@@ -79,11 +79,12 @@ if (process.argv.includes("--prepare")) {
       if(skills)skills.onclick=()=>{skills.setAttribute('aria-expanded','true');controlEvents.skillsOpened++;setTimeout(()=>{document.querySelector('#video-mode').hidden=false;},400);};
       document.querySelector('#video-mode').onclick=()=>{document.querySelector('#video-options').hidden=false;document.querySelector('#video-mode').hidden=true;};
       document.querySelector('#model-picker').onpointerdown=(event)=>{if(event.button!==0)return;controlEvents.modelPointerDown++;event.currentTarget.setAttribute('aria-expanded','true');document.querySelector('#menus').innerHTML='<div role="menu"><button role="menuitem" data-model="Seedance 2.5">Seedance 2.5 升级</button><button role="menuitem" data-model="Seedance 2.0">Seedance 2.0 升级</button><button role="menuitem" data-model="Seedance 2.0 Fast">Seedance 2.0 Fast 快速生成</button><button role="menuitem" data-model="Seedance 2.0 Mini">Seedance 2.0 Mini 日常创作</button></div>';};
-      document.querySelector('#duration-picker').onpointerdown=(event)=>{if(event.button!==0)return;controlEvents.durationPointerDown++;const opened=event.currentTarget.getAttribute('aria-expanded')==='true';event.currentTarget.setAttribute('aria-expanded',String(!opened));if(opened){document.querySelector('#menus').replaceChildren();return;}document.querySelector('#menus').innerHTML='<div role="menu" data-state="open"><span>视频时长</span><span>4s</span><div role="slider" tabindex="0" aria-label="视频时长" aria-valuemin="0" aria-valuemax="11" aria-valuenow="'+(selectedDuration-4)+'" style="width:260px;height:24px;background:lightgray"></div><span>15s</span></div>';};
-      document.querySelector('#menus').onpointerup=(event)=>{const model=event.target.closest('[data-model]');if(!model)return;selectedModel=model.dataset.model;document.querySelector('#model-picker').textContent='模型 '+selectedModel;document.querySelector('#model-picker').setAttribute('aria-expanded','false');document.querySelector('#menus').replaceChildren();};
-      document.querySelector('#menus').onkeydown=(event)=>{const slider=event.target.closest('[role="slider"]');if(!slider||!['ArrowLeft','ArrowRight'].includes(event.key))return;event.preventDefault();controlEvents.durationKeys.push(event.key);selectedDuration=Math.max(4,Math.min(15,selectedDuration+(event.key==='ArrowRight'?1:-1)));slider.setAttribute('aria-valuenow',String(selectedDuration-4));document.querySelector('#duration-picker').textContent='自动 · '+selectedDuration+'s';};
+      document.querySelector('#duration-picker').onpointerdown=(event)=>{if(event.button!==0)return;controlEvents.durationPointerDown++;const opened=event.currentTarget.getAttribute('aria-expanded')==='true';event.currentTarget.setAttribute('aria-expanded',String(!opened));if(opened){document.querySelector('#menus').replaceChildren();return;}document.querySelector('#menus').innerHTML='<div role="menu" data-state="open"><span>画面比例</span>'+['adaptive','3:4','4:3','9:16','16:9','1:1','21:9'].map(r=>'<button data-ratio="'+r+'">'+(r==='adaptive'?'自动':r)+'</button>').join('')+'<span>视频时长</span><span>4s</span><div role="slider" tabindex="0" aria-label="视频时长" aria-valuemin="0" aria-valuemax="11" aria-valuenow="'+(selectedDuration-4)+'" style="width:260px;height:24px;background:lightgray"></div><span>15s</span></div>';};
+      function updateDuration(){document.querySelector('#duration-picker').textContent=(selectedRatio==='adaptive'?'自动':selectedRatio)+' · '+selectedDuration+'s';}
+      document.querySelector('#menus').onpointerup=(event)=>{const ratio=event.target.closest('[data-ratio]');if(ratio){selectedRatio=ratio.dataset.ratio;updateDuration();return;}const model=event.target.closest('[data-model]');if(!model)return;selectedModel=model.dataset.model;document.querySelector('#model-picker').textContent='模型 '+selectedModel;document.querySelector('#model-picker').setAttribute('aria-expanded','false');document.querySelector('#menus').replaceChildren();};
+      document.querySelector('#menus').onkeydown=(event)=>{const slider=event.target.closest('[role="slider"]');if(!slider||!['ArrowLeft','ArrowRight'].includes(event.key))return;event.preventDefault();controlEvents.durationKeys.push(event.key);selectedDuration=Math.max(4,Math.min(15,selectedDuration+(event.key==='ArrowRight'?1:-1)));slider.setAttribute('aria-valuenow',String(selectedDuration-4));updateDuration();};
       function appendMessage(role,id,text){const wrapper=document.createElement('div');wrapper.dataset.messageRole=role;const row=document.createElement('div');row.dataset.messageId=id;row.textContent=text;wrapper.append(row);document.querySelector('#messages').append(wrapper);return row;}
-      document.querySelector('form').onsubmit=async(e)=>{e.preventDefault();const editor=document.querySelector('textarea');const prompt=editor.value;appendMessage('user','user-message-'+Date.now(),prompt);editor.value='';const response=await fetch('/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,model:selectedModel,duration:selectedDuration,controlEvents})});const result=await response.json();if(result.state==='confirmation_required'){appendMessage('assistant',result.messageId,result.text);return;}if(!result.ok){appendMessage('assistant','failed-'+Date.now(),result.text);return;}const row=appendMessage('assistant',result.messageId,'正在生成 10%');setTimeout(()=>{row.innerHTML='生成完成 100%<video controls src="'+result.mediaUrl+'"></video>';},1800);};</script>
+      document.querySelector('form').onsubmit=async(e)=>{e.preventDefault();const editor=document.querySelector('textarea');const prompt=editor.value;appendMessage('user','user-message-'+Date.now(),prompt);editor.value='';const response=await fetch('/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,model:selectedModel,duration:selectedDuration,ratio:selectedRatio,controlEvents})});const result=await response.json();if(result.state==='confirmation_required'){appendMessage('assistant',result.messageId,result.text);return;}if(!result.ok){appendMessage('assistant','failed-'+Date.now(),result.text);return;}const row=appendMessage('assistant',result.messageId,'正在生成 10%');setTimeout(()=>{row.innerHTML='生成完成 100%<video controls src="'+result.mediaUrl+'"></video>';},1800);};</script>
       </body></html>`);
     });
     await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
@@ -107,6 +108,7 @@ if (process.argv.includes("--prepare")) {
       };
       const paths = await c.eval("DM.paths()");
       assert.equal(path.resolve(paths.home), home);
+      await wait(() => c.eval("document.querySelector('#vbServer')?.textContent"), (value) => value === "API 关");
       if (process.argv.includes("--verify-restart")) {
         const state = (await c.eval("DM.call('dm:state')")).data;
         assert.equal(state.settings.orchestrator.stopHotkey, "CommandOrControl+Alt+Shift+F8");
@@ -147,8 +149,10 @@ if (process.argv.includes("--prepare")) {
       assert.ok(submissions[0].prompt.includes(prompt));
       assert.equal(submissions[0].model, "Seedance 2.0 Mini");
       assert.equal(submissions[0].duration, 5);
+      assert.equal(submissions[0].ratio, "9:16");
+      assert.equal(task.ratio, "9:16");
       assert.equal(submissions[0].controlEvents.modelPointerDown, 1);
-      assert.equal(submissions[0].controlEvents.durationPointerDown, 2);
+      assert.equal(submissions[0].controlEvents.durationPointerDown, 4);
       assert.equal(submissions[0].controlEvents.skillsOpened, menuEntry ? 1 : 0);
       assert.deepEqual(submissions[0].controlEvents.durationKeys, Array(5).fill("ArrowLeft"));
       assert.ok(mediaRequests.some((url) => url.includes("lr=unwatermarked")));

@@ -21,7 +21,7 @@
       <div class="brand">
         <div class="brand-text">
           <strong>豆包工坊</strong>
-          <span class="brand-sub"><i class="pulse"></i>DOUBAO WORKSHOP <em id="verText">v1.3.6</em></span>
+          <span class="brand-sub"><i class="pulse"></i>DOUBAO WORKSHOP <em id="verText">v1.4.2</em></span>
         </div>
       </div>
 
@@ -174,8 +174,13 @@
               <div class="field"><label for="templatePrompt">提示词</label><textarea id="templatePrompt" rows="5" placeholder="描述主体、动作、场景和镜头语言。每次提交都会使用这份模板的当前内容。"></textarea></div>
               <div class="template-options">
                 <div class="field"><label for="templateModel">视频模型</label><select id="templateModel"></select></div>
-                <div class="field"><label for="templateDuration">视频时长</label><select id="templateDuration"></select></div>
+                <div class="field template-duration">
+                  <div class="duration-heading"><label for="templateDuration">视频时长</label><output id="templateDurationValue" for="templateDuration">30 秒</output></div>
+                  <input id="templateDuration" type="range" min="4" max="30" step="1" value="30" aria-valuetext="30 秒" />
+                  <div class="duration-limits" aria-hidden="true"><span id="templateDurationMin">4 秒</span><span id="templateDurationMax">30 秒</span></div>
+                </div>
               </div>
+              <div class="field"><label id="templateRatioLabel">画面比例</label><div id="templateRatio" class="ratio-options" role="group" aria-labelledby="templateRatioLabel"></div></div>
               <p class="hint template-options-hint">按应用现有模型档位选择，实际生成能力以账号页面为准。</p>
               <div class="template-attachment-head"><strong>参考附件 <span id="attachmentCount">0 个</span></strong><button class="ghost tiny" id="templateAddFiles">＋ 添加图片 / 视频</button></div>
               <input id="templateFileInput" type="file" multiple accept=".jpg,.jpeg,.png,.webp,.gif,.bmp,.mp4,.mov,.webm,.m4v,.avi,.mkv" hidden />

@@ -42,7 +42,7 @@ const models = [
       await click('#templateNew');
       await wait(`document.querySelector('#templateModel').value === ${JSON.stringify(model)} && document.querySelector('#templateDuration').value === '${cap}'`);
       assert.deepEqual(await c.eval("Array.from(document.querySelector('#templateModel').options).map(o => [o.value,o.textContent])"), models.map(([value, label]) => [value, label]));
-      assert.equal(await c.eval("document.querySelector('#templateDuration').options.length"), cap);
+      assert.equal(await c.eval("document.querySelector('#templateDuration').max"), String(cap));
       await click('.vtab[data-view="settings"]');
       await wait(`!!${row("默认模型")}`);
     }
@@ -59,7 +59,7 @@ const models = [
     await wait("document.querySelector('#templateModel').value === 'seedance_v2.0_mini'");
     await c.eval("document.querySelector('#templateModel').value = 'seedance_v2.5'; document.querySelector('#templateModel').dispatchEvent(new Event('change')); document.querySelector('#templateDuration').value = '30'; document.querySelector('#templateModel').value = 'seedance_v2.0_fast'; document.querySelector('#templateModel').dispatchEvent(new Event('change'));");
     assert.equal(await c.eval("document.querySelector('#templateDuration').value"), '15');
-    assert.equal(await c.eval("document.querySelector('#templateDuration').options.length"), 15);
+    assert.equal(await c.eval("document.querySelector('#templateDuration').max"), "15");
     await click('#templateSave');
     await wait("document.querySelector('#templateSaveState').textContent.startsWith('已保存')");
     console.log('PASS: 四种模型顺序/名称一致；默认设置与模板时长限制正确；新模板继承默认模型；刷新保留；指定说明与内核区域已删除');

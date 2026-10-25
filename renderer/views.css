@@ -76,6 +76,18 @@
 .template-editor textarea { font-family: var(--ui); font-size: 13px; line-height: 1.8; }
 .template-editor .field label { font-family: var(--ui); font-size: 12px; letter-spacing: 0; }
 .template-options { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.duration-heading, .duration-limits { display: flex; justify-content: space-between; align-items: center; }
+.duration-heading label { margin: 0; }
+.duration-heading output { font-size: 13px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.template-duration input[type="range"] { width: 100%; margin: 14px 0 11px; background: linear-gradient(to right, var(--cyan) var(--duration-progress, 100%), var(--line) var(--duration-progress, 100%)); }
+.template-duration input[type="range"]:focus-visible { outline: 2px solid var(--cyan); outline-offset: 5px; }
+.duration-limits { font-size: 11px; color: var(--text-mute); }
+.ratio-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.ratio-option { min-width: 58px; height: 62px; display: flex; flex-direction: column; justify-content: center; gap: 8px; font-size: 11px; box-shadow: none; background: var(--panel); }
+.ratio-option[aria-pressed="true"] { color: var(--cyan); border-color: var(--cyan); background: var(--bg-2); }
+.ratio-option:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.ratio-shape { display: block; flex-shrink: 0; width: var(--ratio-width); height: var(--ratio-height); border: 1px solid currentColor; border-radius: 2px; }
+.ratio-shape.auto { border-style: dashed; }
 .template-options-hint { margin-top: 0; margin-bottom: 22px; }
 .template-attachment-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 12px; }
 .template-attachment-head strong span { color: var(--text-mute); font-size: 11px; font-weight: 400; margin-left: 7px; }

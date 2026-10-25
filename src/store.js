@@ -36,12 +36,14 @@ const LOCKED = {
   enhancer: { enabled: true }
 };
 
-/* 设置和任务模板共用模型清单：只有 2.5 上限 30 秒，其余上限 15 秒。 */
+/* Seedance 2.x 按整数秒选择：4 秒起，2.5 上限 30 秒，其余上限 15 秒。 */
+const MIN_VIDEO_DURATION = 4;
+const VIDEO_RATIOS = ["adaptive", "3:4", "4:3", "9:16", "16:9", "1:1", "21:9"];
 const MODEL_OPTIONS = [
-  { value: "seedance_v2.5", label: "Seedance 2.5", maxDuration: 30 },
-  { value: "seedance_v2.0", label: "Seedance 2.0", maxDuration: 15 },
-  { value: "seedance_v2.0_fast", label: "Seedance 2.0 Fast", maxDuration: 15 },
-  { value: "seedance_v2.0_mini", label: "Seedance 2.0 Mini", maxDuration: 15 }
+  { value: "seedance_v2.5", label: "Seedance 2.5", minDuration: MIN_VIDEO_DURATION, maxDuration: 30 },
+  { value: "seedance_v2.0", label: "Seedance 2.0", minDuration: MIN_VIDEO_DURATION, maxDuration: 15 },
+  { value: "seedance_v2.0_fast", label: "Seedance 2.0 Fast", minDuration: MIN_VIDEO_DURATION, maxDuration: 15 },
+  { value: "seedance_v2.0_mini", label: "Seedance 2.0 Mini", minDuration: MIN_VIDEO_DURATION, maxDuration: 15 }
 ];
 const MODEL_LIMITS = Object.fromEntries(MODEL_OPTIONS.map((m) => [m.value, m.maxDuration]));
 const DEFAULT_MODEL = "seedance_v2.5";
@@ -52,15 +54,16 @@ function maxDurationFor(model) {
   return MODEL_LIMITS[key] || 15;
 }
 
-/** 按当前模型把时长压回上限内（模型换了、时长没跟上时用） */
+/** 按当前模型把时长限制在有效范围内（模型换了、时长没跟上时用） */
 function clampEnhancer(enh) {
   const out = { ...(enh || {}) };
   out.enabled = true;
   out.resolution = out.resolution || "auto";
   out.model = String(out.model || DEFAULT_MODEL);
+  out.ratio = VIDEO_RATIOS.includes(out.ratio) ? out.ratio : "adaptive";
   const cap = maxDurationFor(out.model);
   const want = Number(out.duration) || DEFAULT_DURATION;
-  out.duration = Math.min(Math.max(1, Math.round(want)), cap);
+  out.duration = Math.min(Math.max(MIN_VIDEO_DURATION, Math.round(want)), cap);
   return out;
 }
 
@@ -225,6 +228,12 @@ function migrate(raw) {
   out.proxies = Array.isArray(out.proxies) ? out.proxies : [];
   out.storyboards = Array.isArray(out.storyboards) ? out.storyboards : [];
   out.taskTemplates = Array.isArray(out.taskTemplates) ? out.taskTemplates : [];
+  // 修正旧版允许保存的 1–3 秒模板；已提交任务和网页草稿保留原始快照。
+  out.taskTemplates = out.taskTemplates.map((template) => {
+    if (!template || !Object.hasOwn(MODEL_LIMITS, template.model)) return template;
+    const duration = Number(template.duration);
+    return { ...template, ratio: template.ratio || "adaptive", duration: Number.isFinite(duration) && duration < MIN_VIDEO_DURATION ? MIN_VIDEO_DURATION : template.duration };
+  });
   out.taskDrafts = Array.isArray(out.taskDrafts) ? out.taskDrafts : [];
   out.tasks = Array.isArray(out.tasks) ? out.tasks : [];
   out.assets = out.assets && typeof out.assets === "object" ? out.assets : base.assets;
@@ -354,6 +363,8 @@ module.exports = {
   LOCKED,
   MODEL_OPTIONS,
   MODEL_LIMITS,
+  MIN_VIDEO_DURATION,
+  VIDEO_RATIOS,
   maxDurationFor,
   clampEnhancer,
   newId,

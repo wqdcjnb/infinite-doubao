@@ -36,7 +36,7 @@ function newTask(input) {
     instanceId: String(input.instanceId || ""), instanceName: "", kind: String(input.kind || "video"),
     templateId: String(input.templateId || ""), templateName: String(input.templateName || ""),
     executionMode: input.executionMode === "work" ? "work" : "video",
-    model: String(input.model || ""), duration: Number(input.duration) || 0,
+    model: String(input.model || ""), duration: Number(input.duration) || 0, ratio: String(input.ratio || "adaptive"),
     prompt: String(input.prompt || ""), refs: Array.isArray(input.refs) ? input.refs : [],
     status: "queued", stage: "waiting_account", progress: 0, waitReason: "等待分配账号",
     attempts: 0, retryCount: 0, dedupeKey: String(input.dedupeKey || ""),
@@ -117,7 +117,7 @@ async function beginTracking(driver, task, inst, resume) {
 async function confirmGeneration(driver, task, options, sb) {
   // Older drivers/test adapters only provide the button helper.
   if (!driver.call) { if (options.autoConfirm !== false && driver.confirmGeneration) await driver.confirmGeneration(); return null; }
-  const expected = { model: task.model, duration: task.duration };
+  const expected = { model: task.model, duration: task.duration, ratio: task.ratio };
   const candidate = await driver.call("peekGenerationConfirmation", expected);
   if (!candidate?.kind) return null;
   if (!candidate.ok) return { waiting: true, reason: candidate.reason || "请手动检查生成参数" };
@@ -243,7 +243,7 @@ async function runTask(task, inst, shot, sb) {
       throw Object.assign(new Error(`账号 ${inst.name} 需要登录，登录后将自动继续`), { code: "login_required" });
     }
     if (!task.submittedAt && driver.call) {
-      const prepared = await driver.call(task.executionMode === "work" ? "prepareWorkTask" : "prepareVideoGeneration", { model: task.model, duration: task.duration });
+      const prepared = await driver.call(task.executionMode === "work" ? "prepareWorkTask" : "prepareVideoGeneration", { model: task.model, duration: task.duration, ratio: task.ratio });
       if (!prepared?.ok) {
         if (prepared?.diagnostics) log.warn("video-prepare-failed", { taskId: task.id, instanceId: inst.id, diagnostics: prepared.diagnostics });
         throw Object.assign(new Error(`任务页面未就绪：${prepared?.reason || "无法选择任务模式或参数"}`), {
@@ -458,10 +458,11 @@ async function redispatch(taskId, instanceId) {
 }
 function templateRecords(template, executionMode = "video") {
   const label = store.MODEL_OPTIONS.find((m) => m.value === template.model)?.label || template.model;
-  const prompt = `${template.prompt.trim()}\n\n生成要求：生成 ${template.duration} 秒视频，使用 ${label} 模型。`;
+  const ratio = template.ratio || "adaptive";
+  const prompt = `${template.prompt.trim()}\n\n生成要求：生成 ${template.duration} 秒视频，使用 ${label} 模型。${ratio === "adaptive" ? "" : `画面比例 ${ratio}。`}`;
   const sb = storyboard.normalizeStoryboard({ name: template.name, source: "task-template", shots: [{ title: template.name, videoPrompt: prompt, model: template.model, duration: template.duration, refs: template.attachments.map((a) => a.path) }] });
   const shot = sb.shots[0];
-  const task = newTask({ storyboardId: sb.id, shotId: shot.id, shotIndex: 1, templateId: template.id, templateName: template.name, executionMode, model: template.model, duration: template.duration, prompt, refs: shot.refs.slice() });
+  const task = newTask({ storyboardId: sb.id, shotId: shot.id, shotIndex: 1, templateId: template.id, templateName: template.name, executionMode, model: template.model, duration: template.duration, ratio, prompt, refs: shot.refs.slice() });
   Object.assign(shot, { taskId: task.id, status: "queued" });
   return { sb, task };
 }
@@ -554,7 +555,7 @@ async function saveDrafts(ids, options = {}) {
       if (draft.nativeState === "saved") { count++; continue; }
       const record = templateRecords(draft.template, draft.executionMode);
       try {
-      requirePage(await driver.call("prepareNativeDraft", { executionMode: draft.executionMode, model: record.task.model, duration: record.task.duration }));
+      requirePage(await driver.call("prepareNativeDraft", { executionMode: draft.executionMode, model: record.task.model, duration: record.task.duration, ratio: record.task.ratio }));
       // Save intent before uploading/filling: an interrupted save must not create duplicates.
       drafts.updateMany({ [draft.id]: { instanceId: inst.id, instanceName: inst.name, nativeState: "saving", nativePrompt: record.task.prompt, nativeError: "" } });
       if (record.task.refs.length) requirePage(await driver.pasteFiles(record.task.refs));

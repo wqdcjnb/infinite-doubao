@@ -79,7 +79,7 @@ test("旧分镜逐镜转换一次，附件复制后可用，删除模板不重�
 
 test("校验提示词、模型、时长与缺失附件，删除模板不破坏任务快照", async () => {
   assert.throws(() => templates.create({ model: "invalid" }), /请选择/);
-  assert.throws(() => templates.create({ model: "seedance_v2.0", duration: 30 }), /1–15/);
+  assert.throws(() => templates.create({ model: "seedance_v2.0", duration: 30 }), /4–15/);
   const item = templates.create();
   assert.throws(() => templates.snapshot(item.id), /提示词/);
   templates.update(item.id, { prompt: "original" });
@@ -112,6 +112,50 @@ test("四种模型在设置、模板中一致，只有 2.5 允许 30 秒", () =>
     assert.throws(() => templates.update(item.id, { duration: cap + 1 }), /时长应为/);
   }
   assert.equal(store.maxDurationFor("unknown"), 15);
+});
+
+test("视频时长从 4 秒开始，模板和草稿均拒绝越界或小数秒", () => {
+  for (const { value: model, minDuration, maxDuration } of templates.options().models) {
+    assert.equal(minDuration, 4);
+    for (const duration of [0, 1, 2, 3, 4.5, maxDuration + 1]) {
+      assert.throws(() => templates.create({ model, duration }), /时长应为/);
+    }
+    const item = templates.create({ model, duration: 4, prompt: "边界测试" });
+    assert.equal(templates.snapshot(item.id).duration, 4);
+    templates.update(item.id, { duration: maxDuration });
+    assert.equal(templates.snapshot(item.id).duration, maxDuration);
+    assert.throws(() => templates.update(item.id, { duration: 3 }), /时长应为/);
+    assert.throws(() => templates.validateSnapshot({ ...item, duration: 3 }), /时长应为/);
+    assert.equal(store.clampEnhancer({ model, duration: 3 }).duration, 4);
+  }
+});
+
+test("旧版 1–3 秒模板升级为 4 秒，历史任务与草稿快照保持不变", () => {
+  const item = templates.create({ model: "seedance_v2.0_mini", duration: 4, prompt: "保留提示词" });
+  item.duration = 2;
+  store.get().settings.enhancer.duration = 2;
+  store.get().tasks.push({ id: "history", duration: 2 });
+  store.get().taskDrafts.push({ id: "saved-draft", template: { ...item } });
+  assert.equal(store.save(), true);
+  store.load();
+  assert.equal(templates.get(item.id).duration, 4);
+  assert.equal(templates.get(item.id).prompt, "保留提示词");
+  assert.equal(store.get().settings.enhancer.duration, 4);
+  assert.equal(store.get().tasks[0].duration, 2);
+  assert.equal(store.get().taskDrafts[0].template.duration, 2);
+});
+
+test("七种比例可保存，草稿保持快照，非法比例拒绝写入", () => {
+  const expected = ["adaptive", "3:4", "4:3", "9:16", "16:9", "1:1", "21:9"];
+  assert.deepEqual(templates.options().ratios.map((r) => r.value), expected);
+  const drafts = require("../src/task-drafts");
+  const item = templates.create({ prompt: "比例测试", ratio: "9:16" });
+  const draft = drafts.create(item.id);
+  for (const ratio of expected) assert.equal(templates.update(item.id, { ratio }).ratio, ratio);
+  assert.throws(() => templates.update(item.id, { ratio: "2:1" }), /画面比例/);
+  store.load();
+  assert.equal(templates.get(item.id).ratio, "21:9");
+  assert.equal(drafts.list().find((d) => d.id === draft.id).template.ratio, "9:16");
 });
 
 test("视频上传保留 video MIME，任一文件丢失时不静默少传", async () => {
@@ -151,7 +195,7 @@ test("多次提交独立排队，快照不随模板编辑变化，无重复任�
     send: async () => ({ ok: true }), readProgress: async () => ({ state: "done", mediaUrls: [`https://fixture.invalid/task-${calls.length}.mp4?lr=watermark`] }), evaluate: async () => []
   };
   orchestrator.init({ findWebContents: () => ({}), resolveDriver: async () => driver });
-  const item = templates.create({ prompt: "原始提示词", model: "seedance_v2.0", duration: 10 });
+  const item = templates.create({ prompt: "原始提示词", model: "seedance_v2.0", duration: 10, ratio: "9:16" });
   await templates.importAttachments(item.id, [fixture("reference.mp4")]);
   const first = orchestrator.submitTemplate(templates.snapshot(item.id));
   const second = orchestrator.submitTemplate(templates.snapshot(item.id));
@@ -162,6 +206,7 @@ test("多次提交独立排队，快照不随模板编辑变化，无重复任�
   await done();
   assert.deepEqual(store.get().tasks.map((t) => t.status), ["succeeded", "succeeded"]);
   assert.equal(store.get().tasks.length, 2);
+  assert.ok(store.get().tasks.every((task) => task.ratio === "9:16" && task.prompt.includes("画面比例 9:16")));
   assert.ok(calls.filter(([kind]) => kind === "prompt").every(([, text]) => text.includes("原始提示词") && text.includes("10 秒") && text.includes("Seedance 2.0")));
   assert.equal(calls.filter(([kind]) => kind === "files").length, 2);
   assert.equal(calls.filter(([kind]) => kind === "options").length, 4);

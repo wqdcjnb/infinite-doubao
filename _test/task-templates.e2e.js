@@ -55,7 +55,7 @@ const prompt = "午后阳光洒进咖啡馆，年轻人戴着白色耳机坐在�
     await fill("#templateName", name);
     await fill("#templatePrompt", prompt);
     await fill("#templateModel", "seedance_v2.0", "change");
-    assert.equal(await c.eval("document.querySelector('#templateDuration').options.length"), 15);
+    assert.deepEqual(await c.eval("(() => { const r=document.querySelector('#templateDuration'); return [r.type,r.min,r.max,r.step]; })()"), ["range", "4", "15", "1"]);
     await fill("#templateDuration", "15");
     await click("#templateSave");
     await wait("document.querySelector('#templateSaveState').textContent.startsWith('已保存')");

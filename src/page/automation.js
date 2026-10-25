@@ -295,6 +295,10 @@
         var model = content.match(/Seedance\s*2\.\d+(?:\s+(?:Fast|Mini))?/i);
         var seconds = content.match(/时长\s*[:：]?\s*(\d+)\s*秒/);
         if (!model || model[0].replace(/\s+/g, " ").toLowerCase() !== String(labels[options.model] || "").toLowerCase() || !seconds || Number(seconds[1]) !== Number(options.duration)) reason = "平台确认的模型或时长与任务不一致，请手动检查";
+        if (options.ratio && options.ratio !== "adaptive") {
+          var ratio = content.match(/(?:画面比例|宽高比|比例)\s*[:：]?\s*(\d+)\s*[:：]\s*(\d+)/);
+          if (!ratio || ratio[1] + ":" + ratio[2] !== options.ratio) reason = "平台未确认所选画面比例，请手动检查";
+        }
       }
       return { ok: !reason, kind: kind, key: key, text: kind === "text" ? "确认，开始生成视频。" : txt(buttons[0]), reason: reason, button: buttons[0] || null, alreadyConfirmed: tracking.confirmed.indexOf(key) >= 0 };
     }

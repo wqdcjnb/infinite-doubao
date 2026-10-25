@@ -18,6 +18,7 @@ const newId = () => crypto.randomBytes(12).toString("hex");
 function options() {
   return {
     models: store.MODEL_OPTIONS,
+    ratios: store.VIDEO_RATIOS.map((value) => ({ value, label: value === "adaptive" ? "自动" : value })),
     defaults: store.get().settings.enhancer,
     directory: P.dir("attachments")
   };
@@ -35,13 +36,15 @@ function values(input, previous = {}) {
   const defaults = store.get().settings.enhancer;
   const model = String(input.model ?? previous.model ?? defaults.model);
   const duration = Number(input.duration ?? previous.duration ?? defaults.duration);
+  const ratio = String(input.ratio ?? previous.ratio ?? defaults.ratio ?? "adaptive");
   if (!Object.hasOwn(store.MODEL_LIMITS, model)) throw new Error("请选择列表中的模型");
-  if (!Number.isInteger(duration) || duration < 1 || duration > store.maxDurationFor(model)) {
-    throw new Error(`当前模型的时长应为 1–${store.maxDurationFor(model)} 秒`);
+  if (!Number.isInteger(duration) || duration < store.MIN_VIDEO_DURATION || duration > store.maxDurationFor(model)) {
+    throw new Error(`当前模型的时长应为 ${store.MIN_VIDEO_DURATION}–${store.maxDurationFor(model)} 秒（整数）`);
   }
+  if (!store.VIDEO_RATIOS.includes(ratio)) throw new Error("请选择列表中的画面比例");
   return {
     name: String(input.name ?? previous.name ?? "未命名模板").trim() || "未命名模板",
-    prompt: String(input.prompt ?? previous.prompt ?? ""), model, duration,
+    prompt: String(input.prompt ?? previous.prompt ?? ""), model, duration, ratio,
     updatedAt: new Date().toISOString()
   };
 }

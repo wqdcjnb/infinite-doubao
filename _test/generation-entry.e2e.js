@@ -23,7 +23,7 @@ async function fixture(scenario) {
       return;
     }
     const render = () => {
-    controls.innerHTML = scenario === "combobox" ? '<div role="combobox" id="model" tabindex="0">Seedance 2.0 Mini</div><div role="combobox" tabindex="0">5s</div>' : '<button type="button" id="model">Seedance 2.0 Mini</button><button type="button">5s</button>';
+    controls.innerHTML = scenario === "combobox" ? '<div role="combobox" id="model" tabindex="0">Seedance 2.0 Mini</div><div role="combobox" tabindex="0">自动 · 5s</div>' : '<button type="button" id="model">Seedance 2.0 Mini</button><button type="button">自动 · 5s</button>';
     document.querySelector("#model").onclick = () => {
       popup.innerHTML = scenario === "missing-model" ? '<div role="menu">加载中</div>' : '<div role="menu"><button role="menuitem" id="paid">Seedance 2.5 升级</button></div>';
       const paid = document.querySelector("#paid");

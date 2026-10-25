@@ -285,13 +285,40 @@ function renderTemplateList() {
 function renderDuration(value) {
   const model = V.templateOptions.models.find((m) => m.value === q("#templateModel").value);
   const input = q("#templateDuration");
-  input.replaceChildren();
-  for (let second = 1; second <= model.maxDuration; second++) {
-    const option = node("option", "", `${second} 秒`);
-    option.value = String(second);
-    input.appendChild(option);
+  input.min = String(model.minDuration);
+  input.max = String(model.maxDuration);
+  input.value = String(Math.max(model.minDuration, Math.min(Math.round(Number(value) || 5), model.maxDuration)));
+  q("#templateDurationMin").textContent = `${model.minDuration} 秒`;
+  q("#templateDurationMax").textContent = `${model.maxDuration} 秒`;
+  renderDurationValue();
+}
+
+function renderDurationValue() {
+  const input = q("#templateDuration");
+  const label = `${input.value} 秒`;
+  q("#templateDurationValue").value = label;
+  input.setAttribute("aria-valuetext", label);
+  input.style.setProperty("--duration-progress", `${(Number(input.value) - Number(input.min)) / (Number(input.max) - Number(input.min)) * 100}%`);
+}
+
+function renderRatio(value) {
+  const box = q("#templateRatio");
+  box.dataset.value = value;
+  box.replaceChildren();
+  for (const ratio of V.templateOptions.ratios) {
+    const button = node("button", "ratio-option", ratio.label);
+    button.type = "button";
+    button.dataset.ratio = ratio.value;
+    button.setAttribute("aria-pressed", String(ratio.value === value));
+    const shape = node("i", "ratio-shape" + (ratio.value === "adaptive" ? " auto" : ""));
+    shape.setAttribute("aria-hidden", "true");
+    const [w, h] = ratio.value === "adaptive" ? [1, 1] : ratio.value.split(":").map(Number);
+    shape.style.setProperty("--ratio-width", `${20 * w / Math.max(w, h)}px`);
+    shape.style.setProperty("--ratio-height", `${20 * h / Math.max(w, h)}px`);
+    button.prepend(shape);
+    button.addEventListener("click", () => { renderRatio(ratio.value); markTemplateDirty(); });
+    box.appendChild(button);
   }
-  input.value = String(Math.max(1, Math.min(Number(value) || 5, model.maxDuration)));
 }
 
 function renderTemplateEditor() {
@@ -310,6 +337,7 @@ function renderTemplateEditor() {
   }
   model.value = template.model;
   renderDuration(template.duration);
+  renderRatio(template.ratio || "adaptive");
   q("#templateSaveState").textContent = `已保存 · ${fmtTime(template.updatedAt)}`;
   q("#templateAttachmentDir").textContent = V.templateOptions.directory;
   renderTemplateAttachments(template);
@@ -349,10 +377,10 @@ function markTemplateDirty() {
 async function saveTemplate() {
   if (!V.activeTemplate) return null;
   const id = V.activeTemplate;
-  const patch = { name: q("#templateName").value, prompt: q("#templatePrompt").value, model: q("#templateModel").value, duration: Number(q("#templateDuration").value) };
+  const patch = { name: q("#templateName").value, prompt: q("#templatePrompt").value, model: q("#templateModel").value, duration: Number(q("#templateDuration").value), ratio: q("#templateRatio").dataset.value };
   const item = await call("dm:template:update", id, patch);
   V.templates = V.templates.map((t) => t.id === id ? item : t);
-  const current = { name: q("#templateName").value, prompt: q("#templatePrompt").value, model: q("#templateModel").value, duration: Number(q("#templateDuration").value) };
+  const current = { name: q("#templateName").value, prompt: q("#templatePrompt").value, model: q("#templateModel").value, duration: Number(q("#templateDuration").value), ratio: q("#templateRatio").dataset.value };
   V.templateDirty = JSON.stringify(current) !== JSON.stringify(patch);
   renderTemplateList();
   q("#templateSaveState").textContent = V.templateDirty ? "有未保存的修改" : `已保存 · ${fmtTime(item.updatedAt)}`;
@@ -447,6 +475,7 @@ function bindTemplateEvents() {
   q("#templateFileInput").addEventListener("change", () => guard(attachTemplateFiles));
   q("#templateOpenDir").addEventListener("click", () => DM.openPath(V.templateOptions.directory));
   for (const selector of ["#templateName", "#templatePrompt", "#templateDuration"]) q(selector).addEventListener("input", markTemplateDirty);
+  q("#templateDuration").addEventListener("input", renderDurationValue);
   q("#templateModel").addEventListener("change", () => { renderDuration(q("#templateDuration").value); markTemplateDirty(); });
 }
 
