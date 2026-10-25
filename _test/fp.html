@@ -1,0 +1,98 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>FP PROBE</title>
+<script>
+// 页面自己最早的一次读取：证明注入发生在首帧脚本之前，而不是事后补丁
+window.__early = {
+  ua: navigator.userAgent,
+  lang: navigator.language,
+  langs: (navigator.languages || []).join(","),
+  cores: navigator.hardwareConcurrency,
+  mem: navigator.deviceMemory,
+  screen: [screen.width, screen.height, devicePixelRatio].join("x"),
+  tz: (function(){ try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch(e){ return "?"; } })()
+};
+</script>
+<style>
+body{background:#0b0f14;color:#cfe3f2;font:12px/1.6 Consolas,monospace;padding:16px}
+h3{color:#2fd6a5;font-size:12px;letter-spacing:2px;margin:14px 0 6px}
+pre{background:#0f1620;border:1px solid #1e2c3a;border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-all}
+</style></head>
+<body>
+<h3>NAVIGATOR</h3><pre id="nav"></pre>
+<h3>SCREEN / WINDOW</h3><pre id="scr"></pre>
+<h3>WEBGL</h3><pre id="gl"></pre>
+<h3>TOUCH / MEMORY</h3><pre id="misc"></pre>
+<h3>UA-CH</h3><pre id="ch"></pre>
+<h3>ANTI-DETECT</h3><pre id="anti"></pre>
+<h3>EARLY READ (head)</h3><pre id="early"></pre>
+<script>
+o("early", window.__early || null);
+const o = (id, v) => { document.getElementById(id).textContent = typeof v === "string" ? v : JSON.stringify(v, null, 2); };
+
+o("nav", {
+  userAgent: navigator.userAgent,
+  appVersion: navigator.appVersion,
+  platform: navigator.platform,
+  vendor: navigator.vendor,
+  language: navigator.language,
+  languages: navigator.languages,
+  hardwareConcurrency: navigator.hardwareConcurrency,
+  deviceMemory: navigator.deviceMemory,
+  maxTouchPoints: navigator.maxTouchPoints,
+  webdriver: navigator.webdriver,
+  plugins: navigator.plugins.length,
+  toStringUA: Navigator.prototype.userAgent.get ? "getter" : "value"
+});
+
+o("scr", {
+  screen: [screen.width, screen.height, screen.availWidth, screen.availHeight],
+  colorDepth: screen.colorDepth,
+  pixelDepth: screen.pixelDepth,
+  devicePixelRatio: devicePixelRatio,
+  inner: [innerWidth, innerHeight],
+  outer: [outerWidth, outerHeight],
+  tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  tzOffset: new Date().getTimezoneOffset()
+});
+
+try {
+  const c = document.createElement("canvas");
+  const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
+  const dbg = gl && gl.getExtension("WEBGL_debug_renderer_info");
+  o("gl", {
+    vendor: gl ? gl.getParameter(gl.VENDOR) : null,
+    renderer: gl ? gl.getParameter(gl.RENDERER) : null,
+    unmaskedVendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : null,
+    unmaskedRenderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : null,
+    version: gl ? gl.getParameter(gl.VERSION) : null,
+    maxTexture: gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : null
+  });
+} catch (e) { o("gl", "ERR " + e.message); }
+
+o("misc", {
+  ontouchstart: "ontouchstart" in window,
+  touchPoints: navigator.maxTouchPoints,
+  deviceMemory: navigator.deviceMemory,
+  chromeRuntime: typeof window.chrome,
+  chromeRuntimeId: window.chrome && window.chrome.runtime ? String(window.chrome.runtime.id || "no-id") : "none"
+});
+
+(async () => {
+  try {
+    const d = navigator.userAgentData;
+    if (!d) { o("ch", "no userAgentData"); return; }
+    const hi = await d.getHighEntropyValues(["architecture","bitness","model","platformVersion","uaFullVersion","fullVersionList","wow64"]);
+    o("ch", { brands: d.brands, mobile: d.mobile, platform: d.platform, highEntropy: hi });
+  } catch (e) { o("ch", "ERR " + e.message); }
+})();
+
+o("anti", {
+  uaNative: Function.prototype.toString.call(Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgent").get),
+  platformNative: Function.prototype.toString.call(Object.getOwnPropertyDescriptor(Navigator.prototype, "platform").get),
+  hardwareNative: Function.prototype.toString.call(Object.getOwnPropertyDescriptor(Navigator.prototype, "hardwareConcurrency").get),
+  wdNative: Object.getOwnPropertyDescriptor(Navigator.prototype, "webdriver") ? Function.prototype.toString.call(Object.getOwnPropertyDescriptor(Navigator.prototype, "webdriver").get) : "none"
+});
+</script>
+</body>
+</html>

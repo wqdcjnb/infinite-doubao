@@ -1,0 +1,44 @@
+# Only publish project sources; local runtime data and build outputs stay private.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/package.json
+!/src/
+!/renderer/
+!/installer/
+!/py/
+!/tools/
+!/docs/
+!/build/
+
+/build/*
+!/build/build.mjs
+!/build/installer.mjs
+
+!/_test/
+/_test/*
+!/_test/*.js
+!/_test/*.cjs
+!/_test/*.py
+!/_test/*.cs
+!/_test/*.ps1
+!/_test/*.html
+
+**/node_modules/
+**/__pycache__/
+*.pyc
+*.pyo
+*.log
+*.exe
+*.dll
+*.zip
+.env
+.env.*
+api-token.txt
+secrets.json
+store.json
+Cookies
+Cookies-journal
+Login Data
+Login Data-journal

@@ -1,0 +1,143 @@
+"use strict";
+
+/**
+ * 素材遮脸：调用本地 Python（OpenCV YuNet）做人脸检测，图片直接输出，视频走 ffmpeg 管道逐帧处理。
+ *
+ * 为什么不用纯 JS 做：人脸检测要模型推理，Electron 里塞 tfjs/onnxruntime 会让体积翻好几倍；
+ * 本机已有 Python + opencv，走子进程最省事，也方便单独调试脚本。
+ */
+
+const { spawn, spawnSync } = require("node:child_process");
+const path = require("node:path");
+const fs = require("node:fs");
+
+const PY_DIR = (() => {
+  const packaged = path.join(path.dirname(process.execPath), "resources", "py");
+  try { if (fs.existsSync(path.join(packaged, "face_mask.py"))) return packaged; } catch {}
+  return path.join(__dirname, "..", "py");
+})();
+const SCRIPT = path.join(PY_DIR, "face_mask.py");
+const MODEL = path.join(PY_DIR, "face_detection_yunet_2023mar.onnx");
+
+let cachedPython = null;
+
+function exeDir() {
+  return path.join(path.dirname(process.execPath), "resources");
+}
+
+function candidateFfmpeg() {
+  const list = [
+    path.join(exeDir(), "tools", "ffmpeg.exe"),
+    path.join(__dirname, "..", "tools", "ffmpeg.exe"),
+    "ffmpeg"
+  ];
+  for (const p of list) {
+    if (p === "ffmpeg") continue;
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  return "ffmpeg";
+}
+
+function tryPython(cmd, args) {
+  try {
+    const r = spawnSync(cmd, [...args, "-B", "-c", "import cv2,sys;print(cv2.__version__)"], { encoding: "utf8", timeout: 15000, windowsHide: true });
+    if (r.status === 0 && String(r.stdout || "").trim()) return { cmd, args, version: String(r.stdout).trim() };
+  } catch {}
+  return null;
+}
+
+function findPython() {
+  if (cachedPython) return cachedPython;
+  const env = process.env.DOLAMOD_PYTHON;
+  const cands = [];
+  const bundled = path.join(exeDir(), "python", "python.exe");
+  try { if (fs.existsSync(bundled)) cands.push({ cmd: bundled, args: [] }); } catch {}
+  if (env) cands.push({ cmd: env, args: [] });
+  cands.push({ cmd: "python", args: [] }, { cmd: "python3", args: [] }, { cmd: "py", args: ["-3"] });
+  for (const c of cands) {
+    const hit = tryPython(c.cmd, c.args);
+    if (hit) { cachedPython = hit; return hit; }
+  }
+  cachedPython = { cmd: "", args: [], missing: true };
+  return cachedPython;
+}
+
+function probeFaceMask() {
+  const py = findPython();
+  const ffmpeg = candidateFfmpeg();
+  const ffmpegOk = (() => {
+    try {
+      const r = spawnSync(ffmpeg, ["-version"], { encoding: "utf8", timeout: 8000, windowsHide: true });
+      return r.status === 0;
+    } catch { return false; }
+  })();
+  return {
+    python: py.missing ? "" : `${py.cmd} ${py.args.join(" ")}`.trim(),
+    opencv: py.version || "",
+    model: fs.existsSync(MODEL),
+    ffmpeg,
+    ffmpegOk,
+    script: fs.existsSync(SCRIPT)
+  };
+}
+
+function runFaceMask(opts) {
+  return new Promise((resolve) => {
+    const py = findPython();
+    if (py.missing) {
+      resolve({ ok: false, message: "没找到可用的 Python（需要 opencv-python）。请先执行：pip install opencv-python-headless" });
+      return;
+    }
+    if (!fs.existsSync(SCRIPT)) {
+      resolve({ ok: false, message: "缺少 py/face_mask.py" });
+      return;
+    }
+    if (!fs.existsSync(MODEL)) {
+      resolve({ ok: false, message: "缺少人脸检测模型 face_detection_yunet_2023mar.onnx（放在 py/ 目录）" });
+      return;
+    }
+
+    const args = [
+      "-B", "-X", "utf8",
+      SCRIPT,
+      "--mode", String(opts.mode || "mosaic"),
+      "--strength", String(Math.max(2, Math.min(80, Number(opts.strength) || 18))),
+      "--pad", String(Math.max(0, Math.min(0.8, Number(opts.padRatio) || 0.18))),
+      "--model", MODEL,
+      "--ffmpeg", candidateFfmpeg(),
+      "--json-progress"
+    ];
+    if (opts.keepOriginal === false) args.push("--no-keep");
+    if (opts.outDir) args.push("--out-dir", String(opts.outDir));
+    args.push("--files", ...opts.files.map(String));
+
+    const child = spawn(py.cmd, [...py.args, ...args], { windowsHide: true, cwd: PY_DIR });
+    let out = "";
+    let err = "";
+    const results = [];
+
+    child.stdout.on("data", (buf) => {
+      out += buf.toString("utf8");
+      const lines = out.split(/\r?\n/);
+      out = lines.pop() || "";
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t) continue;
+        if (t.startsWith("{")) {
+          let j = null;
+          try { j = JSON.parse(t); } catch {}
+          if (j && j.event === "progress" && typeof opts.onProgress === "function") opts.onProgress(j);
+          else if (j && j.event === "done") results.push(j);
+          else if (j && j.event === "error" && typeof opts.onProgress === "function") opts.onProgress(j);
+        }
+      }
+    });
+    child.stderr.on("data", (buf) => { err += buf.toString("utf8"); });
+    child.on("close", (code) => {
+      resolve({ ok: code === 0, code, results, stderr: err.slice(-2000) });
+    });
+    child.on("error", (error) => resolve({ ok: false, message: String(error && error.message) }));
+  });
+}
+
+module.exports = { runFaceMask, probeFaceMask };

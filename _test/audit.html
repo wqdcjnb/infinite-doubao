@@ -1,0 +1,236 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>FP AUDIT</title>
+<style>
+body{background:#0b0f14;color:#cfe3f2;font:12px/1.55 Consolas,monospace;padding:14px}
+h3{color:#2fd6a5;font-size:11px;letter-spacing:2px;margin:12px 0 5px}
+pre{background:#0f1620;border:1px solid #1e2c3a;border-radius:7px;padding:9px;white-space:pre-wrap;word-break:break-all;margin:0}
+.bad{color:#ff6b6b}.ok{color:#54e08a}
+</style></head>
+<body>
+<h3>AUDIT</h3><pre id="out">running…</pre>
+<script>
+// 探针只做只读观测 + 与档案比对，不修改任何状态。
+// 每个检查返回 [标签, 实测值, 期望值?]，期望值不一致即标红。
+window.__audit = function (P) {
+  P = P || {};
+  const rows = [];
+  const safe = (fn) => { try { return fn(); } catch (e) { return "ERR:" + e.message; } };
+  const add = (k, v, expect) => rows.push([k, String(v), expect === undefined || expect === null ? null : String(expect)]);
+
+  // ---------------- 1 时区：站点会拿这些来源交叉对账 ----------------
+  const tz = P.timezone || "";
+  add("Intl resolved", safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone), tz);
+  add("Intl locale", safe(() => Intl.DateTimeFormat().resolvedOptions().locale), P.locale);
+  const off = safe(() => new Date().getTimezoneOffset());
+  add("getTimezoneOffset", off, P.tzOffsetHint);
+  add("offset 是整数", safe(() => Number.isInteger(new Date().getTimezoneOffset())), "true");
+  add("Date.toString 尾串", safe(() => new Date().toString().replace(/^.*GMT[+-]\d{4} /, "")), null);
+  add("Date.toTimeString", safe(() => new Date().toTimeString().slice(9)), null);
+  add("toLocaleString", safe(() => new Date().toLocaleString()), null);
+  add("toLocaleTimeString", safe(() => new Date().toLocaleTimeString()), null);
+  add("toLocaleDateString", safe(() => new Date().toLocaleDateString()), null);
+  add("getHours/UTC", safe(() => new Date().getHours() + "/" + new Date().getUTCHours()), null);
+  add("日期字段自洽", safe(() => {
+    const d = new Date();
+    const a = [d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes()].join(",");
+    const b = [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()].join(",");
+    const shift = d.getTimezoneOffset();
+    const c = new Date(d.getTime() - shift * 60000);
+    const back = [c.getUTCFullYear(), c.getUTCMonth(), c.getUTCDate(), c.getUTCHours(), c.getUTCMinutes()].join(",");
+    return a === back ? "一致(" + b + ")" : "矛盾 " + a + " vs " + back;
+  }), null);
+  // 显式指定时区必须被尊重，不能被强行改写
+  add("显式 tz 生效", safe(() => new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Tokyo" }).resolvedOptions().timeZone), "Asia/Tokyo");
+  add("显式 tz 输出", safe(() => new Intl.DateTimeFormat("en-US", { timeZone: "UTC", hour: "2-digit", hourCycle: "h23" }).format(new Date())), null);
+
+  // 构造路径必须也走档案时区：本地时间串 / 多参数构造 = 该时刻在档案时区下的 epoch
+  add("new Date(本地串) 往返", safe(() => {
+    const d = new Date(2026, 9, 24, 19, 0, 0);
+    const back = new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds());
+    return back.getTime() === d.getTime() ? "一致" : "矛盾";
+  }), "一致");
+  add("多参数构造 vs getTimezoneOffset", safe(() => {
+    const d = new Date(2026, 9, 24, 19, 0, 0);
+    // getTimezoneOffset = UTC − 本地，所以 UTC = 本地分量 + tzo；两边不等就是构造走了宿主时区
+    const derived = Date.UTC(2026, 9, 24, 19, 0, 0) + d.getTimezoneOffset() * 60000;
+    return derived === d.getTime() ? "自洽" : "矛盾 " + (d.getTime() - derived) / 3600000 + "h";
+  }), "自洽");
+  add("无时区 ISO 串", safe(() => {
+    const d = new Date("2026-10-24T19:00:00");
+    const local = new Date(2026, 9, 24, 19, 0, 0);
+    return d.getTime() === local.getTime() ? "自洽" : "矛盾 " + (d.getTime() - local.getTime()) / 3600000 + "h";
+  }), "自洽");
+  add("Date.parse 与构造一致", safe(() => Date.parse("2026-10-24T19:00:00") === new Date(2026, 9, 24, 19, 0, 0).getTime()), "true");
+  add("带时区串不被改写", safe(() => new Date("2026-10-24T19:00:00Z").toISOString()), "2026-10-24T19:00:00.000Z");
+  add("Date.now 正常", safe(() => Math.abs(Date.now() - new Date().getTime()) < 50), "true");
+  add("Date() 返回字符串", safe(() => typeof Date()), "string");
+  add("Date.name/native", safe(() => Date.name + "/" + /\[native code\]/.test(Date.toString())), "Date/true");
+  add("instanceof Date", safe(() => new Date() instanceof Date), "true");
+  add("Date.parse native", safe(() => /\[native code\]/.test(Date.parse.toString())), "true");
+  // DST 边界：美东 2026-11-01 01:30 有两次；只要不抛错、与同分量构造一致即可
+  add("DST 边界不炸", safe(() => {
+    const a = new Date(2026, 2, 8, 2, 30, 0), b = new Date(2026, 10, 1, 1, 30, 0);
+    return isNaN(a.getTime()) || isNaN(b.getTime()) ? "NaN" : "ok";
+  }), "ok");
+
+  // ---------------- 1b 本地化面：locale 必须处处同源 ----------------
+  ["NumberFormat", "Collator", "PluralRules", "RelativeTimeFormat", "ListFormat"].forEach(function (n) {
+    if (typeof Intl[n] !== "function") return;
+    add("Intl." + n + " locale", safe(() => new Intl[n]().resolvedOptions().locale), P.locale);
+  });
+  add("NumberFormat 数字形", safe(() => new Intl.NumberFormat().format(1234567.89)), null);
+  add("Number.toLocaleString", safe(() => (1234567.89).toLocaleString()), null);
+  add("Number 显式 locale 生效", safe(() => (1234567.89).toLocaleString("de-DE")), null);
+  add("String.localeCompare 默认", safe(() => "a".localeCompare("b")), null);
+  add("toLocaleLowerCase 默认", safe(() => "I".toLocaleLowerCase()), null);
+  add("Intl 构造器 native", safe(() => ["NumberFormat", "Collator", "PluralRules"].every((n) => /\[native code\]/.test(Intl[n].toString()))), "true");
+  add("Number.toLocaleString native", safe(() => /\[native code\]/.test(Number.prototype.toLocaleString.toString())), "true");
+  add("constructor 指回", safe(() => [
+    (new Date()).constructor === Date,
+    new Intl.NumberFormat().constructor === Intl.NumberFormat,
+    new Intl.DateTimeFormat().constructor === Intl.DateTimeFormat,
+    new Intl.Collator().constructor === Intl.Collator
+  ].join(",")), "true,true,true,true");
+
+  // ---------------- 2 window.chrome ----------------
+  add("chrome 类型", safe(() => typeof window.chrome), "object");
+  add("chrome.csi", safe(() => typeof (window.chrome && window.chrome.csi)), "function");
+  add("chrome.loadTimes", safe(() => typeof (window.chrome && window.chrome.loadTimes)), "function");
+  add("chrome.app", safe(() => typeof (window.chrome && window.chrome.app)), "object");
+  add("chrome.runtime", safe(() => typeof (window.chrome && window.chrome.runtime)), "object");
+  add("chrome.runtime.id", safe(() => String(window.chrome.runtime.id)), "undefined");
+  add("csi 可调用", safe(() => JSON.stringify(window.chrome.csi()).length > 10), "true");
+  add("loadTimes 可调用", safe(() => typeof window.chrome.loadTimes().connectionInfo), "string");
+
+  // ---------------- 3 属性归属 ----------------
+  add("own navigator.userAgent", safe(() => Object.prototype.hasOwnProperty.call(navigator, "userAgent")), "false");
+  add("own navigator.languages", safe(() => Object.prototype.hasOwnProperty.call(navigator, "languages")), "false");
+  add("own window.outerWidth", safe(() => Object.prototype.hasOwnProperty.call(window, "outerWidth")), "true");
+
+  // ---------------- 4 插件 / PDF ----------------
+  add("plugins.length", safe(() => navigator.plugins.length), 5);
+  add("mimeTypes.length", safe(() => navigator.mimeTypes.length), 2);
+  add("pdfViewerEnabled", safe(() => navigator.pdfViewerEnabled), "true");
+  add("plugin[0]", safe(() => navigator.plugins[0] && navigator.plugins[0].name), null);
+
+  // ---------------- 5 navigator 面 ----------------
+  add("userAgent", safe(() => navigator.userAgent), P.userAgent);
+  add("appVersion", safe(() => navigator.appVersion), P.appVersion);
+  add("platform", safe(() => navigator.platform), P.platform);
+  add("vendor", safe(() => navigator.vendor), P.vendor);
+  add("language", safe(() => navigator.language), P.language);
+  add("languages", safe(() => navigator.languages.join(",")), P.languages && P.languages.join(","));
+  add("hardwareConcurrency", safe(() => navigator.hardwareConcurrency), P.hardwareConcurrency);
+  add("deviceMemory", safe(() => navigator.deviceMemory), P.deviceMemory);
+  add("maxTouchPoints", safe(() => navigator.maxTouchPoints), P.maxTouchPoints);
+  add("webdriver", safe(() => navigator.webdriver), "false");
+  add("connection", safe(() => navigator.connection ? navigator.connection.effectiveType + "/" + navigator.connection.rtt + "/" + navigator.connection.downlink : "undefined"), P.connection ? P.connection.effectiveType + "/" + P.connection.rtt + "/" + P.connection.downlink : undefined);
+  add("getBattery", safe(() => typeof navigator.getBattery), "function");
+  add("webkitTemporaryStorage", safe(() => typeof navigator.webkitTemporaryStorage), "object");
+
+  // ---------------- 6 UA-CH ----------------
+  add("uaData.platform", safe(() => navigator.userAgentData.platform), "Windows");
+  add("uaData.mobile", safe(() => navigator.userAgentData.mobile), "false");
+  add("uaData.brands", safe(() => navigator.userAgentData.brands.map((b) => b.brand + " " + b.version).join(" | ")), P.uaData && P.uaData.brands.map((b) => b.brand + " " + b.version).join(" | "));
+  add("uaData instanceof", safe(() => (window.NavigatorUAData ? navigator.userAgentData instanceof NavigatorUAData : "n/a")), "true");
+  add("uaData toStringTag", safe(() => Object.prototype.toString.call(navigator.userAgentData)), "[object NavigatorUAData]");
+  add("uaData 无自有属性", safe(() => Object.getOwnPropertyNames(navigator.userAgentData).length), "0");
+  add("ghev native", safe(() => /\[native code\]/.test(navigator.userAgentData.getHighEntropyValues.toString())), "true");
+  add("ghev 版本一致", safe(() => {
+    const v = navigator.userAgentData;
+    return v && typeof v.getHighEntropyValues === "function" ? "has-fn" : "missing";
+  }), "has-fn");
+
+  // ---------------- 7 屏幕几何自洽 ----------------
+  add("screen", safe(() => [screen.width, screen.height].join("x")), P.screen ? P.screen.width + "x" + P.screen.height : undefined);
+  add("availHeight<=height", safe(() => screen.availHeight <= screen.height), "true");
+  add("availWidth<=width", safe(() => screen.availWidth <= screen.width), "true");
+  add("dpr", safe(() => devicePixelRatio), P.screen && P.screen.devicePixelRatio);
+  add("outer - inner [w]", safe(() => outerWidth - innerWidth), null);
+  add("outer - inner [h]", safe(() => outerHeight - innerHeight), null);
+  add("outer <= screen", safe(() => outerHeight <= screen.availHeight), "true");
+  add("inner <= outer", safe(() => innerWidth <= outerWidth && innerHeight <= outerHeight), "true");
+
+  // ---------------- 8 WebGL ----------------
+  add("WebGL vendor", safe(() => {
+    const gl = document.createElement("canvas").getContext("webgl");
+    return gl ? gl.getParameter(gl.getExtension("WEBGL_debug_renderer_info").UNMASKED_VENDOR_WEBGL) : "n/a";
+  }), P.webgl && P.webgl.vendor);
+  add("WebGL renderer", safe(() => {
+    const gl = document.createElement("canvas").getContext("webgl");
+    return gl ? gl.getParameter(gl.getExtension("WEBGL_debug_renderer_info").UNMASKED_RENDERER_WEBGL) : "n/a";
+  }), P.webgl && P.webgl.renderer);
+
+  // ---------------- 9 泄露面的 DOM 痕迹 ----------------
+  add("html dataset", safe(() => JSON.stringify(Object.assign({}, document.documentElement.dataset))), "{}");
+  add("可疑全局", safe(() => Object.getOwnPropertyNames(window).filter((k) => /^(__dm|__dbm|__fp|__pw|DM$)/.test(k)).join(",")), "");
+  add("frameElement", safe(() => window.frameElement === null ? "null" : "LEAK:" + (window.frameElement.tagName || "?")), "null");
+  add("parent === window", safe(() => window.parent === window), "true");
+
+  // ---------------- 10 函数伪装 ----------------
+  add("Function.toString 伪装", safe(() => /\[native code\]/.test(Function.prototype.toString.call(Function.prototype.toString))), "true");
+  add("UA getter native", safe(() => /\[native code\]/.test(Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgent").get.toString())), "true");
+  add("gTO native", safe(() => /\[native code\]/.test(Date.prototype.getTimezoneOffset.toString())), "true");
+  add("RTC name", safe(() => window.RTCPeerConnection.name), "RTCPeerConnection");
+  add("RTC native", safe(() => /\[native code\]/.test(window.RTCPeerConnection.toString())), "true");
+  add("DTF native", safe(() => /\[native code\]/.test(Intl.DateTimeFormat.toString())), "true");
+
+  // ---------------- 11 噪声稳定性 ----------------
+  add("audio 三次一致", safe(() => {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return "n/a";
+    const ctx = new AC();
+    const buf = ctx.createBuffer(1, 8, 8000);
+    const a = buf.getChannelData(0)[0], b = buf.getChannelData(0)[0], c = buf.getChannelData(0)[0];
+    try { ctx.close(); } catch (e) {}
+    return a === b && b === c ? "stable " + a : "DRIFT " + [a, b, c].join("|");
+  }), null);
+  add("canvas 两次一致", safe(() => {
+    const c = document.createElement("canvas"); c.width = 120; c.height = 40;
+    const x = c.getContext("2d");
+    x.fillStyle = "#f60"; x.fillRect(0, 0, 120, 40); x.fillStyle = "#06f"; x.font = "20px sans-serif"; x.fillText("fp", 4, 28);
+    const a = c.toDataURL();
+    const b = c.toDataURL();
+    return a === b ? "stable" : "DRIFT";
+  }), "stable");
+  add("canvas 不与原生同值", safe(() => {
+    const c = document.createElement("canvas"); c.width = 60; c.height = 20;
+    const x = c.getContext("2d");
+    x.fillStyle = "#000"; x.fillRect(0, 0, 60, 20);
+    const d = x.getImageData(0, 0, 3, 3).data;
+    return [d[0], d[1], d[2]].join(",");
+  }), null);
+
+  // ---------------- 汇总 ----------------
+  const bad = rows.filter((r) => r[2] !== null && r[1] !== r[2]);
+  const body = rows.map((r) => (r[2] !== null && r[1] !== r[2] ? "✗ " : "· ") + r[0] + " = " + r[1] + (r[2] !== null && r[1] !== r[2] ? "   (期望 " + r[2] + ")" : "")).join("\n");
+  return body + "\n\n" + (bad.length ? "✗ " + bad.length + " 项不一致：" + bad.map((r) => r[0]).join("、") : "✓ 全部一致");
+};
+
+setTimeout(function () {
+  try {
+    document.getElementById("out").textContent = window.__audit(window.__expectedProfile || null);
+  } catch (e) { document.getElementById("out").textContent = "ERR " + e.message; }
+}, 300);
+
+// 高熵值要异步取，单独挂一个检查器给驱动器调用
+window.__auditHigh = async function (P) {
+  const v = navigator.userAgentData;
+  if (!v || typeof v.getHighEntropyValues !== "function") return "n/a";
+  const h = await v.getHighEntropyValues(["platformVersion", "architecture", "bitness", "uaFullVersion", "fullVersionList", "model", "wow64"]);
+  const bad = [];
+  if (P && P.uaData) {
+    if (String(h.uaFullVersion) !== String(P.uaData.uaFullVersion)) bad.push("uaFullVersion " + h.uaFullVersion + "≠" + P.uaData.uaFullVersion);
+    if (String(h.platformVersion) !== String(P.uaData.platformVersion)) bad.push("platformVersion " + h.platformVersion + "≠" + P.uaData.platformVersion);
+    if (String(h.architecture) !== String(P.uaData.architecture)) bad.push("architecture 不一致");
+  }
+  // UA 里的主版本号必须和高熵值的 fullVersion 主版本一致
+  const majorUa = (navigator.userAgent.match(/Chrome\/(\d+)/) || [])[1];
+  const majorH = String(h.uaFullVersion || "").split(".")[0];
+  if (majorUa && majorH && majorUa !== majorH) bad.push("UA 主版本 " + majorUa + "≠ 高熵 " + majorH);
+  const majorBrand = (v.brands.find((b) => b.brand === "Chromium") || {}).version;
+  if (majorUa && majorBrand && majorUa !== majorBrand) bad.push("UA " + majorUa + "≠ brands " + majorBrand);
+  return (bad.length ? "✗ " + bad.join("; ") : "✓ 一致 " + h.uaFullVersion + " / " + h.platformVersion + " / " + h.architecture + h.bitness);
+};
+</script>
+</body></html>

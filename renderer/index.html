@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; media-src 'self' file:; script-src 'self'" />
+  <title>豆包工坊</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="views.css" />
+</head>
+<body>
+  <div class="bg-layer">
+    <div class="bg-grid"></div>
+    <div class="bg-glow g1"></div>
+    <div class="bg-glow g2"></div>
+    <div class="bg-glow g3"></div>
+    <div class="bg-scan"></div>
+  </div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-text">
+          <strong>豆包工坊</strong>
+          <span class="brand-sub"><i class="pulse"></i>DOUBAO WORKSHOP <em id="verText">v1.2.1</em></span>
+        </div>
+      </div>
+
+      <button class="primary" id="btnNew">
+        <span class="plus">+</span> 添加豆包账号
+      </button>
+
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" class="ic"><path d="M10 4a6 6 0 104.47 10.03l4.25 4.25 1.42-1.42-4.25-4.25A6 6 0 0010 4zm0 2a4 4 0 110 8 4 4 0 010-8z"/></svg>
+        <input id="search" class="search" placeholder="搜索账号 / 分组 / 备注" />
+      </div>
+
+      <div class="list-head">
+        <span>账号列表</span>
+        <span class="list-count" id="countText">0</span>
+      </div>
+      <div class="list" id="accountList"></div>
+
+      <div class="side-foot">
+        <button class="ghost wide" id="btnHome" title="打开生成视频的保存文件夹">
+          <svg viewBox="0 0 24 24" class="ic"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+          视频目录
+        </button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <nav class="viewbar">
+        <button class="vtab active" data-view="accounts">账号环境</button>
+        <button class="vtab" data-view="templates">任务提交</button>
+        <button class="vtab" data-view="tasks">任务队列<span class="vdot" id="taskDot"></span></button>
+        <button class="vtab" data-view="assets">素材库</button>
+        <button class="vtab" data-view="api">接口 / MCP</button>
+        <button class="vtab" data-view="logs">日志</button>
+        <button class="vtab" data-view="settings">设置</button>
+        <span class="viewbar-grow"></span>
+        <span class="vb-badge" id="vbServer" title="本地接口状态">API —</span>
+      </nav>
+
+      <!-- ============================ 账号环境 ============================ -->
+      <section class="view active" id="view-accounts">
+        <div class="topbar">
+          <div class="tabs" id="tabs"></div>
+          <div class="toolbar">
+            <button class="tool" data-panel="env">
+              <svg viewBox="0 0 24 24" class="ic"><path d="M12 2l8 4v6c0 5-3.4 8.6-8 10-4.6-1.4-8-5-8-10V6l8-4z"/></svg>
+              环境
+            </button>
+            <button class="tool" data-panel="proxy">
+              <svg viewBox="0 0 24 24" class="ic"><path d="M12 3a9 9 0 100 18 9 9 0 000-18zm0 2c1.5 0 2.9 2.3 3.4 6H8.6C9.1 7.3 10.5 5 12 5zM5.2 11h2.3c.1-1.6.4-3 .9-4.2A7 7 0 005.2 11zm0 2a7 7 0 003.2 4.2c-.5-1.2-.8-2.6-.9-4.2H5.2zm4.3 0h5c-.2 2.2-.9 4.3-2.5 4.3S9.7 15.2 9.5 13zm9.3-2h2.3a7 7 0 00-3.2-4.2c.5 1.2.8 2.6.9 4.2zm0 2c-.1 1.6-.4 3-.9 4.2A7 7 0 0018.8 13z"/></svg>
+              代理
+            </button>
+            <button class="tool" data-panel="mask">
+              <svg viewBox="0 0 24 24" class="ic"><path d="M12 4c-4.4 0-8 2.6-8 6.5 0 3.3 2.4 5.2 4.3 6.6l.7.5v2.4h6v-2.4l.7-.5c1.9-1.4 4.3-3.3 4.3-6.6C20 6.6 16.4 4 12 4zm-2 5.5a1.5 1.5 0 110 3 1.5 1.5 0 010-3zm4 0a1.5 1.5 0 110 3 1.5 1.5 0 010-3z"/></svg>
+              遮脸
+            </button>
+            <button class="tool" data-panel="res">
+              <svg viewBox="0 0 24 24" class="ic"><path d="M4 5h16v11H4zM4 18h16v2H4z" opacity=".55"/><path d="M4 16l5-5 4 4 3-3 4 4v1H4z"/></svg>
+              素材
+            </button>
+          </div>
+        </div>
+
+        <div class="addressbar">
+          <div class="addr-inner">
+            <span class="addr-tag">URL</span>
+            <input id="address" placeholder="https://www.doubao.com/chat/" />
+          </div>
+          <button class="ghost sq" id="btnGo" title="前往">GO</button>
+          <button class="ghost sq" id="btnReload" title="刷新">
+            <svg viewBox="0 0 24 24" class="ic"><path d="M12 5a7 7 0 016.7 5H21l-3.5 4L14 10h2.6A5 5 0 0012 7a5 5 0 00-4.9 4H5.1A7 7 0 0112 5zm0 14a7 7 0 01-6.7-5H3l3.5-4L10 14H7.4A5 5 0 0012 17a5 5 0 004.9-4h2A7 7 0 0112 19z"/></svg>
+          </button>
+        </div>
+
+        <div class="stack" id="stack"></div>
+
+        <div class="welcome" id="welcome">
+          <div class="welcome-inner">
+            <div class="welcome-heading">
+              <div>
+                <div class="welcome-eyebrow">豆包工坊 · 创作工作台</div>
+                <h1>从创作灵感，到视频成片</h1>
+                <p>保存任务模板、提交生成、管理素材，把创作流程放在一起。</p>
+              </div>
+              <button class="primary" data-home-view="templates">创建任务 <span aria-hidden="true">↗</span></button>
+            </div>
+            <div class="welcome-summary" aria-label="当前创作概况">
+              <span>已添加账号 <b id="homeAccounts">0</b></span>
+              <span>任务模板 <b id="homeTemplates">0</b></span>
+              <span>进行中任务 <b id="homeRunning">0</b></span>
+            </div>
+            <div class="feat-grid">
+              <button class="feat" data-home-view="templates">
+                <em>01 / 创作</em><b>任务提交 <i aria-hidden="true">↗</i></b>
+                <span>保存提示词、模型和时长，持久化图片与视频附件，一键重复提交。</span>
+              </button>
+              <button class="feat" data-home-view="tasks">
+                <em>02 / 生成</em><b>批量任务 <i aria-hidden="true">↗</i></b>
+                <span>多账号派发、进度追踪、暂停续跑与失败重试，集中管理生成任务。</span>
+              </button>
+              <button class="feat" data-home-view="assets">
+                <em>03 / 素材</em><b>成片素材库 <i aria-hidden="true">↗</i></b>
+                <span>集中查看已保存的最终视频，预览成片、打开视频或定位本地文件。</span>
+              </button>
+              <button class="feat" data-home-action="downloads">
+                <em>04 / 成片</em><b>视频文件夹 <i aria-hidden="true">↗</i></b>
+                <span>自动下载与手动导出统一保存，支持优先下载无水印源、按规则命名。</span>
+              </button>
+              <button class="feat" data-home-view="tasks">
+                <em>05 / 剪辑</em><b>在剪映中编辑 <i aria-hidden="true">↗</i></b>
+                <span>一键打开剪映并导入任务视频，继续剪辑、配音与精修。</span>
+              </button>
+              <button class="feat" data-home-view="api">
+                <em>06 / 连接</em><b>接口与自动化 <i aria-hidden="true">↗</i></b>
+                <span>通过本地 REST、MCP、SSE 与 CLI 接入工具，串联你的工作流程。</span>
+              </button>
+            </div>
+            <div class="welcome-tools">
+              <span>常用工具</span>
+              <button class="ghost tiny" data-home-action="account">添加账号</button>
+              <button class="ghost tiny" data-home-action="mask">素材遮脸</button>
+              <button class="ghost tiny" data-home-view="logs">运行日志</button>
+              <button class="ghost tiny" data-home-view="settings">应用设置</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================ 任务提交 ============================ -->
+      <section class="view" id="view-templates">
+        <div class="template-layout">
+          <aside class="template-sidebar">
+            <div class="template-library-head"><strong>我的模板</strong><span id="templateCount">0</span></div>
+            <button class="primary" id="templateNew">＋ 新建模板</button>
+            <div class="template-list" id="templateList"></div>
+            <p class="hint">模板和附件保存在本机，可重复提交。</p>
+          </aside>
+          <div class="template-main">
+            <div class="template-page-head"><h1>任务提交</h1><p>一份模板，一次创作。保存提示词和参考素材，随时再次使用。</p></div>
+            <div id="templateEmpty" class="template-empty">
+              <strong>从第一个任务模板开始</strong>
+              <p>写好提示词，选择模型和时长，再添加图片或视频附件。</p>
+              <button class="primary" id="templateEmptyNew">新建模板</button>
+            </div>
+            <div id="templateEditor" class="template-editor hidden">
+              <div class="template-editor-head">
+                <div class="field"><label for="templateName">模板名称</label><input id="templateName" placeholder="例如：产品展示 · 近景镜头" /></div>
+                <button class="ghost tiny danger delete-icon" id="templateDelete" title="删除模板" aria-label="删除模板"></button>
+              </div>
+              <div class="field"><label for="templatePrompt">提示词</label><textarea id="templatePrompt" rows="5" placeholder="描述主体、动作、场景和镜头语言。每次提交都会使用这份模板的当前内容。"></textarea></div>
+              <div class="template-options">
+                <div class="field"><label for="templateModel">视频模型</label><select id="templateModel"></select></div>
+                <div class="field"><label for="templateDuration">视频时长</label><select id="templateDuration"></select></div>
+              </div>
+              <p class="hint template-options-hint">按应用现有模型档位选择，实际生成能力以账号页面为准。</p>
+              <div class="template-attachment-head"><strong>参考附件 <span id="attachmentCount">0 个</span></strong><button class="ghost tiny" id="templateAddFiles">＋ 添加图片 / 视频</button></div>
+              <input id="templateFileInput" type="file" multiple accept=".jpg,.jpeg,.png,.webp,.gif,.bmp,.mp4,.mov,.webm,.m4v,.avi,.mkv" hidden />
+              <div id="templateAttachments" class="template-attachments"></div>
+              <div class="template-storage"><span>本地副本：<span id="templateAttachmentDir"></span></span><button class="ghost tiny" id="templateOpenDir">打开文件夹</button></div>
+              <div class="template-submit-bar">
+                <div><span id="templateSaveState" role="status"></span><p>使用已打开的账号提交，进度与成片在「任务队列」查看。</p></div>
+                <button class="ghost" id="templateSave">保存模板</button>
+                <button class="primary" id="templateSubmit">提交任务 ↗</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================ 任务队列 ============================ -->
+      <section class="view" id="view-tasks">
+        <div class="pane">
+          <div class="pane-head">
+            <div class="filters">
+              <button class="chip active" data-task-status="">全部</button>
+              <button class="chip" data-task-status="queued">排队中</button>
+              <button class="chip" data-task-status="running">进行中</button>
+              <button class="chip" data-task-status="failed">失败</button>
+              <button class="chip" data-task-status="succeeded">成功</button>
+              <button class="chip" data-task-status="cancelled">已取消</button>
+            </div>
+            <div class="pane-actions">
+              <button class="ghost tiny" id="taskRefresh">刷新</button>
+              <button class="ghost tiny danger" id="taskStopAll">全部停止</button>
+            </div>
+          </div>
+          <div class="table-wrap" id="taskTable"></div>
+        </div>
+      </section>
+
+      <!-- ============================ 素材库 ============================ -->
+      <section class="view" id="view-assets">
+        <div class="pane">
+          <div class="pane-head">
+            <div class="video-library-heading">
+              <strong>最终视频 <span id="videoCount">0</span></strong>
+              <p id="videoDirectory"></p>
+            </div>
+            <div class="pane-actions">
+              <button class="ghost tiny" id="videoRefresh">刷新</button>
+              <button class="primary tiny" id="videoOpenDirectory">打开视频文件夹</button>
+            </div>
+          </div>
+          <div class="asset-body" id="assetBody"></div>
+        </div>
+      </section>
+
+      <!-- ============================ 接口 / MCP ============================ -->
+      <section class="view" id="view-api">
+        <div class="pane">
+          <div class="pane-head">
+            <div class="filters">
+              <button class="chip active" data-api-tab="rest">REST</button>
+              <button class="chip" data-api-tab="mcp">MCP</button>
+              <button class="chip" data-api-tab="sse">SSE</button>
+              <button class="chip" data-api-tab="cli">CLI</button>
+            </div>
+            <div class="pane-actions">
+              <button class="ghost tiny" id="apiRestart">重启服务</button>
+              <button class="ghost tiny" id="apiRotate">轮换 token</button>
+            </div>
+          </div>
+          <div class="api-body" id="apiBody"></div>
+        </div>
+      </section>
+
+      <!-- ============================ 日志 ============================ -->
+      <section class="view" id="view-logs">
+        <div class="pane">
+          <div class="pane-head">
+            <div class="filters">
+              <input class="search thin" id="logFilter" placeholder="过滤：事件名 / 关键字" />
+            </div>
+            <div class="pane-actions">
+              <label class="switch"><input type="checkbox" id="logLive" checked /> 实时</label>
+              <button class="ghost tiny" id="logClear">清屏</button>
+            </div>
+          </div>
+          <div class="log-body" id="logBody"></div>
+        </div>
+      </section>
+
+      <!-- ============================ 设置 ============================ -->
+      <section class="view" id="view-settings">
+        <div class="pane scroll">
+          <div class="settings" id="settingsBody"></div>
+        </div>
+      </section>
+
+      <div class="statusbar">
+        <span class="sb-item"><i class="pulse"></i>CORE READY</span>
+        <span class="sb-sep"></span>
+        <span class="sb-item" id="sbEnv">ENV —</span>
+        <span class="sb-sep"></span>
+        <span class="sb-item" id="sbFp">FP —</span>
+        <span class="sb-sep"></span>
+        <span class="sb-item" id="sbIp">IP —</span>
+        <span class="sb-grow"></span>
+        <span class="sb-item dim" id="sbWork">WORK —</span>
+        <span class="sb-sep"></span>
+        <span class="sb-item dim" id="sbClock"></span>
+      </div>
+    </main>
+
+    <aside class="drawer hidden" id="drawer">
+      <div class="drawer-head">
+        <strong id="drawerTitle">环境</strong>
+        <button class="ghost small" id="drawerClose">关闭</button>
+      </div>
+      <div class="drawer-body" id="drawerBody"></div>
+    </aside>
+  </div>
+
+  <div class="modal-mask hidden" id="accModal">
+    <div class="modal">
+      <div class="modal-head">
+        <strong>添加豆包账号</strong>
+        <button class="ghost small" id="accClose">关闭</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>账号名称</label>
+          <input id="accName" placeholder="豆包号A" />
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>分组</label>
+            <input id="accGroup" placeholder="可选，如：主号" />
+          </div>
+          <div class="field">
+            <label>备注</label>
+            <input id="accRemark" placeholder="可选" />
+          </div>
+        </div>
+        <div class="field">
+          <label>出口代理</label>
+          <select id="accProxyMode">
+            <option value="direct">直连（本机 IP）</option>
+            <option value="system">跟随系统代理（Clash / v2rayN）</option>
+            <option value="custom">自定义代理</option>
+          </select>
+        </div>
+        <div class="field hidden" id="accProxyWrap">
+          <label>代理地址</label>
+          <input id="accProxyUrl" placeholder="socks5://user:pass@1.2.3.4:1080" />
+        </div>
+        <div class="hint">创建后自动打开豆包页面，扫码或手机号登录一次即可，登录态只保存在该环境自己的会话分区里，互不影响。</div>
+      </div>
+      <div class="modal-foot">
+        <button class="ghost" id="accCancel">取消</button>
+        <button class="primary" id="accOk">创建并打开</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 通用弹窗：导入分镜 / 编辑镜头 / 添加素材 -->
+  <div class="modal-mask hidden" id="dmModal">
+    <div class="modal wide">
+      <div class="modal-head">
+        <strong id="dmModalTitle">标题</strong>
+        <button class="ghost small" id="dmModalClose">关闭</button>
+      </div>
+      <div class="modal-body" id="dmModalBody"></div>
+      <div class="modal-foot" id="dmModalFoot"></div>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+  <script src="app.js"></script>
+  <script src="views.js"></script>
+</body>
+</html>
