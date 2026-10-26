@@ -120,7 +120,7 @@
       };
     });
   }
-  async function catalog() {
+  async function catalog(strictReadOnly) {
     // Older pages may not use this store. Never create or modify a website DB.
     if (typeof indexedDB === "undefined" || !indexedDB.databases) return null;
     var databases = await indexedDB.databases();
@@ -132,7 +132,7 @@
     try { identity = String(localStorage.getItem("flow_tea_user_id") || "").trim(); } catch (_) {}
     var scopes = new Set(rows().map(rowDraft).filter(Boolean).map(function (d) { return d.inputDraftIndex.accountScope; }));
     if (identity) scopes.add(identity);
-    if (!scopes.size && document.querySelector('[data-testid="draft-conversation-section"]')) {
+    if (!strictReadOnly && !scopes.size && document.querySelector('[data-testid="draft-conversation-section"]')) {
       await expandDrafts();
       rows().map(rowDraft).filter(Boolean).forEach(function (d) { scopes.add(d.inputDraftIndex.accountScope); });
     }
@@ -213,13 +213,13 @@
     return false;
   }
   function result(fn) { return async function () { try { return await fn.apply(null, arguments); } catch (e) { return { ok: false, reason: String(e.message || e) }; } }; }
-  api.readNativeDrafts = result(async function () {
-    var data = await catalog();
+  api.readNativeDrafts = result(async function (options) {
+    var data = await catalog(Boolean(options && options.strictReadOnly));
     return { ok: true, source: data ? "indexeddb" : "sidebar", accountScope: data && data.accountScope, items: data ? data.items : [], total: data ? data.items.length : rows().length };
   });
   async function savedDraft(options) {
-    var data = await catalog(), number = numberIn(options.prompt);
-    if (!data || !number) return null;
+    var data = await catalog(Boolean(options.strictReadOnly)), number = numberIn(options.prompt);
+    if (!data || !data.accountScope || !number) return null;
     if (options.accountScope && options.accountScope !== data.accountScope) throw new Error("当前豆包账号与保存草稿的账号不一致");
     var matches = data.items.filter(function (d) { return numberIn(d.prompt) === number; });
     if (matches.length > 1) throw new Error("发现重复草稿编号 " + number + "，请核对网页草稿");
@@ -228,13 +228,13 @@
     if (options.nativeId && match.nativeId !== options.nativeId) throw new Error("原生草稿 ID 已变化，未重绑或重复导入");
     if (normalize(match.prompt) !== normalize(options.prompt) || match.executionMode !== options.executionMode) throw new Error("已保存草稿的完整正文或工作模式不一致，请核对网页草稿");
     var binding = { id: options.id, nativeId: match.nativeId, accountScope: data.accountScope, title: match.title, index: data.items.indexOf(match), titles: data.items.map(function (d) { return d.title; }) };
-    storedBindings.set(binding.id, binding);
+    if (!options.strictReadOnly) storedBindings.set(binding.id, binding);
     return { ok: true, bindings: [binding] };
   }
   api.verifyNativeDraftSaved = result(async function (options) {
-    var saved = await savedDraft(options);
+    var saved = await savedDraft(Object.assign({}, options, { strictReadOnly: true }));
     if (!saved) throw new Error("上次操作未确认：完整存储中未找到同编号、同正文的草稿；不会重复存入，请在原账号页面核对");
-    return saved;
+    return Object.assign(saved, { readOnly: true });
   });
   // Import completion is stronger than a usable send button: every expected
   // attachment must be uploaded, then persisted under this exact draft address.
