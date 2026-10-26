@@ -185,6 +185,59 @@ test('interrupted draft inspection rejects foreign journal bindings and incomple
   assert.equal(JSON.stringify(store.get()),before);assert.equal(fs.readFileSync(j.file,'utf8'),journalBefore);queue.stopAll();
 });
 
+function reconciliationFixture() {
+  const {driver,calls}=setupNative(),j=journal(),adapter=new executorModule.NativeAdapter({journal:j,client:{},accounts:{open:async()=>({webContents:{}})},driverFactory:async()=>driver});
+  const original={...nativeOperation('import'),taskId:'task1'},inst=adapter.account(original),draftId=crypto.createHash('sha256').update('account1/task1').digest('hex').slice(0,24);
+  const nativeBinding={id:draftId,nativeId:'original-native',accountScope:'original-scope'};
+  const nativePrompt='[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)\n【草稿编号：DB-'+draftId.toUpperCase()+'】\n原始内容';
+  const snapshotHash=crypto.createHash('sha256').update(JSON.stringify(original.payload.task)).digest('hex');
+  store.get().taskDrafts.push({id:draftId,instanceId:inst.id,nativeState:'saving',nativePrompt,draftNumber:'DB-'+draftId.toUpperCase(),executionMode:'work',template:{studioTaskId:'task1',prompt:'原始内容',attachments:[],...original.payload.task.parameters}});store.save();
+  j.begin(original);j.bindTask('task1',{accountId:'account1',draftId,snapshotHash});j.finish(original.id,{outcome:'uncertain',receipt:{error:'original save unknown'}});j.reported(original.id);
+  const reconciliation={originalOperationId:original.id,proofOperationId:'proof',task:original.payload.task,draftId,draftNumber:'DB-'+draftId.toUpperCase(),snapshotHash,nativePromptSha256:crypto.createHash('sha256').update(nativePrompt.replace(/\s+/g,' ').trim()).digest('hex'),nativeBinding};
+  const op={...operation('account','reconcile'),payload:{account:original.payload.account,action:'reconcile_import',reconciliation}};
+  driver.call=async(method,options)=>{calls.push({method,opts:options});assert.equal(method,'verifyNativeDraftSaved');return {ok:true,readOnly:true,bindings:[{...nativeBinding,index:0,title:'原草稿',titles:['原草稿']}]};};
+  return {adapter,j,op,original,calls,driver,nativeBinding,draftId};
+}
+test('explicit reconciliation adopts only the verified original binding without rewriting closed receipt or sending',async()=>{
+  const f=reconciliationFixture(),before=JSON.stringify(f.j.get(f.original.id));
+  const result=await f.adapter.execute(f.op);
+  assert.equal(result.outcome,'success');assert.equal(result.receipt.status,'draft_reconciled');assert.equal(result.receipt.browserReadOnly,true);
+  assert.deepEqual(result.receipt.nativeBinding,f.nativeBinding);assert.equal(JSON.stringify(f.j.get(f.original.id)),before);
+  assert.equal(store.get().taskDrafts[0].nativeState,'saved');assert.equal(f.j.task('task1').nativeBinding.nativeId,'original-native');
+  await f.adapter.recover(f.op);assert.deepEqual(f.calls.map(c=>c.method),['verifyNativeDraftSaved','verifyNativeDraftSaved']);assert.equal(store.get().tasks.length,0);queue.stopAll();
+});
+test('reconciliation refuses changed proof, snapshot and expired lease without local adoption',async()=>{
+  for(const change of ['proof','snapshot','lease']) {
+    const f=reconciliationFixture(),before=JSON.stringify(store.get()),journalBefore=fs.readFileSync(f.j.file,'utf8');
+    if(change==='proof')f.driver.call=async()=>({ok:true,readOnly:true,bindings:[{...f.nativeBinding,nativeId:'different'}]});
+    if(change==='snapshot')f.op.payload.reconciliation.task={...f.op.payload.reconciliation.task,prompt:'changed'};
+    const context=change==='lease'?{checkLease:()=>{throw new Error('lease expired');}}:{};
+    await assert.rejects(f.adapter.execute(f.op,context),change==='proof'?/proof|binding/:change==='snapshot'?/snapshot/:/lease/);assert.equal(JSON.stringify(store.get()),before);assert.equal(fs.readFileSync(f.j.file,'utf8'),journalBefore);queue.stopAll();
+  }
+});
+test('journal write failure after local save recovers the same binding by read-only recheck',async()=>{
+  const f=reconciliationFixture(),originalBefore=JSON.stringify(f.j.get(f.original.id)),bind=f.j.bindTask.bind(f.j);let fail=true;
+  f.j.bindTask=(...args)=>{if(fail){fail=false;throw new Error('journal fsync failed');}return bind(...args);};
+  await assert.rejects(f.adapter.execute(f.op),/journal fsync/);assert.equal(store.get().taskDrafts[0].nativeState,'saved');
+  const inst=store.find(store.get().taskDrafts[0].instanceId),fresh=await f.adapter.inspectPendingDrafts('account1',inst,f.driver);
+  assert.equal(fresh.entries[0].status,'matched');
+  await f.adapter.recover(f.op);assert.equal(f.j.task('task1').nativeBinding.nativeId,'original-native');assert.equal(JSON.stringify(f.j.get(f.original.id)),originalBefore);
+  assert.deepEqual(f.calls.map(c=>c.method),['verifyNativeDraftSaved','verifyNativeDraftSaved','verifyNativeDraftSaved']);assert.equal(store.get().tasks.length,0);queue.stopAll();
+});
+test('local save failure and lease expiry after verification leave original reconciliation state intact',async()=>{
+  for(const failure of ['store','lease']) {
+    const f=reconciliationFixture(),before=JSON.stringify(store.get()),journalBefore=fs.readFileSync(f.j.file,'utf8'),save=store.save;
+    let checks=0;
+    try {
+      if(failure==='store')store.save=()=>false;
+      const context=failure==='lease'?{checkLease:()=>{if(++checks>1)throw new Error('lease expired after verification');}}:{};
+      await assert.rejects(f.adapter.execute(f.op,context),failure==='store'?/保存失败/:/lease/);
+      assert.equal(JSON.stringify(store.get()),before);assert.equal(fs.readFileSync(f.j.file,'utf8'),journalBefore);
+      assert.deepEqual(f.calls.map(c=>c.method),['verifyNativeDraftSaved']);
+    } finally {store.save=save;queue.stopAll();}
+  }
+});
+
 
 test('explicit server mode enters isolated executor without loading desktop services',()=>{
   const vm=require('node:vm'), source=fs.readFileSync(path.join(__dirname,'../src/main.js'),'utf8');

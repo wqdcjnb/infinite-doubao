@@ -150,7 +150,7 @@ class NativeAdapter {
     return {outcome:'progress',receipt:{...receipt,status:'running'}};
   }
   async inspectPendingDrafts(accountId,inst,driver) {
-    const pending=drafts.list().filter(d=>d.instanceId===inst.id && d.nativeState==='saving' && !d.nativeBinding && !d.submissionRecord && d.template?.studioTaskId);
+    const pending=drafts.list().filter(d=>d.instanceId===inst.id && ['saving','saved'].includes(d.nativeState) && !d.submissionRecord && d.template?.studioTaskId);
     if(!pending.length)return;
     const entries=[];
     for(const draft of pending.slice(0,100)) {
@@ -161,7 +161,7 @@ class NativeAdapter {
       entry.snapshotHash=binding.snapshotHash;
       entry.nativePromptSha256=crypto.createHash('sha256').update(draft.nativePrompt.replace(/\s+/g,' ').trim()).digest('hex');
       try {
-        const proof=await driver.call('verifyNativeDraftSaved',{id:draft.id,prompt:draft.nativePrompt,executionMode:draft.executionMode});
+        const proof=await driver.call('verifyNativeDraftSaved',{id:draft.id,prompt:draft.nativePrompt,executionMode:draft.executionMode,...(draft.nativeBinding?{nativeId:draft.nativeBinding.nativeId,accountScope:draft.nativeBinding.accountScope}:{})});
         const native=proof?.bindings?.[0];
         if(proof?.ok===true && proof.readOnly===true && proof.bindings.length===1 && native.id===draft.id && typeof native.nativeId==='string' && native.nativeId && typeof native.accountScope==='string' && native.accountScope) {
           entry.status='matched';entry.nativeBinding={id:native.id,nativeId:native.nativeId,accountScope:native.accountScope};
@@ -169,6 +169,23 @@ class NativeAdapter {
       } catch { /* Inspection failure preserves the original uncertain state. */ }
     }
     return {version:1,readOnly:true,accountId,executorSessionId:this.sessionId,inspectedAt:Date.now(),entries};
+  }
+  async reconcileImport(op,context={}) {
+    const intent=op.payload.reconciliation,snapshot=intent?.task;
+    const hash=value=>crypto.createHash('sha256').update(JSON.stringify(value,(key,item)=>key==='downloadUrl'?undefined:item)).digest('hex');
+    const check=this.leaseGuard(op,context);check();
+    const original=this.journal.get(intent?.originalOperationId),binding=this.journal.task(snapshot?.id);
+    if(!snapshot?.id || !intent.proofOperationId || !Array.isArray(snapshot.references) || snapshot.references.length || original?.operation.kind!=='import' || original.operation.accountId!==op.accountId || original.operation.taskId!==snapshot.id || original.state!=='done' || !original.reported || original.result?.outcome!=='uncertain' || hash(snapshot)!==intent.snapshotHash || hash(original.operation.payload.task)!==intent.snapshotHash || binding?.snapshotHash!==intent.snapshotHash || binding.accountId!==op.accountId || binding.draftId!==intent.draftId)throw new Error('original import snapshot mismatch');
+    const draft=drafts.list().find(d=>d.id===intent.draftId),native=intent.nativeBinding;
+    if(!draft || !['saving','saved'].includes(draft.nativeState) || draft.submissionRecord || draft.instanceId!==stableId('studio-account-',op.accountId) || draft.draftNumber!==intent.draftNumber || draft.draftNumber!==drafts.numberFor(draft.id) || draft.template?.studioTaskId!==snapshot.id || draft.template.prompt!==snapshot.prompt || !Array.isArray(draft.template.attachments) || draft.template.attachments.length || ['model','duration','ratio'].some(key=>draft.template[key]!==snapshot.parameters?.[key]) || draft.executionMode!=='work' || !draft.nativePrompt || crypto.createHash('sha256').update(draft.nativePrompt.replace(/\s+/g,' ').trim()).digest('hex')!==intent.nativePromptSha256 || native?.id!==draft.id || !native.nativeId || !native.accountScope || [draft.nativeBinding,binding.nativeBinding].some(b=>b && (b.id!==native.id || b.nativeId!==native.nativeId || b.accountScope!==native.accountScope)))throw new Error('original native draft binding mismatch');
+    const inst=this.account(op),win=await this.accounts.open(inst.id),driver=await this.driverFactory(inst,win.webContents);
+    if((await driver.isLoggedIn())?.loggedIn!==true)throw new Error('original account login proof missing');
+    const proof=await driver.call('verifyNativeDraftSaved',{id:draft.id,prompt:draft.nativePrompt,executionMode:draft.executionMode,nativeId:native.nativeId,accountScope:native.accountScope});
+    const verified=proof?.bindings?.[0];
+    if(proof?.ok!==true || proof.readOnly!==true || proof.bindings.length!==1 || verified?.id!==native.id || verified.nativeId!==native.nativeId || verified.accountScope!==native.accountScope)throw new Error('original native draft proof mismatch');
+    check();drafts.updateMany({[draft.id]:{nativeState:'saved',nativeBinding:verified,nativeError:''}});
+    check();this.journal.bindTask(snapshot.id,{nativeBinding:verified});
+    return {outcome:'success',receipt:{status:'draft_reconciled',browserReadOnly:true,originalOperationId:intent.originalOperationId,proofOperationId:intent.proofOperationId,taskId:snapshot.id,draftId:draft.id,snapshotHash:intent.snapshotHash,nativePromptSha256:intent.nativePromptSha256,nativeBinding:{id:native.id,nativeId:native.nativeId,accountScope:native.accountScope},environmentVersion:inst.studioEnvironment?.version,executorSessionId:this.sessionId,verifiedAt:Date.now()}};
   }
   async login(op,context={}) {
     const action=op.payload.action||'frame';
@@ -228,13 +245,14 @@ class NativeAdapter {
     if(op.kind==='import')return this.import(op,false,context);
     if(op.kind==='send')return this.send(op,false,context);
     if(op.kind==='track')return this.track(op);
-    if(op.kind==='account')return this.login(op,context);
+    if(op.kind==='account')return op.payload.action==='reconcile_import'?this.reconcileImport(op,context):this.login(op,context);
     throw new Error('unsupported operation');
   }
   async recover(op,context={}) {
     if(op.kind==='import')return this.import(op,true,context);
     if(op.kind==='send')return this.send(op,true,context);
     if(op.kind==='track')return this.track(op);
+    if(op.payload.action==='reconcile_import')return this.reconcileImport(op,context);
     // Input commands may have succeeded. Never replay keystrokes after interruption.
     if(op.payload.action==='input') {
       let receipt;
