@@ -83,7 +83,7 @@ class StudioControl {
     if(ctx?.id!==descriptor.id) {
       this.closeSession(ctx);
       ctx={id:descriptor.id,accountId:descriptor.accountId,version:descriptor.account.environment.version,expiresAt:descriptor.expiresAt,
-        abort:new AbortController(),queue:[],seen:new Map(),acknowledgements:[],connected:true,loginState:'unknown',buttons:0,keys:new Set(),lastProbe:0};
+        abort:new AbortController(),queue:[],seen:new Map(),acknowledgements:[],connected:true,loginState:'unknown',buttons:0,keys:new Set(),lastProbe:0,captureFailures:0};
       this.session=ctx;
       try {ctx.inst=this.adapter.account({kind:'account',accountId:ctx.accountId,payload:{account:descriptor.account}});} catch(error) {this.closeSession(ctx);throw error;}
       ctx.ready=Promise.resolve().then(()=>{this.check(ctx);return this.accounts.open(ctx.inst.id);}).then(win=>{
@@ -207,8 +207,14 @@ class StudioControl {
       const jpeg=image.toJPEG(70);if(jpeg.length>1024*1024)throw Error('control frame too large');
       const [width,height]=ctx.win.getContentSize();
       ctx.pendingFrame={imageBase64:jpeg.toString('base64'),contentType:'image/jpeg',width,height,capturedAt:Date.now(),loginState:ctx.loginState};
+      ctx.captureFailures=0;
       this.flushFrames();
-    } catch {if(this.session===ctx)this.reportError(ctx,'账号画面读取失败，请手动刷新或重新连接');} finally {
+    } catch {
+      if(this.session===ctx&&ctx.captureFailures<5) {
+        ctx.captureFailures++;
+        if(ctx.captureFailures===5)this.reportError(ctx,'账号画面读取失败，请手动刷新或重新连接');
+      }
+    } finally {
       ctx.capturing=false;if(ctx.captureAgain) {ctx.captureAgain=false;this.capture(ctx);}
     }
   }
