@@ -149,6 +149,41 @@ test('account login normalized click is bounded, screenshot size safe and passwo
   await assert.rejects(adapter.execute({...op,payload:{...op.payload,action:'navigate',url:'https://outside.example/'}}),/Doubao/);queue.stopAll();
 });
 
+for(const verified of [true,false]) test(`a frame inspects interrupted native imports without changing their local state (${verified})`,async()=>{
+  setupNative();const j=journal(),calls=[];
+  const wc={capturePage:async()=>({toJPEG:()=>Buffer.from('jpeg')})};
+  const driver={isLoggedIn:async()=>({loggedIn:true}),call:async(name,opts)=>{
+    calls.push({name,opts});return verified?{ok:true,readOnly:true,bindings:[{id:'pending-draft',nativeId:'native-original',accountScope:'scope-a'}]}:{ok:false,reason:'完整存储尚未确认'};
+  }};
+  const adapter=new executorModule.NativeAdapter({journal:j,client:{token:'private-token'},accounts:{open:async()=>({webContents:wc,getContentSize:()=>[1000,800]})},driverFactory:async()=>driver});
+  const op={...operation('account'),payload:{account:{id:'account1',name:'测试'},action:'frame'}},inst=adapter.account(op);
+  store.get().taskDrafts.push({id:'pending-draft',instanceId:inst.id,nativeState:'saving',nativePrompt:'[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)\n【草稿编号：DB-111111111111111111111111】\n原始验收正文',draftNumber:'DB-111111111111111111111111',executionMode:'work',template:{studioTaskId:'task1'}});
+  j.bindTask('task1',{accountId:'account1',draftId:'pending-draft',snapshotHash:'a'.repeat(64)});
+  const before=JSON.stringify(store.get()),journalBefore=fs.readFileSync(j.file,'utf8');
+  const result=await adapter.execute(op),proof=result.receipt.draftInspection;
+  assert.equal(result.outcome,'success');assert.equal(proof.readOnly,true);assert.equal(proof.accountId,'account1');
+  assert.equal(proof.entries[0].taskId,'task1');assert.equal(proof.entries[0].status,verified?'matched':'unverified');
+  if(verified)assert.deepEqual(proof.entries[0].nativeBinding,{id:'pending-draft',nativeId:'native-original',accountScope:'scope-a'});
+  assert.deepEqual(calls.map(c=>c.name),['verifyNativeDraftSaved']);
+  assert.equal(calls[0].opts.prompt,store.get().taskDrafts[0].nativePrompt);
+  assert.equal(JSON.stringify(store.get()),before);assert.equal(fs.readFileSync(j.file,'utf8'),journalBefore);
+  assert.equal(JSON.stringify(proof).includes('原始验收正文'),false);queue.stopAll();
+});
+
+test('interrupted draft inspection rejects foreign journal bindings and incomplete proof',async()=>{
+  setupNative();const j=journal(),calls=[];
+  const driver={call:async(name,opts)=>{calls.push(opts.id);return {ok:true,bindings:[{id:opts.id,nativeId:'native',accountScope:'scope'}]};}};
+  const adapter=new executorModule.NativeAdapter({journal:j,accounts:{},client:{}}),inst=adapter.account(nativeOperation());
+  for(const [id,accountId] of [['foreign','another-account'],['unproven','account1']]) {
+    store.get().taskDrafts.push({id,instanceId:inst.id,nativeState:'saving',nativePrompt:'unchanged',executionMode:'work',template:{studioTaskId:id}});
+    j.bindTask(id,{accountId,draftId:id,snapshotHash:'a'.repeat(64)});
+  }
+  const before=JSON.stringify(store.get()),journalBefore=fs.readFileSync(j.file,'utf8');
+  const proof=await adapter.inspectPendingDrafts('account1',inst,driver);
+  assert.deepEqual(calls,['unproven']);assert.ok(proof.entries.every(e=>e.status==='unverified' && !e.nativeBinding));
+  assert.equal(JSON.stringify(store.get()),before);assert.equal(fs.readFileSync(j.file,'utf8'),journalBefore);queue.stopAll();
+});
+
 
 test('explicit server mode enters isolated executor without loading desktop services',()=>{
   const vm=require('node:vm'), source=fs.readFileSync(path.join(__dirname,'../src/main.js'),'utf8');

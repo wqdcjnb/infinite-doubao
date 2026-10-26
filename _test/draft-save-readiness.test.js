@@ -1,6 +1,6 @@
 "use strict";
 const { test } = require("node:test"), assert = require("node:assert/strict"), vm = require("node:vm"), fs = require("node:fs"), path = require("node:path");
-async function save({ stale = false, upload = 0, bodyAfterSwitch = 0 } = {}) {
+async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, noSidebar = false } = {}) {
   let now = 1000, switched = 0, filledAt = 0, current = { tagName: "TEXTAREA", value: "" };
   const prompt = "【草稿编号：DB-111111111111111111111111】 视频", scope = "account-a";
   const metadata = { id: "native", title: prompt, scene: "new-office-task", inputDraftIndex: { accountScope: scope, conversationScope: "local:native", inputId: "primary" } };
@@ -9,7 +9,7 @@ async function save({ stale = false, upload = 0, bodyAfterSwitch = 0 } = {}) {
   const button = { get disabled() { return now < filledAt + upload; }, getAttribute: () => null };
   const newChat = { innerText: "新对话", click() { switched = now; current.value = ""; } };
   const document = { querySelector: s => s.includes("draft-conversation-section") ? section : s.includes("chat_input_action_mode") ? mode : s.includes("chat_input_send_button") ? button : current,
-    querySelectorAll: s => s.includes("draft-conversation-section") ? switched ? [row] : [] : [newChat] };
+    querySelectorAll: s => s.includes("draft-conversation-section") ? switched && !noSidebar ? [row] : [] : [newChat] };
   function input() {
     const ready = bodyAfterSwitch ? switched && now >= switched + bodyAfterSwitch : now >= filledAt + 200;
     return { state: { accountScope: scope, records: ready ? [{ address: metadata.inputDraftIndex, updatedAt: stale ? 1 : now,
@@ -41,4 +41,9 @@ test("旧正文不能触发快速确认，素材上传未完成不能离开输�
 });
 test("侧栏新条目出现后仍核对完整正文落盘，不能提前显示保存成功", async () => {
   const result = await save({ bodyAfterSwitch: 400 }); assert.ok(result.savedMs >= result.switchMs + 400);
+});
+
+test("侧栏未显示或重挂载时，按完整账号范围正文确认原生草稿保存", async () => {
+  const result = await save({ noSidebar: true });
+  assert.ok(result.savedMs >= result.switchMs);
 });
