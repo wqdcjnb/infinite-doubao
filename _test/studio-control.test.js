@@ -75,6 +75,50 @@ test('continuous frames use the fixed control contract without repeatedly config
   await h.deliver(descriptor());assert.equal(h.configured.length,1);
 });
 
+test('first compositor capture failure recovers on the next tick without publishing a fatal error',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:1000000});
+  const h=setup(t),capture=h.wc.capturePage;let attempts=0;
+  h.wc.capturePage=(...args)=>{if(++attempts===1)throw Error('UnknownVizError');return capture(...args);};
+  await h.deliver(descriptor());assert.equal(attempts,1);assert.equal(h.publishes.some(body=>body.error),false);
+  t.mock.timers.tick(200);await flush();
+  assert.equal(attempts,2);assert.equal(h.publishes.filter(body=>body.frame).length,1);assert.equal(h.publishes.some(body=>body.error),false);
+  await h.deliver(descriptor(),[inputCommand('after-warmup',{kind:'text',text:'只发送一次'})]);
+  assert.equal(h.acks().find(ack=>ack.id==='after-warmup')?.ok,true);assert.deepEqual(h.events.map(item=>item.value.text),['只发送一次']);
+  assert.equal(h.configured.length,1);assert.equal(h.win.isDestroyed(),false);
+});
+
+test('five consecutive capture failures report once while ticker work stays bounded',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:1000000});
+  const h=setup(t);let attempts=0;h.wc.capturePage=async()=>{attempts++;throw Error('UnknownVizError');};
+  await h.deliver(descriptor());
+  for(let i=0;i<3;i++) {t.mock.timers.tick(200);await flush();}
+  assert.equal(attempts,4);assert.equal(h.publishes.some(body=>body.error),false);
+  t.mock.timers.tick(200);await flush();
+  const errors=h.publishes.filter(body=>body.error);assert.equal(attempts,5);assert.equal(errors.length,1);assert.match(errors[0].error,/画面.*失败/);
+  for(let i=0;i<3;i++) {t.mock.timers.tick(200);await flush();}
+  assert.equal(attempts,8);assert.equal(h.publishes.filter(body=>body.error).length,1);assert.equal(h.publishes.some(body=>body.frame),false);
+});
+
+test('a successful frame resets consecutive failure counting before another failure burst',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:1000000});
+  const h=setup(t),capture=h.wc.capturePage;let attempts=0;
+  h.wc.capturePage=(...args)=>{if(++attempts!==3)throw Error('UnknownVizError');return capture(...args);};
+  await h.deliver(descriptor());
+  for(let i=0;i<6;i++) {t.mock.timers.tick(200);await flush();}
+  assert.equal(attempts,7);assert.equal(h.publishes.filter(body=>body.frame).length,1);assert.equal(h.publishes.some(body=>body.error),false);
+  t.mock.timers.tick(200);await flush();assert.equal(h.publishes.filter(body=>body.error).length,1);
+});
+
+test('a new control session starts its own capture warmup allowance',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:1000000});
+  const h=setup(t);h.wc.capturePage=async()=>{throw Error('UnknownVizError');};await h.deliver(descriptor());
+  for(let i=0;i<3;i++) {t.mock.timers.tick(200);await flush();}
+  await h.deliver(descriptor('session-2'));
+  for(let i=0;i<3;i++) {t.mock.timers.tick(200);await flush();}
+  assert.equal(h.publishes.some(body=>body.error),false);
+  t.mock.timers.tick(200);await flush();assert.equal(h.publishes.filter(body=>body.error).length,1);
+});
+
 test('real NativeAdapter persists account setup once and continuous captures leave the local store untouched',async t=>{
   const P=require('../src/paths'),store=require('../src/store'),temporary=fs.mkdtempSync(path.join(os.tmpdir(),'studio-control-store-'));
   P.init({home:temporary});store.load();let saves=0;
