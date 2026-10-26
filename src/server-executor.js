@@ -208,12 +208,17 @@ class NativeAdapter {
     if(op.kind==='account')return this.login(op,context);
     throw new Error('unsupported operation');
   }
-  recover(op,context={}) {
+  async recover(op,context={}) {
     if(op.kind==='import')return this.import(op,true,context);
     if(op.kind==='send')return this.send(op,true,context);
     if(op.kind==='track')return this.track(op);
     // Input commands may have succeeded. Never replay keystrokes after interruption.
-    return this.login({...op,payload:{...op.payload,action:op.payload.action==='input'?'frame':op.payload.action}},context);
+    if(op.payload.action==='input') {
+      let receipt;
+      try {({receipt}=await this.login({...op,payload:{...op.payload,action:'frame'}},context));} catch {}
+      return {outcome:'uncertain',receipt:{...receipt,error:'原输入结果未知，请人工核验；不会自动重发'}};
+    }
+    return this.login(op,context);
   }
 }
 function readConfig(file) {

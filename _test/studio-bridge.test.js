@@ -364,3 +364,12 @@ test('navigation and screenshot errors fail safely while failed input keeps its 
  const inputAdapter=new executorModule.NativeAdapter({journal:journal(),client:{token:'private-token'},accounts:{open:async()=>{throw Error('input outcome unknown');}}});
  await assert.rejects(inputAdapter.execute({...operation('account'),payload:{account:{id:'account1'},action:'input',inputEncrypted:encryptedInput({kind:'key',key:'Enter'})}}),/input outcome unknown/);queue.stopAll();
 });
+
+for(const inspection of ['open failure','capture failure','frame success'])test('started input stays uncertain after recovery '+inspection+' without replay',async()=>{
+ setupNative();const j=journal(),api=transport();let inputs=0;
+ const wc={debugger:{sendCommand:async()=>{inputs++;}},capturePage:async()=>{if(inspection==='capture failure')throw Error('private capture');return {toJPEG:()=>Buffer.from('jpeg')};}};
+ const adapter=new executorModule.NativeAdapter({journal:j,client:{token:'private-token'},accounts:{open:async()=>{if(inspection==='open failure')throw Error('private open');return {webContents:wc,getContentSize:()=>[1280,900]};}},driverFactory:async()=>({isLoggedIn:async()=>({loggedIn:true})})});
+ const op={...operation('account'),payload:{account:{id:'account1'},action:'input',inputEncrypted:encryptedInput({kind:'key',key:'Enter'})}};j.begin(op);
+ const reopened=new Journal(j.file),bridge=new StudioBridge({journal:reopened,api,adapter});await bridge.processOperation(op);
+ assert.equal(inputs,0);assert.equal(api.reports.length,1);assert.equal(api.reports[0].op.payload.action,'input');assert.equal(api.reports[0].result.outcome,'uncertain');assert.equal(reopened.get(op.id).result.outcome,'uncertain');assert.equal(JSON.stringify(api.reports[0].result).includes('private'),false);queue.stopAll();
+});
