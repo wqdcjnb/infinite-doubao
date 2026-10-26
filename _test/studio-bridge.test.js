@@ -351,3 +351,16 @@ test('probe returns version and executor generation even when browser proxy navi
   assert.equal(result.receipt.environmentVersion,'version-fixture');assert.equal(result.receipt.executorSessionId,'session-fixture');
   assert.equal(result.receipt.environmentCheck.proxy.ok,false);assert.equal(JSON.stringify(result).includes('synthetic secret'),false);queue.stopAll();
 });
+
+for(const action of ['open','navigate','frame'])test('failed account '+action+' is a definite page failure, never an unknown generation',async()=>{
+ setupNative();const adapter=new executorModule.NativeAdapter({journal:journal(),client:{token:'private-token'},accounts:{open:async()=>{throw Error('https://private:secret@proxy.test:1234 timeout');}}});
+ const result=await adapter.execute({...operation('account'),payload:{account:{id:'account1'},action}});
+ assert.equal(result.outcome,'failure');assert.equal(JSON.stringify(result).includes('secret'),false);queue.stopAll();
+});
+test('navigation and screenshot errors fail safely while failed input keeps its unknown protection',async()=>{
+ setupNative();const wc={loadURL:async()=>{throw Error('private navigation timeout');},capturePage:async()=>{throw Error('private capture failure');}};
+ const adapter=new executorModule.NativeAdapter({journal:journal(),client:{token:'private-token'},accounts:{open:async()=>({webContents:wc,getContentSize:()=>[1280,900]})}});
+ for(const action of ['navigate','frame']){const result=await adapter.execute({...operation('account'),payload:{account:{id:'account1'},action}});assert.equal(result.outcome,'failure');assert.equal(JSON.stringify(result).includes('private'),false);}
+ const inputAdapter=new executorModule.NativeAdapter({journal:journal(),client:{token:'private-token'},accounts:{open:async()=>{throw Error('input outcome unknown');}}});
+ await assert.rejects(inputAdapter.execute({...operation('account'),payload:{account:{id:'account1'},action:'input',inputEncrypted:encryptedInput({kind:'key',key:'Enter'})}}),/input outcome unknown/);queue.stopAll();
+});
