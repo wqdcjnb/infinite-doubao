@@ -351,3 +351,25 @@ test('probe returns version and executor generation even when browser proxy navi
   assert.equal(result.receipt.environmentVersion,'version-fixture');assert.equal(result.receipt.executorSessionId,'session-fixture');
   assert.equal(result.receipt.environmentCheck.proxy.ok,false);assert.equal(JSON.stringify(result).includes('synthetic secret'),false);queue.stopAll();
 });
+
+for(const action of ['open','navigate','frame'])test('failed account '+action+' is a definite page failure, never an unknown generation',async()=>{
+ setupNative();const adapter=new executorModule.NativeAdapter({journal:journal(),client:{token:'private-token'},accounts:{open:async()=>{throw Error('https://private:secret@proxy.test:1234 timeout');}}});
+ const result=await adapter.execute({...operation('account'),payload:{account:{id:'account1'},action}});
+ assert.equal(result.outcome,'failure');assert.equal(JSON.stringify(result).includes('secret'),false);queue.stopAll();
+});
+test('navigation and screenshot errors fail safely while failed input keeps its unknown protection',async()=>{
+ setupNative();const wc={loadURL:async()=>{throw Error('private navigation timeout');},capturePage:async()=>{throw Error('private capture failure');}};
+ const adapter=new executorModule.NativeAdapter({journal:journal(),client:{token:'private-token'},accounts:{open:async()=>({webContents:wc,getContentSize:()=>[1280,900]})}});
+ for(const action of ['navigate','frame']){const result=await adapter.execute({...operation('account'),payload:{account:{id:'account1'},action}});assert.equal(result.outcome,'failure');assert.equal(JSON.stringify(result).includes('private'),false);}
+ const inputAdapter=new executorModule.NativeAdapter({journal:journal(),client:{token:'private-token'},accounts:{open:async()=>{throw Error('input outcome unknown');}}});
+ await assert.rejects(inputAdapter.execute({...operation('account'),payload:{account:{id:'account1'},action:'input',inputEncrypted:encryptedInput({kind:'key',key:'Enter'})}}),/input outcome unknown/);queue.stopAll();
+});
+
+for(const inspection of ['open failure','capture failure','frame success'])test('started input stays uncertain after recovery '+inspection+' without replay',async()=>{
+ setupNative();const j=journal(),api=transport();let inputs=0;
+ const wc={debugger:{sendCommand:async()=>{inputs++;}},capturePage:async()=>{if(inspection==='capture failure')throw Error('private capture');return {toJPEG:()=>Buffer.from('jpeg')};}};
+ const adapter=new executorModule.NativeAdapter({journal:j,client:{token:'private-token'},accounts:{open:async()=>{if(inspection==='open failure')throw Error('private open');return {webContents:wc,getContentSize:()=>[1280,900]};}},driverFactory:async()=>({isLoggedIn:async()=>({loggedIn:true})})});
+ const op={...operation('account'),payload:{account:{id:'account1'},action:'input',inputEncrypted:encryptedInput({kind:'key',key:'Enter'})}};j.begin(op);
+ const reopened=new Journal(j.file),bridge=new StudioBridge({journal:reopened,api,adapter});await bridge.processOperation(op);
+ assert.equal(inputs,0);assert.equal(api.reports.length,1);assert.equal(api.reports[0].op.payload.action,'input');assert.equal(api.reports[0].result.outcome,'uncertain');assert.equal(reopened.get(op.id).result.outcome,'uncertain');assert.equal(JSON.stringify(api.reports[0].result).includes('private'),false);queue.stopAll();
+});

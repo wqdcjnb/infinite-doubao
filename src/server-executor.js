@@ -154,6 +154,7 @@ class NativeAdapter {
     const checkAction=this.leaseGuard(op,context);
     const inst=this.account(op);let win;
     try {win=await this.accounts.open(inst.id);} catch(error) {
+      if(['open','navigate','frame'].includes(action))return {outcome:'failure',receipt:{error:'账号页面加载失败，请检查出口配置后手动重试'}};
       if(action!=='probe')throw error;
       return {outcome:'success',receipt:{environmentVersion:inst.studioEnvironment?.version,executorSessionId:this.sessionId,
         environmentCheck:{proxy:{ok:false,ip:'',location:'',latency:0,message:'account proxy or target navigation failed'},fingerprint:{ok:false,message:'target page unavailable'}}}};
@@ -167,7 +168,7 @@ class NativeAdapter {
     if(action==='navigate') {
       const url=new URL(op.payload.url||store.DEFAULT_URL);
       if(url.href!==store.DEFAULT_URL)throw new Error('Doubao login navigation only');
-      checkAction();await wc.loadURL(url.href);
+      checkAction();try {await wc.loadURL(url.href);} catch {return {outcome:'failure',receipt:{error:'豆包登录页面加载失败，请检查出口配置后手动重试'}};}
     } else if(action==='input') {
       if(input.kind==='click') {
         if(!Number.isFinite(input.x)||!Number.isFinite(input.y)||input.x<0||input.x>1||input.y<0||input.y>1)throw new Error('invalid click coordinates');
@@ -186,7 +187,12 @@ class NativeAdapter {
         for(const type of ['keyDown','keyUp']) {checkAction();await wc.debugger.sendCommand('Input.dispatchKeyEvent',{type,key:input.key,code:input.key,windowsVirtualKeyCode:keyCode,...(type==='keyDown'&&input.key==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});}
       } else throw new Error('unsupported login input');
     } else if(!['open','frame','screenshot'].includes(action))throw new Error('unsupported login action');
-    const image=await wc.capturePage(undefined,{stayHidden:true}),jpeg=image.toJPEG(70);
+    let image;
+    try {image=await wc.capturePage(undefined,{stayHidden:true});} catch(error) {
+      if(action==='input')throw error;
+      return {outcome:'failure',receipt:{error:'账号画面读取失败，请手动刷新'}};
+    }
+    const jpeg=image.toJPEG(70);
     if(jpeg.length>1024*1024)throw new Error('login screenshot too large');
     const driver=await this.driverFactory(inst,wc),login=await driver.isLoggedIn().catch(()=>({}));
     const [width,height]=win.getContentSize();
@@ -202,12 +208,17 @@ class NativeAdapter {
     if(op.kind==='account')return this.login(op,context);
     throw new Error('unsupported operation');
   }
-  recover(op,context={}) {
+  async recover(op,context={}) {
     if(op.kind==='import')return this.import(op,true,context);
     if(op.kind==='send')return this.send(op,true,context);
     if(op.kind==='track')return this.track(op);
     // Input commands may have succeeded. Never replay keystrokes after interruption.
-    return this.login({...op,payload:{...op.payload,action:op.payload.action==='input'?'frame':op.payload.action}},context);
+    if(op.payload.action==='input') {
+      let receipt;
+      try {({receipt}=await this.login({...op,payload:{...op.payload,action:'frame'}},context));} catch {}
+      return {outcome:'uncertain',receipt:{...receipt,error:'原输入结果未知，请人工核验；不会自动重发'}};
+    }
+    return this.login(op,context);
   }
 }
 function readConfig(file) {
