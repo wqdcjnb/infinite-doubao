@@ -19,10 +19,16 @@ function parseConfig(environment,token) {
   const config=decryptEnvironment(environment,token);
   let proxy;
   try {
-    if(!environment.version || config.proxy?.mode!=='custom')throw Error();
+    if(!environment.version)throw Error();
+    if(config.proxy?.mode==='direct') {
+      if(Object.keys(config.proxy).some(key=>key!=='mode'))throw Error();
+      proxy={mode:'direct'};
+    } else {
+    if(config.proxy?.mode!=='custom')throw Error();
     const url=new URL(config.proxy.url),protocol=url.protocol.slice(0,-1),port=Number(url.port||(protocol==='https'?443:protocol==='http'?80:0));
     if(!['http','https','socks5'].includes(protocol)||!url.hostname||!Number.isSafeInteger(port)||port<1||port>65535||url.search||url.hash||!['','/'].includes(url.pathname))throw Error();
     proxy={protocol,host:url.hostname,port,username:decodeURIComponent(url.username),password:decodeURIComponent(url.password)};
+    }
     const f=config.fingerprint;
     if(!f||typeof f.seed!=='string'||!f.seed||f.seed.length>128||typeof f.language!=='string'||!f.language||f.language.length>40||typeof f.timezone!=='string')throw Error();
     new Intl.DateTimeFormat(f.language,{timeZone:f.timezone});
@@ -32,7 +38,7 @@ function parseConfig(environment,token) {
   return {config,proxy};
 }
 function authenticate(proxy,info,callback) {
-  if(info.isProxy && String(info.host).replace(/^\[|\]$/g,'').toLowerCase()===proxy.host.replace(/^\[|\]$/g,'').toLowerCase() && Number(info.port)===proxy.port)callback(proxy.username,proxy.password);
+  if(proxy.mode!=='direct' && info.isProxy && String(info.host).replace(/^\[|\]$/g,'').toLowerCase()===proxy.host.replace(/^\[|\]$/g,'').toLowerCase() && Number(info.port)===proxy.port)callback(proxy.username,proxy.password);
   else callback();
 }
 class StudioEnvironment {
@@ -77,7 +83,7 @@ class StudioEnvironment {
     const state=this.state(inst),ses=this.session.fromPartition(inst.partition),previous=this.sessions.get(ses);
     if(previous?.version===state.version)return ses;
     try {
-      await ses.setProxy({mode:'fixed_servers',proxyRules:`${state.proxy.protocol}://${state.proxy.host}:${state.proxy.port}`,proxyBypassRules:'<-loopback>'});
+      await ses.setProxy(state.proxy.mode==='direct'?{mode:'direct'}:{mode:'fixed_servers',proxyRules:`${state.proxy.protocol}://${state.proxy.host}:${state.proxy.port}`,proxyBypassRules:'<-loopback>'});
       if(previous){await ses.closeAllConnections();await ses.clearAuthCache();}
       ses.setUserAgent(inst.fingerprint.userAgent,inst.fingerprint.languages.join(','));
       ses.webRequest.onBeforeSendHeaders((details,callback)=>{
@@ -122,7 +128,7 @@ class StudioEnvironment {
   }
   async check(inst,wc) {
     const ses=await this.prepareStudioSession(inst),state=this.state(inst);
-    const proxy=await this.probe({resolveProxy:url=>ses.resolveProxy(url),fetch:(url,init)=>this.request(ses,state.proxy,url,init)},{mode:'custom'});
+    const proxy=await this.probe({resolveProxy:url=>ses.resolveProxy(url),fetch:(url,init)=>this.request(ses,state.proxy,url,init)},{mode:state.proxy.mode==='direct'?'direct':'custom'});
     let fingerprint;
     try {
       const result=fpCheck.compare(inst.fingerprint,await fpCheck.read({instance:inst,webContents:wc}));

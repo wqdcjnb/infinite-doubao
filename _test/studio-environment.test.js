@@ -2,13 +2,34 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),crypto=require('node:crypto');
 const {EventEmitter}=require('node:events');
 const {StudioEnvironment,decryptEnvironment}=require('../src/studio-environment');
-function environment(username='alpha',version='v1',protocol='http') {
+function environment(username='alpha',version='v1',protocol='http',proxy) {
  const config={proxy:{mode:'custom',url:`${protocol}://${username}:synthetic@127.0.0.1:18881`},fingerprint:{seed:username,language:'zh-CN',timezone:'Asia/Shanghai',screen:{width:1920,height:1080}}};
+ if(proxy!==undefined)config.proxy=proxy;
  const iv=crypto.randomBytes(12),cipher=crypto.createCipheriv('aes-256-gcm',crypto.createHash('sha256').update('doubao-account-env-v1:token').digest(),iv);
  const data=Buffer.concat([cipher.update(JSON.stringify(config)),cipher.final()]);
  return {version,fingerprint:config.fingerprint,encrypted:{iv:iv.toString('base64'),tag:cipher.getAuthTag().toString('base64'),data:data.toString('base64')}};
 }
 function setup(){const app=new EventEmitter(),sessions=new Map();const session={fromPartition:p=>{if(!sessions.has(p))sessions.set(p,{config:[],setProxy:async function(c){this.config.push(c);},setUserAgent(){},clearAuthCache:async()=>{},closeAllConnections:async()=>{},webRequest:{onBeforeSendHeaders(){}}});return sessions.get(p);}};return {app,session,manager:new StudioEnvironment({app,session,token:'token'})};}
+
+test('explicit server egress switches both ways and clears prior connections and credentials',async()=>{
+ const {app,manager,session}=setup(),inst={id:'direct',partition:'persist:direct'};
+ const ses=session.fromPartition(inst.partition);let closed=0,cleared=0;
+ ses.closeAllConnections=async()=>{closed++;};ses.clearAuthCache=async()=>{cleared++;};
+ manager.configure(inst,environment('alpha','d1','http',{mode:'direct'}));await manager.prepareStudioSession(inst);
+ let credentials;app.emit('login',{preventDefault(){}},{session:ses},{},{isProxy:true,host:'127.0.0.1',port:18881},(...values)=>credentials=values);assert.deepEqual(credentials,[]);
+ manager.configure(inst,environment('alpha','c2'));await manager.prepareStudioSession(inst);
+ manager.configure(inst,environment('alpha','d3','http',{mode:'direct'}));await manager.prepareStudioSession(inst);
+ assert.deepEqual(ses.config,[{mode:'direct'},{mode:'fixed_servers',proxyRules:'http://127.0.0.1:18881',proxyBypassRules:'<-loopback>'},{mode:'direct'}]);
+ assert.equal(closed,2);assert.equal(cleared,2);
+ let mode;manager.probe=async(_ses,opts)=>{mode=opts.mode;return {ok:true,ip:'192.0.2.5'};};
+ const result=await manager.check(inst,{executeJavaScript:async()=>{throw Error('synthetic no page');}});
+ assert.equal(mode,'direct');assert.equal(result.proxy.ip,'192.0.2.5');
+});
+
+test('missing and conflicting routes cannot imply direct mode',()=>{
+ const {manager}=setup();
+ for(const proxy of [null,{}, {mode:'system'}, {mode:'direct',url:'http://private:secret@127.0.0.1:8888'}])assert.throws(()=>manager.configure({id:'bad',partition:'persist:bad'},environment('alpha','bad','http',proxy)),/^Error: invalid account environment$/);
+});
 test('encrypted dedicated environment authenticates, errors never reveal secrets',()=>{assert.equal(decryptEnvironment(environment(),'token').proxy.mode,'custom');assert.throws(()=>decryptEnvironment(environment(),'wrong'),/^Error: invalid account environment$/);});
 test('same gateway authentication follows session, not host, and denies origin authentication',async()=>{const {app,manager}=setup();const a={id:'a',partition:'persist:a'},b={id:'b',partition:'persist:b'};manager.configure(a,environment('alpha'));manager.configure(b,environment('beta'));const sa=await manager.prepareStudioSession(a),sb=await manager.prepareStudioSession(b);assert.notEqual(sa,sb);for(const [ses,user]of [[sa,'alpha'],[sb,'beta']]){let got;app.emit('login',{preventDefault(){}},{session:ses},{},{isProxy:true,host:'127.0.0.1',port:18881},(...v)=>got=v);assert.deepEqual(got,[user,'synthetic']);let denied;app.emit('login',{preventDefault(){}},{session:ses},{},{isProxy:false,host:'127.0.0.1',port:18881},(...v)=>denied=v);assert.deepEqual(denied,[]);}assert.deepEqual(sa.config,[{mode:'fixed_servers',proxyRules:'http://127.0.0.1:18881',proxyBypassRules:'<-loopback>'}]);});
 test('fixed profile persists version and never stores proxy password; same version cannot change',()=>{const {manager}=setup(),a={id:'a',partition:'persist:a'};manager.configure(a,environment());const restored=JSON.parse(JSON.stringify(a));assert.equal(restored.studioEnvironment.version,'v1');assert.equal(JSON.stringify(restored).includes('synthetic'),false);manager.configure(restored,environment());assert.deepEqual(restored.fingerprint,a.fingerprint);assert.throws(()=>manager.configure(a,environment('beta')),/version/);});
