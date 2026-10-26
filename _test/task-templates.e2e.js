@@ -87,10 +87,12 @@ const prompt = "午后阳光洒进咖啡馆，年轻人戴着白色耳机坐在�
     await openTemplate();
     await wait("document.querySelectorAll('.attachment-row').length === 2");
     assert.equal(await c.eval("document.querySelector('#templatePrompt').value"), prompt);
+    assert.equal(await c.eval("document.querySelector('#templateSubmit').disabled"), true);
     await click("#templateSubmit");
-    await wait("document.querySelector('#toasts').textContent.includes('请先在左侧打开一个账号')");
     assert.equal((await c.eval("DM.call('dm:tasks')")).data.length, 0);
-    console.log("PASS: 切页、刷新保持；缺少已打开账号时提示明确，不创建假任务");
+    const blocked = await c.eval(`DM.call('dm:template:submit', ${JSON.stringify(item.id)})`);
+    assert.equal(blocked.ok, false); assert.match(blocked.error, /请先在左侧打开一个账号/);
+    console.log("PASS: 切页、刷新保持；直接生成按钮禁用，后端缺账号校验保留");
 
     await c.send("Page.enable");
     let shot = await c.send("Page.captureScreenshot", { format: "png" });

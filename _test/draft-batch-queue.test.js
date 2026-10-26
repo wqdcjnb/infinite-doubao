@@ -321,7 +321,7 @@ test("重新存入不解除保存中、已发送或接收未知的保护，也�
     drafts.updateMany({ [ids[0]]: { ...before[0], submissionRecord: null, ...patch } });
     await assert.rejects(queue.saveDrafts(ids, { instanceId: inst.id, recreateDeleted: true }), /上次操作未确认/);
   }
-  assert.ok(calls.every(c => c.method === "verifyNativeDraftSaved"));
+  assert.ok(calls.every(c => ["verifyNativeDraftSaved", "cancelNativeDraftImport"].includes(c.method)));
 });
 
 test("重新存入重置状态写盘失败不改旧关联，不开始保存", async () => {

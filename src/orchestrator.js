@@ -4,6 +4,7 @@
 // accepted generation resumes it on the same account instead of sending twice.
 const { EventEmitter } = require("node:events");
 const crypto = require("node:crypto");
+const path = require("node:path");
 const store = require("./store");
 const quota = require("./quota");
 const storyboard = require("./storyboard");
@@ -598,15 +599,16 @@ async function saveDrafts(ids, options = {}) {
     converted.forEach((d) => { d.executionMode = "work"; });
   }
   return withNativeDrafts(selected, options, async (driver, inst, check, operation, checkAction) => {
-    const step = async (label, run) => {
+    const step = async (label, run, timeoutMs) => {
       emit("draft", { message: label + "…", instanceId: inst.id });
       log.info("draft-save-step", { instanceId: inst.id, stage: label });
-      const result = await draftStep(operation, label, run);
+      const result = await draftStep(operation, label, run, timeoutMs);
       checkAction();
       return requirePage(result);
     };
+    try {
     const selectedIds = new Set(selected.map((d) => d.id));
-    for (const d of selected.filter(d => d.nativeState === "saving")) {
+    for (const d of selected.filter(d => d.nativeState === "saving" && !d.template.attachments.length)) {
       const verified = await step("正在核对上次草稿保存结果", () => driver.call("verifyNativeDraftSaved", { id: d.id, prompt: d.nativePrompt, executionMode: d.executionMode, accountScope: d.nativeBinding?.accountScope }));
       const binding = verified.bindings?.find(b => b.id === d.id && b.nativeId && b.accountScope);
       if (!binding) throw new Error("上次操作未确认：未返回可核对的原生草稿记录，不会重复存入");
@@ -631,22 +633,37 @@ async function saveDrafts(ids, options = {}) {
     let count = 0;
     for (const draft of selected) {
       check();
-      if (draft.nativeState === "saved") { count++; continue; }
+      if (draft.nativeState === "saved" && !draft.template.attachments.length) { count++; continue; }
       const record = templateRecords(draft.template, draft.executionMode);
       const draftNumber = draft.draftNumber || drafts.numberFor(draft.id);
-      record.task.prompt = withSeedanceSkill(`【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`);
+      record.task.prompt = draft.nativePrompt || withSeedanceSkill(`【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`);
+      const attachmentNames = record.task.refs.map(file => path.basename(file));
+      const importOptions = { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode, attachmentNames, nativeId: draft.nativeBinding?.nativeId, accountScope: draft.nativeBinding?.accountScope };
+      let uploadRefs = record.task.refs;
       try {
       checkAction();
       const position = `${count + 1}/${selected.length}`;
+      if (draft.nativeState === "saved" || draft.nativeState === "saving") {
+        const resumed = await step(`正在核对草稿图片 ${position}`, () => driver.call("resumeNativeDraftImport", importOptions), 75000);
+        if (resumed.bindings?.length) drafts.updateMany(bindingPatches(resumed.bindings));
+        const binding = resumed.bindings?.find(b => b.id === draft.id);
+        if (binding) Object.assign(importOptions, { nativeId: binding.nativeId, accountScope: binding.accountScope });
+        if (resumed.complete) {
+          drafts.updateMany({ [draft.id]: { nativeState: "saved", nativeError: "" } }); count++; continue;
+        }
+        if (!Array.isArray(resumed.missingNames) || resumed.missingNames.some(name => !attachmentNames.includes(name))) throw new Error("未确认原草稿缺失的素材，未重复导入");
+        uploadRefs = record.task.refs.filter(file => resumed.missingNames.includes(path.basename(file)));
+      } else {
       await step(`正在准备云电脑草稿 ${position}`, () => driver.call("prepareNativeDraft", { executionMode: draft.executionMode, model: record.task.model, duration: record.task.duration, ratio: record.task.ratio }));
+      }
       checkAction();
       // Save intent before uploading/filling: an interrupted save must not create duplicates.
       drafts.updateMany({ [draft.id]: { draftNumber, instanceId: inst.id, instanceName: inst.name, nativeState: "saving", nativePrompt: record.task.prompt, nativeError: "" } });
-      if (record.task.refs.length) { checkAction(); await step(`正在上传草稿素材 ${position}`, () => driver.pasteFiles(record.task.refs)); }
-      checkAction();
       await step(`正在填写草稿提示词 ${position}`, () => driver.setText(record.task.prompt));
       checkAction();
-      const saved = await step(`正在确认豆包草稿保存 ${position}`, () => driver.call("saveNativeDraft", { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode }));
+      if (uploadRefs.length) { await step(`正在上传草稿素材 ${position}`, () => driver.pasteFiles(uploadRefs)); }
+      checkAction();
+      const saved = await step(`正在确认豆包草稿保存 ${position}（含图片）`, () => driver.call("saveNativeDraft", importOptions), 210000);
       const patches = bindingPatches(saved.bindings);
       if (!patches[draft.id]) throw new Error("豆包未返回新草稿的位置，请在左侧草稿核对");
       patches[draft.id].nativeState = "saved";
@@ -660,6 +677,10 @@ async function saveDrafts(ids, options = {}) {
       }
     }
     return { count, instanceId: inst.id, instanceName: inst.name };
+    } finally {
+      // A stopped IPC wait must not switch the page later when an upload finishes.
+      void driver.call("cancelNativeDraftImport").catch(() => {});
+    }
   });
 }
 async function submitDrafts(ids, options = {}) {

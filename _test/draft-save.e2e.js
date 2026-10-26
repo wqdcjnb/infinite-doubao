@@ -11,14 +11,15 @@ store.load(); store.get().settings.server.enabled = false; store.get().settings.
 const account = store.add({ id: "save-fixture", name: "草稿保存测试", url: `http://127.0.0.1:${port}/chat/read-only?no-composer=1` });
 const items = [templates.create({ name: "模板 A", prompt: "同样的视频正文", duration: 5 }), templates.create({ name: "模板 B", prompt: "另一模板的视频正文", duration: 5 })];
 const ids = [];
-const initialized = templates.importAttachments(items[1].id, [path.join(__dirname, "clip.mp4")]).then(() => {
+const pictures = Array.from({length:5}, (_,i) => { const file=path.join(home, `picture-${i+1}.png`);fs.writeFileSync(file,Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=","base64"));return file; });
+const initialized = templates.importAttachments(items[1].id, pictures).then(() => {
   ids.push(...Array.from({ length: 25 }, (_, i) => drafts.create(items[i % 2].id).id)); store.save();
 });
 let sends = 0, child, c;
 const server = http.createServer((req, res) => {
   if (req.url === "/submit") { sends++; res.writeHead(500); return res.end("must not send"); }
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessionid=fixture-only; Path=/" });
-  const seed = `<script>window.fixtureEditorModel=true;if(!localStorage.getItem('fixture'))localStorage.setItem('fixture','{"drafts":[],"conversations":[]}');${fs.readFileSync(path.join(__dirname, "native-drafts-indexeddb.js"), "utf8")}</script>`;
+  const seed = `<script>window.fixtureEditorModel=true;window.fixtureUploadWithoutDisabled=true;window.fixtureUploadDelay=1500;if(!localStorage.getItem('fixture'))localStorage.setItem('fixture','{"drafts":[],"conversations":[]}');${fs.readFileSync(path.join(__dirname, "native-drafts-indexeddb.js"), "utf8")}</script>`;
   res.end(fs.readFileSync(path.join(__dirname, "native-drafts-fixture.html"), "utf8").replace("<script>", seed + "<script>"));
 });
 const pause = ms => new Promise(r => setTimeout(r, ms));
@@ -36,6 +37,9 @@ async function wait(fn, timeout = 15000) {
     await wait(async () => { try { c = await CDP.attach(); return true; } catch { return false; } });
     await wait(() => c.eval("document.readyState==='complete' && typeof state!=='undefined' && state.accounts.length===1"));
     assert.equal(path.resolve((await c.eval("DM.paths()")).home), home);
+    assert.equal(await c.eval("document.querySelector('#templateSubmit').disabled"), true);
+    await c.eval("document.querySelector('#templateSubmit').click()");
+    assert.equal((await c.eval("DM.call('dm:tasks')")).data.length, 0);
     await c.eval("document.querySelector('[data-view=drafts]').click();openAccount(state.accounts[0],{background:true})");
     const page = code => c.eval(`document.querySelector('webview').executeJavaScript(${JSON.stringify(code)})`);
     await wait(() => page("document.readyState==='complete' && window.fixtureReady"));
@@ -89,7 +93,7 @@ async function wait(fn, timeout = 15000) {
     const native = await page("JSON.parse(localStorage.getItem('fixture')).drafts.map(d=>({id:d.id,prompt:d.prompt,refs:d.refs}))");
     assert.equal(native.length, 25); assert.equal(native.filter(d=>d.id===retained).length, 1);
     assert.equal(new Set(native.map(d=>d.prompt)).size, 25); assert.equal(sends, 0);
-    assert.equal(native.filter(d=>d.refs.length===1).length,12);
+    assert.equal(native.filter(d=>d.refs.length===5).length,12);
     console.log(JSON.stringify({ saved:25, templates:2, uniqueNumbers:25, sends, firstSaveMs, recoveryMs, elapsedMs:Date.now()-start, missingComposerRecovered:true, persistentError:true, hiddenSidebarVerified:25, restoredMissing:24, retainedExisting:1, retryDuplicates:0, withAttachments:12 }));
   } finally { c?.close(); child?.kill(); server.closeAllConnections(); server.close(); }
 })().catch(e => { console.error(e); process.exitCode=1; });

@@ -430,7 +430,6 @@ async function attachTemplateFiles() {
   input.value = "";
   if (!selectedFiles.length) return;
   q("#templateAddFiles").disabled = true;
-  q("#templateSubmit").disabled = true;
   q("#templateAddDraft").disabled = true;
   try {
     const files = DM.filesFor ? await DM.filesFor(selectedFiles) : selectedFiles.map((file) => DM.filePath(file));
@@ -440,21 +439,8 @@ async function attachTemplateFiles() {
     say(`已将 ${files.length} 个附件保存到本地`);
   } finally {
     q("#templateAddFiles").disabled = false;
-    q("#templateSubmit").disabled = false;
     q("#templateAddDraft").disabled = false;
   }
-}
-
-async function submitTemplate() {
-  const button = q("#templateSubmit");
-  if (button.disabled) return;
-  button.disabled = true;
-  try {
-    const template = await saveTemplate();
-    await call("dm:template:submit", template.id);
-    say("任务已提交，可在任务队列查看进度");
-    await setView("tasks");
-  } finally { button.disabled = false; }
 }
 
 function bindTemplateEvents() {
@@ -476,7 +462,6 @@ function bindTemplateEvents() {
   q("#templateSave").addEventListener("click", () => guard(async () => { await saveTemplate(); say("模板已保存"); }));
   q("#templateDelete").replaceChildren(svgIcon("M9 3h6l1 2h4v2H4V5h4l1-2zm-3 6h12l-1 12H7L6 9zm3 2v8h2v-8H9zm4 0v8h2v-8h-2z"));
   q("#templateDelete").addEventListener("click", deleteTemplate);
-  q("#templateSubmit").addEventListener("click", () => guard(submitTemplate));
   q("#templateAddFiles").addEventListener("click", () => q("#templateFileInput").click());
   q("#templateFileInput").addEventListener("change", () => guard(attachTemplateFiles));
   q("#templateOpenDir").addEventListener("click", () => DM.openPath(V.templateOptions.directory));

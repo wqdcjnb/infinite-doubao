@@ -24,7 +24,7 @@ window.fixtureDraftStore = (async () => {
     });
     await write(inputs, "store", store => store.put({ state: { accountScope: scope, records: state.drafts.map(d => ({
       address: metadata(d).inputDraftIndex,
-      units: { "input.document": { payload: { format: "plain-text", text: d.prompt } }, "input.attachments": { payload: d.refs } }
+      units: { "input.document": { payload: { format: "plain-text", text: d.prompt } }, "input.attachments": { payload: { items: d.refs.map(fileName => ({ fileName, fileKey: "fixture-" + fileName })) } } }
     })) } }, key));
   }
   await sync(JSON.parse(localStorage.getItem("fixture")));

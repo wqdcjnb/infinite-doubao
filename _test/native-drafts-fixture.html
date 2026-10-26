@@ -3,7 +3,7 @@
 <button id="new-work">新工作任务</button><button id="new-chat">新对话</button>
 <aside data-testid="draft-conversation-section"></aside><nav id="recent"></nav><div id="messages"></div>
 <form id="input-engine-container"><textarea placeholder="创建任务" style="width:600px;height:100px"></textarea>
-<div id="attachments"></div><input type="file" multiple accept="image/*,video/*">
+<div id="attachments" data-testid="attachment_area"></div><input type="file" multiple accept="image/*,video/*">
 <button type="button" data-testid="chat_input_action_mode">对话</button>
 <button type="submit" data-testid="chat_input_send_button">发送</button></form>
 <script>
@@ -12,6 +12,7 @@ localStorage.setItem('flow_tea_user_id','fixture-account');
 const draftStore=window.fixtureDraftStore?await window.fixtureDraftStore:null;
 let expanded=!draftStore;
 let saved=JSON.parse(localStorage.getItem('fixture')||'{"drafts":[],"conversations":[]}'),current=null,refs=[];
+const pendingRefs=new Set();
 let editor=document.querySelector('textarea');
 const mode=document.querySelector('[data-testid="chat_input_action_mode"]'),box=document.querySelector('aside'), messages=document.querySelector('#messages'),send=document.querySelector('[type="submit"]');
 window.fixtureTrace=[];
@@ -34,11 +35,14 @@ function render(){
     if(box.children[i]!==row)box.insertBefore(row,box.children[i]||null);
   });
   if(!expanded&&saved.drafts.length>5){const more=document.createElement('button');more.setAttribute('aria-expanded','false');more.textContent='显示更多草稿';more.onclick=()=>{expanded=true;render();};box.appendChild(more);}
-  document.querySelector('#attachments').textContent=refs.join(' ');
+  document.querySelector('#attachments').replaceChildren(...refs.map(fileName=>{
+    const card=document.createElement('div');card.setAttribute('data-kind','image');card.setAttribute('aria-label',fileName);card.textContent=fileName;
+    card.__reactFiber$fixture={memoizedProps:{attachmentState:{fileName,fileKey:pendingRefs.has(fileName)?'':'fixture-'+fileName,status:pendingRefs.has(fileName)?'Uploading':'Normal'}}};return card;
+  }));
   document.querySelector('#recent').replaceChildren(...saved.conversations.map(c=>{const a=document.createElement('a');a.id='conversation_'+c.id;a.href='/chat/'+c.id;a.textContent=c.prompt;return a;}));
 }
 function leave(){if(editor.value.trim()){
-  const item={id:current||'draft-'+Date.now(),prompt:editor.value,mode:mode.textContent,refs:refs.slice()};
+  const item={id:current||'draft-'+Date.now(),prompt:editor.value,mode:mode.textContent,refs:refs.filter(name=>!pendingRefs.has(name))};
   const existing=saved.drafts.find(d=>d.id===current);if(existing)Object.assign(existing,item);else saved.drafts.unshift(item);persist();
 }}
 function fresh(work){
@@ -48,7 +52,11 @@ function fresh(work){
   if(work)setTimeout(()=>{const next=editor.cloneNode();next.classList.add('tiptap','ProseMirror');next.value='';if(window.fixtureEditorModel){let documentText='';next.addEventListener('input',()=>{documentText=next.value;});next.editor={getText:()=>documentText};}editor.replaceWith(next);editor=next;},Number(window.fixtureEditorDelay)||150);
 }
 document.querySelector('#new-work').onclick=()=>fresh(true);document.querySelector('#new-chat').onclick=()=>fresh(false);
-document.querySelector('[type="file"]').onchange=e=>{send.disabled=true;trace('upload-start');refs=[...e.target.files].map(f=>f.name);setTimeout(()=>{render();send.disabled=false;trace('upload-ready');},300);};
+document.querySelector('[type="file"]').onchange=e=>{
+  send.disabled=!window.fixtureUploadWithoutDisabled;trace('upload-start');const added=[...e.target.files].map(f=>f.name);
+  refs.push(...added);added.forEach(name=>pendingRefs.add(name));render();
+  setTimeout(()=>{added.forEach(name=>pendingRefs.delete(name));render();send.disabled=false;trace('upload-ready');},Number(window.fixtureUploadDelay)||300);
+};
 async function show(c){
   messages.innerHTML='<div data-message-role="user" data-message-id="u-'+c.id+'"></div><div data-message-role="assistant" data-message-id="a-'+c.id+'">正在生成视频 10%</div>';
   messages.firstChild.textContent=c.prompt;

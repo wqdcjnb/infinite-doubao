@@ -131,7 +131,9 @@ if (process.argv.includes("--prepare")) {
       assert.equal(await c.eval("document.querySelectorAll('webview').length"), 0);
       await c.eval(`DM.call('dm:quota:reset', ${JSON.stringify(accountId)})`);
       const previousTasks = new Set((await c.eval("DM.call('dm:tasks')")).data.map((item) => item.id));
-      await c.eval("document.querySelector('#templateSubmit').click()");
+      assert.equal(await c.eval("document.querySelector('#templateSubmit').disabled"), true);
+      // Backend connectivity remains covered without the disabled UI entry.
+      await c.eval("(async()=>{const t=(await DM.call('dm:templates')).data.items[0];await DM.call('dm:template:submit',t.id);document.querySelector('.vtab[data-view=tasks]').click()})()");
       const taskStates = [];
       const task = await wait(async () => {
         const result = await c.eval("DM.call('dm:tasks')");
