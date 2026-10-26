@@ -92,6 +92,26 @@ function setupNative() {
   return {calls,driver};
 }
 function nativeOperation(kind='import') {return {...operation(kind),payload:{account:{id:'account1',name:'测试账号'},task:{id:'task1',prompt:'原始内容',parameters:{model:'seedance_v2.0_mini',duration:5,ratio:'9:16'},references:[]}}};}
+
+for (const alreadyIncluded of [false, true]) test(`native import puts the built-in Seedance skill on the first line once (${alreadyIncluded})`,async()=>{
+  const {calls}=setupNative(), j=journal(), api=transport();
+  const adapter=new executorModule.NativeAdapter({journal:j,client:api,accounts:{}}), op=nativeOperation();
+  const skill='[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)', body='清晨湖面\n@图1 保持参考图顺序';
+  op.payload.task.prompt=alreadyIncluded?`${skill}\r\n${body}\r\n${skill}`:body;
+  op.payload.task.parameters={model:'seedance_v2.5',duration:30,ratio:'16:9'};
+  const imported=await adapter.execute(op);
+  const saved=calls.find(c=>c.method==='saveNativeDraft').opts.prompt;
+  assert.equal(saved.split('\n')[0],skill);
+  assert.equal(saved.split(skill).length-1,1);
+  assert.ok(saved.includes(body)); assert.match(saved,/【草稿编号：DB-[0-9A-F]{24}】/);
+  const draft=require('../src/task-drafts').list()[0];
+  assert.equal(draft.nativePrompt,saved); assert.equal(draft.template.prompt,op.payload.task.prompt);
+  const recovered=await adapter.recover(op);
+  assert.deepEqual(recovered.receipt,imported.receipt);
+  assert.equal(calls.filter(c=>c.method==='saveNativeDraft').length,1);
+  assert.equal(calls.filter(c=>c.method==='sendNativeDraft').length,0);
+  queue.stopAll();
+});
 test('native adapter creates persistent real draft binding then submits same draft into original queue',async()=>{
   assert.equal(typeof executorModule.NativeAdapter,'function','missing native adapter');
   const {calls}=setupNative(), j=journal(), api=transport();
