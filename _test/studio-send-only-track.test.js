@@ -1,5 +1,5 @@
 "use strict";
-const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),vm=require('node:vm');
 const P=require('../src/paths'),store=require('../src/store'),queue=require('../src/orchestrator');
 const {NativeAdapter}=require('../src/server-executor'),{Journal}=require('../src/studio-bridge');
 function fixture(){
@@ -21,7 +21,7 @@ function fixture(){
    return {ok:true};}};
  queue.init({resolveDriver:async()=>driver,resolveDraftDriver:async(_inst,{signal}={})=>{let closed=false;const close=()=>{if(!closed){closed=true;f.closed++;}};signal?.addEventListener('abort',close,{once:true});return {...driver,close};}});
  const resume=queue.resume;queue.resume=()=>{f.resumes++;};
- f.journal=new Journal(path.join(home,'studio-journal.json'));f.adapter=new NativeAdapter({journal:f.journal,client:{},accounts:{},maxDraftPages:2});
+ f.driver=driver;f.journal=new Journal(path.join(home,'studio-journal.json'));f.adapter=new NativeAdapter({journal:f.journal,client:{},accounts:{},maxDraftPages:2});
  f.op=(kind,id,payload={})=>({id,kind,accountId:'a',leaseUntil:Date.now()+60000,leaseToken:'lease',payload:{account:{id:'a',name:'test'},...payload}});
  f.snapshot=id=>({id,prompt:'Reply received only; do not generate '+id,parameters:{model:'seedance_v2.5',duration:30,ratio:'16:9'},references:[]});
  f.prepare=async(sendOnly=false)=>{const task=f.snapshot('001');await f.adapter.execute(f.op('import','import',{task,sendOnly}),{checkLease:f.check});const r=await f.adapter.execute(f.op('send','send',{tasks:[task],sendOnly}),{checkLease:f.check});assert.equal(r.outcome,'success');f.local=queue.getTask(r.receipt.tasks[0].localTaskId);return r;};
@@ -39,7 +39,30 @@ test('normal accepted draft confirms only under the current track lease and clos
  }finally{f.cleanup();}
 });
 test('ordinary account quota failure without a confirmation button is recognized without another input',async()=>{
- const f=fixture();try{await f.prepare();f.candidate=false;f.progress={state:'failed',snippet:'当前账号额度不足'};const count=f.texts.length;const r=await f.track();assert.equal(r.outcome,'failure');assert.equal(f.sends,0);assert.equal(f.texts.length,count);assert.equal(f.resumes,0);
+ const f=fixture();try{await f.prepare();f.candidate=false;
+  const message=(id,text,role)=>({id,innerText:text,getAttribute:key=>key==='data-message-id'?id:key==='data-message-role'?role:null,querySelectorAll:()=>[]});
+  const nodes=[message(f.local.receiptUserMessageId,f.local.prompt,'user'),message('quota-reply','当前账号额度不足','assistant')];
+  const document={body:{innerText:nodes.map(n=>n.innerText).join('\n')},querySelectorAll:selector=>selector==='[data-message-id]'?nodes:[]};
+  const context=vm.createContext({window:{},document,CFG:{autoKey:'auto'},URL,location:{href:f.local.conversationUrl}});
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/page/automation.js'),'utf8'),context);
+  context.window.auto.beginTask({taskId:f.local.id,prompt:f.local.prompt,resume:true,baselineMessageIds:[f.local.receiptUserMessageId]});
+  f.progress=context.window.auto.readProgress();assert.match(f.progress.snippet,/当前账号额度不足/);console.log(JSON.stringify({quotaPageParserState:f.progress.state}));
+  const count=f.texts.length;const r=await f.track();assert.equal(r.outcome,'failure');assert.equal(f.sends,0);assert.equal(f.texts.length,count);assert.equal(f.resumes,0);
+ }finally{f.cleanup();}
+});
+for(const by of ['unknown','login-button'])test('track waits for transient '+by+' login markers without parking a received task',async()=>{
+ const f=fixture();try{await f.prepare();f.candidate=false;let reads=0;f.driver.isLoggedIn=async()=>++reads===1?{loggedIn:false,by}:{loggedIn:true,by:'avatar'};f.driver.waitForLogin=require('../src/driver').Driver.prototype.waitForLogin;
+  const count=f.texts.length,r=await f.track();assert.equal(r.outcome,'progress');assert.equal(reads,2);assert.equal(f.sends,0);assert.equal(f.texts.length,count);
+ }finally{f.cleanup();}
+});
+test('lease expiry during login loading closes the owned track page without input',async()=>{
+ const f=fixture();try{await f.prepare();f.driver.isLoggedIn=async()=>{f.valid=false;return {loggedIn:false,by:'unknown'};};f.driver.waitForLogin=require('../src/driver').Driver.prototype.waitForLogin;const closed=f.closed;
+  await assert.rejects(f.track(),/lease expired/);assert.equal(f.closed,closed+1);assert.equal(f.sends,0);
+ }finally{f.cleanup();}
+});
+test('a login wait timeout remains read-only progress, and a non-rejection mention of quota is not a failure',async()=>{
+ const f=fixture();try{await f.prepare();const texts=f.texts.length;f.candidate=false;f.driver.waitForLogin=async()=>({loggedIn:false,by:'login-button'});let r=await f.track();assert.equal(r.outcome,'progress');assert.equal(f.local.status,'submitted');
+  f.driver.waitForLogin=async()=>({loggedIn:true});f.progress={state:'unknown',snippet:'额度充足，已收到测试消息'};r=await f.track();assert.equal(r.outcome,'progress');assert.equal(f.local.status,'submitted');assert.equal(f.sends,0);assert.equal(f.texts.length,texts);assert.equal(f.resumes,0);
  }finally{f.cleanup();}
 });
 for(const at of ['before_track','after_fill'])test('expired lease '+at+' prevents a generation click',async()=>{

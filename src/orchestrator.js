@@ -585,11 +585,13 @@ async function confirmSubmittedTaskOnce(taskId, { checkLease } = {}) {
       driver = await deps.resolveDraftDriver(inst, { signal: operation.controller.signal });
       check();
       await driver.navigate(task.conversationUrl); check();
-      if ((await driver.isLoggedIn())?.loggedIn !== true) throw new Error("原账号需要登录");
+      const login = driver.waitForLogin ? await driver.waitForLogin({ timeoutMs: 30000, check }) : await driver.isLoggedIn();
+      check(); if (login?.loggedIn !== true) return;
       check(); await beginTracking(driver, task, inst, true); check();
       const progress = await driver.readProgress(); check();
-      if (progress.state === "failed") {
-        patchTask(task.id, { status: "failed", errorCode: /额度|免费数量|今日次数|已达上限|quota/i.test(progress.snippet || "") ? "quota" : "generation_failed", error: "平台明确返回生成失败" }, true);
+      const quotaRejected = progress.errorCode === "quota" || /额度(?:不足|(?:已)?用(?:完|尽))|免费数量(?:已)?用完|今日次数(?:已)?用完|已达上限|quota.{0,12}(?:exceeded|exhausted|insufficient)/i.test(progress.snippet || "");
+      if (progress.state === "failed" || quotaRejected) {
+        patchTask(task.id, { status: "failed", errorCode: quotaRejected ? "quota" : "generation_failed", error: "平台明确返回生成失败" }, true);
         storyboard.setStatus(task.storyboardId, task.shotId, "failed", { error: task.error });
         return;
       }
