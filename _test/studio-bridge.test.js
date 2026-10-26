@@ -86,8 +86,8 @@ const P=require('../src/paths'), store=require('../src/store'), queue=require('.
 function setupNative() {
   P.init({home:path.join(root,`native-${++n}`)});store.load();queue.pause('');
   const calls=[];
-  const driver={isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),pasteFiles:async()=>({ok:true}),setText:async()=>({ok:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),close:()=>{},
-    call:async(method,opts)=>{calls.push({method,opts}); if(method==='restoreNativeDrafts')return {ok:true,bindings:[]};if(method==='saveNativeDraft')return {ok:true,bindings:[{id:opts.id,nativeId:'real-native-1'}]};if(method==='openNativeDraft')return {ok:true,conversationIds:[]};if(method==='waitNativeDraftAccepted')return {ok:true,conversationUrl:'https://www.doubao.com/chat/real1'};if(method==='peekGenerationConfirmation')return {ok:true};if(method==='readProgress')return {state:'running',generationStarted:true};return {ok:true};}};
+  const driver={isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),pasteFiles:async()=>({ok:true}),setText:async()=>({ok:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),navigate:async()=>{},url:async()=> 'https://www.doubao.com/chat/real1',readProgress:async()=>({state:'running',generationStarted:true}),close:()=>{},
+    call:async(method,opts)=>{calls.push({method,opts}); if(method==='restoreNativeDrafts')return {ok:true,bindings:[]};if(method==='saveNativeDraft')return {ok:true,bindings:[{id:opts.id,nativeId:'real-native-1',accountScope:'scope-a'}]};if(method==='openNativeDraft')return {ok:true,conversationIds:[]};if(method==='waitNativeDraftAccepted')return {ok:true,conversationUrl:'https://www.doubao.com/chat/real1',userMessageId:'message-'+opts.id};if(method==='peekGenerationConfirmation')return {ok:true};if(method==='readProgress')return {state:'running',generationStarted:true};return {ok:true};}};
   queue.init({resolveDriver:async()=>driver,resolveDraftDriver:async()=>driver});
   return {calls,driver};
 }
@@ -120,7 +120,7 @@ test('native adapter creates persistent real draft binding then submits same dra
   assert.equal(imported.receipt.nativeBinding.nativeId,'real-native-1');
   assert.equal(calls.filter(c=>c.method==='saveNativeDraft').length,1);
   const sent=await adapter.execute({...nativeOperation('send'),id:'send1',payload:{account:{id:'account1',name:'测试账号'},tasks:[nativeOperation().payload.task]}});
-  assert.equal(sent.receipt.tasks[0].status,'submitted');assert.equal(sent.receipt.tasks[0].taskId,'task1');assert.equal(sent.receipt.tasks[0].confirmed,true);
+  assert.equal(sent.receipt.tasks[0].status,'submitted');assert.equal(sent.receipt.tasks[0].taskId,'task1');assert.equal(sent.receipt.tasks[0].confirmed,false);
   const local=queue.getTask(sent.receipt.tasks[0].localTaskId);assert.equal(local.studioTaskId,'task1');assert.equal(local.conversationUrl,'https://www.doubao.com/chat/real1');
   const recovered=await adapter.recover({...nativeOperation('send'),payload:{account:{id:'account1',name:'测试账号'},tasks:[nativeOperation().payload.task]}});
   assert.equal(recovered.receipt.tasks[0].localTaskId,local.id);assert.equal(calls.filter(c=>c.method==='sendNativeDraft').length,1);
@@ -254,7 +254,7 @@ test('temporary MP4 upload error keeps operation recoverable and retries origina
   await b.flushReports();assert.equal(executions,1);assert.equal(recoveries,1);assert.equal(api.reports[0].result.receipt.status,'completed');
 });
 
-test('server quota rejection is terminal locally and preserves original submission; desktop keeps existing quota behavior',async()=>{
+test('accepted native draft quota rejection preserves submission on both server and desktop without a resend',async()=>{
   for(const serverOwned of [true,false]) {
     const {driver}=setupNative(), j=journal(),adapter=new executorModule.NativeAdapter({journal:j,client:{},accounts:{}});
     await adapter.execute(nativeOperation());
@@ -264,9 +264,10 @@ test('server quota rejection is terminal locally and preserves original submissi
     const submitted=task.submittedAt;
     let seen;const progressRead=new Promise(resolve=>{seen=resolve;});
     driver.readProgress=async()=>{seen();return {state:'failed',snippet:'今日额度已达上限'};};
-    queue.resume(task.storyboardId);await progressRead;await new Promise(resolve=>setImmediate(resolve));
-    if(serverOwned) {assert.equal(task.status,'failed');assert.equal(task.errorCode,'quota');assert.equal(task.submittedAt,submitted);}
-    else {assert.equal(task.status,'queued');assert.equal(task.submittedAt,'');}
+    if(serverOwned)await adapter.execute({...nativeOperation('track'),taskId:'task1'});
+    else {task.status='queued';require('../src/storyboard').updateShot(task.storyboardId,task.shotId,{status:'queued'});queue.resume(task.storyboardId);await Promise.race([progressRead,new Promise((_,reject)=>setTimeout(()=>reject(Error('desktop progress timeout')),6000))]);}
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(task.status,'failed');assert.equal(task.errorCode,'quota');assert.equal(task.submittedAt,submitted);
     queue.stopAll();
   }
 });
@@ -277,12 +278,12 @@ test('native 100-task batch limits independent receipt pages and sends each draf
   queue.init({resolveDraftDriver:async()=>{
     live++;max=Math.max(max,live);const own={...driver,close:()=>{live--;},call:async(method,opts)=>{
       if(method==='sendNativeDraft')sends++;
-      if(method==='waitNativeDraftAccepted'){await new Promise(resolve=>setTimeout(resolve,20));return {ok:true,conversationUrl:'https://www.doubao.com/chat/'+opts.id};}
+      if(method==='waitNativeDraftAccepted'){await new Promise(resolve=>setTimeout(resolve,20));return {ok:true,conversationUrl:'https://www.doubao.com/chat/'+opts.id,userMessageId:'message-'+opts.id};}
       return driver.call(method,opts);
     }};return own;
   }});
   const result=await adapter.execute({...operation('send'),id:'limited',payload:{account:{id:'account1',name:'测试'},tasks}});
-  assert.equal(sends,100);assert.equal(result.receipt.tasks.every(t=>t.status==='submitted'),true);assert.equal(max,2);assert.equal(live,0);queue.stopAll();
+  assert.equal(sends,100);assert.equal(result.receipt.tasks.every(t=>t.status==='submitted'),true);assert.equal(max,1);assert.equal(live,0);queue.stopAll();
 });
 
 test('a new import operation for an already sent task cannot recreate a native draft after local draft removal',async()=>{

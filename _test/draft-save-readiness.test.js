@@ -9,7 +9,7 @@ async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, noSidebar 
   const button = { get disabled() { return now < filledAt + upload; }, getAttribute: () => null };
   const newChat = { innerText: "新对话", click() { switched = now; current.value = ""; } };
   const document = { querySelector: s => s.includes("draft-conversation-section") ? section : s.includes("chat_input_action_mode") ? mode : s.includes("chat_input_send_button") ? button : current,
-    querySelectorAll: s => s.includes("draft-conversation-section") ? switched && !noSidebar ? [row] : [] : [newChat] };
+    querySelectorAll: s => s.includes("draft-conversation-section") ? switched && !noSidebar ? [row] : [] : s.includes("contenteditable") ? [current] : s === 'button, [role="button"]' ? [newChat] : [] };
   function input() {
     const ready = bodyAfterSwitch ? switched && now >= switched + bodyAfterSwitch : now >= filledAt + 200;
     return { state: { accountScope: scope, records: ready || partialBody ? [{ address: metadata.inputDraftIndex, updatedAt: stale ? 1 : now,

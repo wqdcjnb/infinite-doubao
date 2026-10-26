@@ -32,10 +32,13 @@ test("多选模板一次保存独立快照，本地草稿不能直接冒充豆�
   await assert.rejects(queue.submitDrafts(added.map((d) => d.id)), /先将所选草稿存入豆包/);
   store.load(); assert.equal(drafts.list()[1].template.prompt, "第二条"); assert.equal(store.get().tasks.length, 0);
 });
-test("整批附件校验失败不开始保存或发送", async () => {
+test("附件校验失败保留原草稿且不打开导入页或发送", async () => {
   const t = template(), first = drafts.create(t.id), file = path.join(P.home(), "ref.mp4"); fs.writeFileSync(file, "video");
   await templates.importAttachments(t.id, [file]); const second = drafts.create(t.id); fs.unlinkSync(second.template.attachments[0].path);
-  await assert.rejects(queue.saveDrafts([first.id, second.id]), /附件/);
+  const inst = store.add({ id: "attachment-check", name: "附件校验" }); let pages = 0;
+  queue.init({ resolveDriver: async () => ({ isLoggedIn: async () => ({ loggedIn: true }) }), resolveDraftDriver: async () => { pages++; throw Error("不能打开导入页"); } });
+  const result = await queue.saveDrafts([second.id], { instanceId: inst.id });
+  assert.equal(result.count, 0); assert.equal(result.failed, 1); assert.match(result.errors[0].message, /附件/); assert.equal(pages, 0);
   assert.equal(store.get().tasks.length, 0); assert.equal(drafts.list().length, 2);
 });
 test("写盘失败回滚整批快照和草稿状态", () => {
