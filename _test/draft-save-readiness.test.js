@@ -1,6 +1,6 @@
 "use strict";
 const { test } = require("node:test"), assert = require("node:assert/strict"), vm = require("node:vm"), fs = require("node:fs"), path = require("node:path");
-async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, richDocument = false } = {}) {
+async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, richDocument = false, remount = false, hidden = false, duplicate = false } = {}) {
   let now = 1000, switched = 0, filledAt = 0, current = { tagName: "TEXTAREA", value: "" };
   const prompt = "【草稿编号：DB-111111111111111111111111】 视频", scope = "account-a";
   const metadata = { id: "native", title: prompt, scene: "new-office-task", inputDraftIndex: { accountScope: scope, conversationScope: "local:native", inputId: "primary" } };
@@ -9,7 +9,7 @@ async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, richDocume
   const button = { get disabled() { return now < filledAt + upload; }, getAttribute: () => null };
   const newChat = { innerText: "新对话", click() { switched = now; current.value = ""; } };
   const document = { querySelector: s => s.includes("draft-conversation-section") ? section : s.includes("chat_input_action_mode") ? mode : s.includes("chat_input_send_button") ? button : current,
-    querySelectorAll: s => s.includes("draft-conversation-section") ? switched ? [row] : [] : [newChat] };
+    querySelectorAll: s => s.includes("draft-conversation-section") ? switched ? hidden ? [] : remount ? [row, { ...row, dataset: {}, querySelector: () => ({ innerText: "旧草稿" }) }] : [row] : [] : [newChat] };
   function input() {
     const ready = bodyAfterSwitch ? switched && now >= switched + bodyAfterSwitch : now >= filledAt + 200;
     return { state: { accountScope: scope, records: ready ? [{ address: metadata.inputDraftIndex, updatedAt: stale ? 1 : now,
@@ -17,7 +17,9 @@ async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, richDocume
   }
   const indexedDB = { databases: async () => [{ name: "flow-draft-conversations-v2" }, { name: "samantha-web" }], open(name) {
     const q = {}; queueMicrotask(() => { q.result = { close() {}, transaction() {
-      const tx = { objectStore: () => ({ get: () => read(input()), getAll: () => read(switched ? [{ accountScope: scope, id: metadata.id, data: metadata }] : []) }) };
+      const records = [{ accountScope: scope, id: metadata.id, data: metadata }];
+      if (duplicate) records.push({ ...records[0], id: "duplicate", data: { ...metadata, id: "duplicate" } });
+      const tx = { objectStore: () => ({ get: () => read(input()), getAll: () => read(switched ? records : []) }) };
       function read(value) { const r = {}; queueMicrotask(() => { r.result = value; r.onsuccess(); queueMicrotask(() => tx.oncomplete()); }); return r; } return tx;
     } }; q.onsuccess(); }); return q;
   } };
@@ -30,9 +32,18 @@ async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, richDocume
   const prepareMs = now - 1000; current.value = prompt; filledAt = now;
   if (richDocument) current.editor = { getText: () => prompt };
   const result = await api.saveNativeDraft({ id: "local", prompt, executionMode: "work" });
+  if (duplicate) return result;
   assert.equal(result.ok, true, result.reason); assert.equal(result.bindings[0].nativeId, "native");
+  assert.equal((await api.verifyNativeDraftSaved({ id: "local", prompt, executionMode: "work" })).ok, true);
+  assert.equal((await api.verifyNativeDraftSaved({ id: "local", prompt: prompt + "changed", executionMode: "work" })).ok, false);
+  assert.equal((await api.verifyNativeDraftSaved({ id: "local", prompt, executionMode: "work", accountScope: "other" })).ok, false);
   return { prepareMs, switchMs: switched - filledAt, savedMs: now - filledAt };
 }
+
+test("侧栏整体重挂载或新行不可见时按完整存储确认，不因DOM数量误报保存失败", async () => {
+  await save({ remount: true }); await save({ hidden: true });
+  const duplicate = await save({ duplicate: true }); assert.equal(duplicate.ok, false); assert.match(duplicate.reason, /重复草稿编号/);
+});
 test("云电脑编辑器已替换时快速准备；完整正文已落盘可提前确认", async () => {
   const result = await save(); assert.equal(result.prepareMs, 100); assert.equal(result.switchMs, 200);
 });

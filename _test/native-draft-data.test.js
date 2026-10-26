@@ -3,11 +3,11 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path"), vm = require("node:vm");
 
-function page({ collapsed = false, duplicate = false, missingBody = false, wrongScope = false, noSidebar = false, sidebarDelayMs = 0, empty = false, currentScope = "account-a" } = {}) {
+function page({ collapsed = false, duplicate = false, missingBody = false, wrongScope = false, noSidebar = false, sidebarDelayMs = 0, empty = false, currentScope = "account-a", skillPrefix = "" } = {}) {
   let now = 1000, expanded = false, active = null, sends = 0, reads = 0;
   const items = Array.from({ length: 50 }, (_, i) => {
     const draftNumber = "DB-" + (duplicate && i === 49 ? 0 : i).toString(16).toUpperCase().padStart(24, "0");
-    return { id: "local-" + i, draftNumber, prompt: `【草稿编号：${draftNumber}】\n\n完全相同的视频正文`, scope: "account-a" };
+    return { id: "local-" + i, draftNumber, prompt: `${skillPrefix}【草稿编号：${draftNumber}】\n\n完全相同的视频正文`, scope: "account-a" };
   });
   const input = { state: { accountScope: wrongScope ? "account-b" : "account-a", records: items.map((d, i) => ({
     address: { accountScope: d.scope, conversationScope: "local:" + d.id, inputId: "primary" },
@@ -52,6 +52,14 @@ function page({ collapsed = false, duplicate = false, missingBody = false, wrong
   return { api: context.window.auto, items, rows, index, elapsed: () => now - 1000, reads: () => reads, sends: () => sends, visible: () => visible().length,
     bindings: items.map(d => ({ id: "app-" + d.id, draftNumber: d.draftNumber, prompt: d.prompt, title: "旧标题", executionMode: "work" })) };
 }
+
+test("技能链接在首行时仍按第二行的完整编号核对、打开和发送原草稿", async () => {
+  const p = page({ skillPrefix: "[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)\n" });
+  const binding = p.bindings[49];
+  assert.equal((await p.api.restoreNativeDrafts([binding])).ok, true);
+  assert.equal((await p.api.openNativeDraft(binding)).ok, true);
+  assert.equal((await p.api.sendNativeDraft(binding)).ok, true); assert.equal(p.sends(), 1);
+});
 
 test("新投递页面先读到完整数据、侧栏延迟挂载时等待原生 ID，不能让整批提前失败", async () => {
   const p = page({ sidebarDelayMs: 1800 });

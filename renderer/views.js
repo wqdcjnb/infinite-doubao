@@ -507,9 +507,10 @@ function renderDrafts() {
   const mismatch = selected.find((d) => d.instanceId && d.instanceId !== account);
   const uncertain = selected.some((d) => d.nativeState === "saving" || d.submissionRecord?.task.submissionUncertain);
   const ready = selected.every((d) => d.nativeState === "saved" || d.submissionRecord);
-  const blocked = V.draftBusy || !selected.length || !account || !!mismatch || uncertain;
-  q("#draftSubmit").disabled = blocked || !ready;
+  const blocked = V.draftBusy || !selected.length || !account || !!mismatch;
+  q("#draftSubmit").disabled = blocked || uncertain || !ready;
   q("#draftSave").disabled = blocked || selected.some((d) => d.submissionRecord);
+  q("#draftSave").textContent = selected.some(d => d.nativeState === "saving") ? "① 核对保存结果并继续" : "① 存入所选账号的豆包草稿";
   q("#draftRecreate").disabled = q("#draftSave").disabled || !selected.some((d) => d.nativeState === "saved");
   q("#draftStatus").textContent = V.draftBusy ? V.draftMessage || "正在处理所选草稿，请稍候…" : !selected.length ? "勾选要一起保存或发送的草稿。" : !account ? "请在上方选择一个豆包账号，再保存或发送所选草稿。" : mismatch ? `所选草稿包含 ${mismatch.instanceName || "其他账号"} 的网页草稿，请只勾选同一账号的草稿，并选择该账号。` : uncertain ? "部分草稿上次操作尚未确认，请先打开所属账号的豆包页面核对。" : !ready ? "先点击 ①，将所选草稿全部存入豆包网页，再点击 ② 一起发送。" : `所选草稿将由 ${V.instances.find((i) => i.id === account)?.name || "所选账号"} 通过云电脑同时提交。`;
   if (!V.draftBusy && V.draftError) q("#draftStatus").textContent = V.draftError;

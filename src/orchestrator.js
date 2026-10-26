@@ -37,12 +37,17 @@ function newTask(input) {
     templateId: String(input.templateId || ""), templateName: String(input.templateName || ""),
     executionMode: input.executionMode === "work" ? "work" : "video",
     model: String(input.model || ""), duration: Number(input.duration) || 0, ratio: String(input.ratio || "adaptive"),
-    prompt: String(input.prompt || ""), refs: Array.isArray(input.refs) ? input.refs : [],
+    prompt: withSeedanceSkill(input.prompt), refs: Array.isArray(input.refs) ? input.refs : [],
     status: "queued", stage: "waiting_account", progress: 0, waitReason: "等待分配账号",
     attempts: 0, retryCount: 0, dedupeKey: String(input.dedupeKey || ""),
     createdAt: new Date().toISOString(), startedAt: "", submittedAt: "", generatedAt: "", finishedAt: "",
     error: "", result: null, log: []
   };
+}
+function withSeedanceSkill(prompt) {
+  const skill = "[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)";
+  const body = String(prompt || "").split(/\r?\n/).filter(line => line.trim() !== skill).join("\n").trim();
+  return `${skill}\n${body}`;
 }
 function addTask(task) {
   store.get().tasks.push(task);
@@ -582,7 +587,7 @@ async function withNativeDrafts(selected, options, fn) {
 async function saveDrafts(ids, options = {}) {
   let selected = selectedDrafts(ids);
   for (const d of selected) {
-    if (d.nativeState === "saving" || d.submissionRecord) throw new Error(`草稿「${d.template.name}」上次操作未确认，请先在豆包页面核对，避免重复保存或发送`);
+    if (d.submissionRecord || (d.nativeState === "saving" && (!d.instanceId || !d.nativePrompt))) throw new Error(`草稿「${d.template.name}」上次操作未确认，请先在豆包页面核对，避免重复保存或发送`);
     if (d.executionMode !== "work" && (d.instanceId || d.nativeBinding || d.nativeState)) throw new Error(`草稿「${d.template.name}」是旧版对话草稿，草稿提交仅支持云电脑，请将模板重新加入草稿箱`);
     if (!d.nativeBinding || options.recreateDeleted === true) templates.validateSnapshot(d.template);
   }
@@ -601,6 +606,13 @@ async function saveDrafts(ids, options = {}) {
       return requirePage(result);
     };
     const selectedIds = new Set(selected.map((d) => d.id));
+    for (const d of selected.filter(d => d.nativeState === "saving")) {
+      const verified = await step("正在核对上次草稿保存结果", () => driver.call("verifyNativeDraftSaved", { id: d.id, prompt: d.nativePrompt, executionMode: d.executionMode, accountScope: d.nativeBinding?.accountScope }));
+      const binding = verified.bindings?.find(b => b.id === d.id && b.nativeId && b.accountScope);
+      if (!binding) throw new Error("上次操作未确认：未返回可核对的原生草稿记录，不会重复存入");
+      drafts.updateMany({ [d.id]: { nativeState: "saved", nativeBinding: binding, nativeError: "" } });
+    }
+    selected = selectedDrafts(ids);
     const bindings = nativeBindings(inst.id).filter((b) => selectedIds.has(b.id));
     // New local drafts have no website bindings to restore. An old conversation
     // may not expose a composer until New work task is clicked.
@@ -622,7 +634,7 @@ async function saveDrafts(ids, options = {}) {
       if (draft.nativeState === "saved") { count++; continue; }
       const record = templateRecords(draft.template, draft.executionMode);
       const draftNumber = draft.draftNumber || drafts.numberFor(draft.id);
-      record.task.prompt = `【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`;
+      record.task.prompt = withSeedanceSkill(`【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`);
       try {
       checkAction();
       const position = `${count + 1}/${selected.length}`;
@@ -764,6 +776,10 @@ async function submitDrafts(ids, options = {}) {
             drafts.updateMany({ [draft.id]: { nativeState: "sent", nativeBinding: null, nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
             received = true;
             accepted.push({ id: draft.id, record });
+            // Move this confirmed receipt atomically, without waiting for the
+            // other drafts or its generation reminder. The account remains
+            // busy until these pages finish, so the queue cannot race them.
+            commitTemplates([record], [draft.id], false);
             progress("后台已确认接收");
           }, 125000).then(() => draftStep(child, "等待生成确认提醒", async () => {
             const settings = store.get().settings.orchestrator;
@@ -786,6 +802,7 @@ async function submitDrafts(ids, options = {}) {
             if (driver.url && await driver.url() !== record.task.conversationUrl) await reopen();
             else await trackAccepted();
             const persist = values => {
+              if (getTask(record.task.id)) { patchTask(record.task.id, values, true); return; }
               const snapshot = JSON.parse(JSON.stringify({ ...record, task: { ...record.task, ...values } }));
               drafts.updateMany({ [draft.id]: { submissionRecord: snapshot } });
               Object.assign(record.task, values);
@@ -835,7 +852,10 @@ async function submitDrafts(ids, options = {}) {
     }
     drafts.updateMany(bindingPatches(remainingDraftBindings(bindings, new Set(accepted.map((a) => a.id)))));
     accepted.sort((a, b) => selected.findIndex((d) => d.id === a.id) - selected.findIndex((d) => d.id === b.id));
-    const items = accepted.length ? commitTemplates(accepted.map((a) => a.record), accepted.map((a) => a.id), !operation.stopped && options.startQueue !== false) : [];
+    const remaining = accepted.filter(a => !getTask(a.record.task.id));
+    if (remaining.length) commitTemplates(remaining.map(a => a.record), remaining.map(a => a.id), false);
+    const items = accepted.map(a => ({ taskId: a.record.task.id, status: a.record.task.status }));
+    if (items.length && !operation.stopped && options.startQueue !== false) { runtime.paused = false; wakeQueue(); }
     if (failure || errors.length) throw new Error(`已确认发送 ${accepted.length}/${selected.length} 条。未发送 ${errors.filter(e => e.phase === "prepare").length} 条，接收待核对 ${errors.filter(e => e.phase === "receipt").length} 条，已接收但确认异常 ${errors.filter(e => e.phase === "confirmation").length} 条，平台拒绝 ${errors.filter(e => e.phase === "platform").length} 条。${dispatchBlocked || failure?.message || errors[0].message}；各条失败原因已保存，其余草稿记录已保留`);
     return { items, count: items.length, instanceId: inst.id, instanceName: inst.name };
   });
