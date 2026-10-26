@@ -62,10 +62,11 @@ class Driver {
     return null;
   }
 
-  async setText(text) {
+  async setText(text, check = () => {}) {
     const deadline = Date.now() + 10000;
     let result;
     do {
+      check();
       result = await this.call("setText", text);
       if (result?.ok || !/没找到输入框/.test(result?.reason || "")) return result;
       await sleep(250);
@@ -120,7 +121,14 @@ class Driver {
   }
 
   /** 传入持久化的图片/视频副本，保留真实 MIME 类型。 */
-  async pasteFiles(files) {
+  async prepareDraftImport() {
+    const debuggerApi = this.webContents.debugger;
+    if (!debuggerApi.isAttached()) debuggerApi.attach("1.3");
+    await debuggerApi.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
+    return { ok: true };
+  }
+
+  async pasteFiles(files, draft) {
     const list = Array.isArray(files) ? files : [];
     if (!list.length) return { ok: false, reason: "没有可用的本地文件" };
     for (const file of list) {
@@ -133,7 +141,7 @@ class Driver {
       const data = fs.readFileSync(f).toString("base64");
       return { name: path.basename(f) || `ref-${i + 1}${ext}`, dataUrl: `data:${MIME[ext]};base64,${data}` };
     });
-    const r = await this.call("pasteImages", payload);
+    const r = draft ? await this.call("pasteNativeDraftFiles", payload, draft) : await this.call("pasteImages", payload);
     if (r && r.ok) return { ...r, mode: "paste" };
     return r || { ok: false, reason: "页面不接受文件" };
   }
