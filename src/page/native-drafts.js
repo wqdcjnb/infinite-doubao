@@ -2,7 +2,6 @@
 (function () {
   var api = window[CFG.autoKey];
   if (!api) return;
-  var beforeSave = [];
   var preparedAt = 0, inputScope = "";
   var storedBindings = new Map();
   var importEpoch = 0;
@@ -46,7 +45,8 @@
     if (!current) reasons.push(editors.length ? "存在多个可见输入框，无法确认当前草稿输入区" : "当前草稿输入框尚未挂载");
     var root = current && current.closest && current.closest("#input-engine-container") || document;
     var prompt = current ? text(current) : "", rich = current && current.editor;
-    if (rich && typeof rich.getText === "function") {
+    if (current && current.pmViewDesc && current.pmViewDesc.node && current.pmViewDesc.node.toJSON) prompt = importText(current);
+    else if (rich && typeof rich.getText === "function") {
       try { prompt = rich.isDestroyed ? "" : normalize(rich.getText()); } catch (_) { prompt = ""; }
     }
     if (current && (!normalize(options.prompt) || prompt !== normalize(options.prompt))) reasons.push("完整提示词不一致（预期 " + normalize(options.prompt).length + " 字，当前 " + prompt.length + " 字）");
@@ -159,7 +159,7 @@
       // A shortened sidebar label only selects candidates; the full editor
       // content must still match the complete number and prompt before sending.
       var prefix = label.replace(/[.…]+$/, "");
-      return prefix && (("【草稿编号：" + binding.draftNumber + "】").startsWith(prefix) || normalize(binding.prompt).startsWith(prefix));
+      return prefix && ("【草稿编号：" + binding.draftNumber + "】").startsWith(prefix);
     });
   }
   function switchTo(work) {
@@ -219,9 +219,9 @@
   });
   async function savedDraft(options) {
     var data = await catalog(Boolean(options.strictReadOnly)), number = numberIn(options.prompt);
-    if (!data || !data.accountScope || !number) return null;
+    if (!data || !data.accountScope || (!number && !(options.nativeId && options.accountScope && !options.strictReadOnly))) return null;
     if (options.accountScope && options.accountScope !== data.accountScope) throw new Error("当前豆包账号与保存草稿的账号不一致");
-    var matches = data.items.filter(function (d) { return numberIn(d.prompt) === number; });
+    var matches = data.items.filter(function (d) { return number ? numberIn(d.prompt) === number : d.nativeId === options.nativeId && d.accountScope === options.accountScope; });
     if (matches.length > 1) throw new Error("发现重复草稿编号 " + number + "，请核对网页草稿");
     if (!matches.length) return null;
     var match = matches[0];
@@ -236,7 +236,7 @@
   }
   api.verifyNativeDraftSaved = result(async function (options) {
     var saved = await savedDraft(Object.assign({}, options, { strictReadOnly: true }));
-    if (!saved) throw new Error("上次操作未确认：完整存储中未找到同编号、同正文的草稿；不会重复存入，请在原账号页面核对");
+    if (!saved) throw new Error("完整存储中未找到同编号、同正文的草稿；不会重复存入，请在原账号页面核对");
     return Object.assign(saved, { readOnly: true });
   });
   // Import completion is stronger than a usable send button: every expected
@@ -271,8 +271,14 @@
     });
   }
   function sameNames(actual, expected) { return JSON.stringify(actual) === JSON.stringify(expected); }
-  function importText() {
-    var el = editor(), node = el && el.pmViewDesc && el.pmViewDesc.node;
+  function importEditor() {
+    var candidates = Array.from(document.querySelectorAll('#input-engine-container .tiptap[contenteditable="true"], #input-engine-container textarea'));
+    var current = candidates.find(function (node) { return (node.tagName === "TEXTAREA" || node.getAttribute && node.getAttribute("contenteditable") === "true") && visible(node); }) || editor();
+    return visible(current) ? current : null;
+  }
+  function importText(el) {
+    el = el || importEditor();
+    var node = el && el.pmViewDesc && el.pmViewDesc.node;
     if (!node || !node.toJSON) return text(el);
     // Restored skill links are mentions. Preserve their identity, not just label.
     function content(n) {
@@ -287,6 +293,64 @@
     }
     return normalize(content(node.toJSON()));
   }
+  api.pasteNativeDraftFiles = result(async function (items, options) {
+    var epoch = importEpoch, el = importEditor(), root = el && el.closest && el.closest("#input-engine-container");
+    function checkComposer() {
+      checkImport(epoch);
+      if (importText() !== normalize(options.prompt)) throw new Error("上传期间草稿正文已变化，未继续上传");
+      el = importEditor();
+      root = el && el.closest && el.closest("#input-engine-container");
+      if (!root) throw new Error("当前草稿输入区尚未加载，未继续上传");
+      if (options.executionMode === "work" && mode() !== "云电脑") throw new Error("草稿工作模式已变化，未继续上传");
+    }
+    if (!el || !root) throw new Error("当前草稿输入区尚未加载，未上传附件");
+    checkComposer();
+    // A new work task initially exposes a guidance textarea. Focusing mounts
+    // the rich editor and its upload handlers; a paste on the old node is lost.
+    if (typeof el.focus === "function") el.focus();
+    await wait(function () {
+      checkImport(epoch);
+      var current = importEditor(), currentRoot = current && current.closest && current.closest("#input-engine-container");
+      if (!currentRoot || importText() !== normalize(options.prompt)) return false;
+      var rich = current.classList && current.classList.contains("ProseMirror");
+      if (!rich && !currentRoot.querySelectorAll('input[type="file"]').length) return false;
+      el = current; root = currentRoot; return true;
+    }, "草稿附件输入区尚未激活，已保留正文，未上传图片", Date.now() + 20000);
+    checkComposer();
+    var before = importCards().map(function (card) { return card.name; });
+    if (items.some(function (item) { return before.includes(item.name); })) throw new Error("输入区已存在待上传的同名附件，请核对原草稿，未重复上传");
+    var files = items.map(function (item) {
+      var match = /^data:([^;,]+);base64,(.*)$/.exec(String(item.dataUrl || ""));
+      if (!match) throw new Error("草稿附件数据无效：" + item.name);
+      var binary = atob(match[2]), bytes = new Uint8Array(binary.length);
+      for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new File([bytes], item.name, { type: match[1] });
+    });
+    var transfer = new DataTransfer();
+    files.forEach(function (file) { transfer.items.add(file); });
+    // Other composers can retain file controls during a route transition.
+    // Only the verified composer may receive these files.
+    var input = Array.from(root.querySelectorAll('input[type="file"]')).find(function (node) {
+      if (node.disabled || (files.length > 1 && !node.multiple)) return false;
+      var accept = String(node.getAttribute("accept") || "").toLowerCase().split(",").map(function (value) { return value.trim(); });
+      return files.every(function (file) { return accept.some(function (value) { return !value || value === "*/*" || value === "." + file.name.split(".").pop().toLowerCase() || value === file.type || value === file.type.split("/")[0] + "/*"; }); });
+    });
+    checkComposer();
+    if (input) {
+      input.files = transfer.files;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      var event = new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer });
+      if (!event.clipboardData || !event.clipboardData.items.length) Object.defineProperty(event, "clipboardData", { value: transfer });
+      el.dispatchEvent(event);
+    }
+    await wait(function () {
+      checkComposer();
+      return sameNames(importCards().map(function (card) { return card.name; }), options.attachmentNames);
+    }, function () { return "网页接收附件未完成：当前 " + importCards().length + "/" + options.attachmentNames.length + " 个，原草稿已保留"; }, Date.now() + 15000);
+    return { ok: true, count: files.length };
+  });
   function checkImport(epoch) { if (epoch !== importEpoch) throw new Error("草稿导入已停止，未继续切换页面"); }
   async function persistedImportAttachments(binding) {
     var drafts = await readStore("flow-draft-conversations-v2", "drafts");
@@ -357,8 +421,8 @@
         if (!found && Date.now() - revealAt >= 600) { revealAt = Date.now(); revealDrafts(clicked, true); }
         return found;
       }, "原草稿尚未显示，未新建重复草稿");
-      checkImport(epoch); uploading = selected(row);
-      if (!uploading) row.click();
+      checkImport(epoch); uploading = !options.isolated && selected(row);
+      if (!selected(row)) row.click();
     }
     var stableAt = 0, previous = "";
     var cards = await wait(function () {
@@ -378,8 +442,17 @@
     if (!sameNames(cards.map(function (a) { return a.name; }), expected.slice(0, cards.length))) throw new Error("原草稿附件顺序或名称不一致，请核对；未覆盖或重复导入");
     if (cards.some(function (a) { return a.failed; })) throw new Error("原草稿存在上传失败的附件，请在网页重试该附件后继续导入");
     inputScope = verified ? verified.bindings[0].accountScope : String(localStorage.getItem("flow_tea_user_id") || "").trim();
-    beforeSave = rows(); preparedAt = Date.now();
+    preparedAt = Date.now();
     return { ok: true, complete: false, missingNames: expected.slice(cards.length), bindings: verified ? verified.bindings : [] };
+  });
+  api.parkNativeDraftImport = result(async function (options) {
+    if (!options.isolated) throw new Error("仅允许保留本条独立处理页中的草稿");
+    var saved = await savedDraft(options);
+    if (saved) return saved;
+    if (importText() !== normalize(options.prompt) || (options.executionMode === "work" && mode() !== "云电脑")) throw new Error("未确认失败草稿正文归属，已保留本地记录");
+    ++importEpoch;
+    switchTo(options.executionMode !== "work");
+    return await wait(function () { return savedDraft(options); }, "失败草稿的网页保存结果待核对，本地正文和附件已保留", Date.now() + 10000);
   });
   api.restoreNativeDrafts = result(async function (bindings, options) {
     bindings = bindings || [];
@@ -502,7 +575,6 @@
       var mountedRichEditor = current !== outgoingEditor && current.classList && current.classList.contains("ProseMirror");
       return Date.now() - stableAt >= (mountedRichEditor ? 100 : 1000);
     }, "工作任务输入区仍在切换，请等待豆包加载完成后重试");
-    beforeSave = rows();
     preparedAt = Date.now(); inputScope = "";
     if (typeof indexedDB !== "undefined" && indexedDB.databases) {
       var databases = await indexedDB.databases();
@@ -515,13 +587,18 @@
   api.saveNativeDraft = result(async function (options) {
     var epoch = importEpoch, expected = options.attachmentNames || [];
     await wait(function () { checkImport(epoch); return importText() === normalize(options.prompt); }, "提示词未完整填入，草稿尚未保存，请检查账号输入区");
+    if (!await catalog()) throw new Error("当前豆包页面不支持完整草稿保存核对，已保留原草稿");
+    if (!expected.length && importCards().length) throw new Error("原草稿没有附件，但网页输入区存在附件，未认定为导入成功");
     if (expected.length) await wait(function () {
       checkImport(epoch);
       if (importText() !== normalize(options.prompt)) throw new Error("当前草稿正文已变化，未继续导入");
       var cards = importCards();
       if (cards.some(function (card) { return card.failed; })) throw new Error("草稿图片上传失败，已保留当前草稿，请重试失败附件");
       return sameNames(cards.map(function (card) { return card.name; }), expected) && cards.every(function (card) { return card.ready; });
-    }, "草稿附件尚未全部上传完成，已停止导入下一条", Date.now() + 120000);
+    }, function () {
+      var cards = importCards();
+      return "草稿附件尚未全部上传完成：网页 " + cards.length + "/" + expected.length + " 个，已完成 " + cards.filter(function (card) { return card.ready; }).length + " 个";
+    }, Date.now() + 120000);
     var readyAt = 0;
     await wait(async function () {
       checkImport(epoch);
@@ -549,7 +626,7 @@
     checkImport(epoch);
     switchTo(options.executionMode !== "work");
     var verified;
-    var row = await wait(async function () {
+    await wait(async function () {
       checkImport(epoch);
       // Sidebar rows may all remount, remain collapsed, or omit the new draft.
       // The complete account-scoped record is the receipt, not a DOM delta.
@@ -557,25 +634,12 @@
       if (saved && saved.pending) return false;
       verified = saved;
       if (verified) {
-        if (!expected.length) return true;
         var items = await persistedImportAttachments(verified.bindings[0]);
         return sameNames(items.map(function (a) { return a.fileName; }), expected) && items.every(function (a) { return !!a.fileKey; });
       }
-      if (expected.length) return false;
-      if (!editor() || text(editor())) return null;
-      var added = rows().filter(function (r) { return !beforeSave.includes(r); });
-      if (added.length !== 1) return null;
-      var prefix = title(added[0]).replace(/[.…]+$/, "");
-      return prefix && normalize(options.prompt).startsWith(prefix) ? added[0] : null;
+      return false;
     }, expected.length ? "未确认全部草稿附件已保存，已停止导入下一条，请在原草稿核对" : "未确认豆包原生草稿已保存，请在左侧草稿中核对，避免重复存入", Date.now() + (expected.length ? 60000 : 20000));
-    if (verified) return verified;
-    var native = rowDraft(row);
-    if (native) await wait(async function () {
-      var saved = await catalog();
-      return saved && saved.items.some(function (d) { return d.nativeId === native.id && d.accountScope === native.inputDraftIndex.accountScope && normalize(d.prompt) === normalize(options.prompt); });
-    }, "豆包草稿完整正文尚未保存，请核对后重试，避免重复存入");
-    row.dataset.dmDraftId = options.id;
-    return { ok: true, bindings: snapshot() };
+    return verified;
   });
   api.openNativeDraft = result(async function (options) {
     // IndexedDB can finish before the sidebar mounts in a fresh sender page.

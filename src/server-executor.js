@@ -83,7 +83,7 @@ class NativeAdapter {
       const template={id:templateId,studioTaskId:snapshot.id,name:`${snapshot.userName||'工作台'} · ${snapshot.id}`,prompt:snapshot.prompt,...snapshot.parameters,attachments};
       templates.validateSnapshot(template);
       this.journal.bindTask(snapshot.id,{accountId:op.accountId,draftId:id,templateId,snapshotHash});
-      draft={id,draftNumber:drafts.numberFor(id),template,executionMode:'work',createdAt:new Date().toISOString()};
+      draft={id,draftNumber:drafts.numberFor(id),template,executionMode:'work',createdAt:new Date().toISOString(),...(op.payload.sendOnly===true?{studioSendOnly:true}:{})};
       store.get().taskDrafts.push(draft);durableSave();
     }
     await queue.saveDrafts([draft.id],{instanceId:inst.id,checkLease:this.leaseGuard(op,context)});
@@ -96,7 +96,7 @@ class NativeAdapter {
     const items=tasks.map(snapshot=>{
       try {
         const task=this.local(snapshot.id,op.accountId);
-        if(task)return {taskId:snapshot.id,status:'submitted',localTaskId:task.id,conversationId:task.conversationUrl,confirmed:confirmed(task)};
+        if(task)return {taskId:snapshot.id,status:'submitted',localTaskId:task.id,conversationId:task.conversationUrl,...(task.receiptUserMessageId?{userMessageId:task.receiptUserMessageId}:{}),confirmed:confirmed(task)};
       } catch {}
       return {taskId:snapshot.id,status:'uncertain',error:'inspect original native draft and conversation'};
     });
@@ -105,13 +105,16 @@ class NativeAdapter {
   async send(op,recover=false,context={}) {
     const inst=this.account(op),tasks=op.payload.tasks;
     if(!Array.isArray(tasks) || !tasks.length || tasks.length>100)throw new Error('invalid send batch');
-    if(recover)return this.sendReceipt(op,tasks);
     const ids=tasks.map(task=>{
       const binding=this.journal.task(task.id);
       if(!binding || binding.accountId!==op.accountId)throw new Error('task account binding mismatch');
+      const local=this.local(task.id,op.accountId),draft=drafts.list().find(d=>d.id===binding.draftId),sendOnly=op.payload.sendOnly===true;
+      if(local && Boolean(local.studioSendOnly)!==sendOnly || draft?.submissionRecord && Boolean(draft.studioSendOnly)!==sendOnly)throw new Error('submitted batch mode is immutable');
+      if(draft && !draft.submissionRecord)drafts.updateMany({[draft.id]:{studioSendOnly:sendOnly}});
       return binding.draftId;
     });
-    try {await queue.submitDrafts(ids,{instanceId:inst.id,maxPages:this.maxDraftPages,startQueue:false,checkLease:this.leaseGuard(op,context)});} catch { /* Each durable native receipt decides its own status. */ }
+    if(recover)return this.sendReceipt(op,tasks);
+    try {await queue.submitDrafts(ids,{instanceId:inst.id,maxPages:this.maxDraftPages,startQueue:false,sendOnly:true,checkLease:this.leaseGuard(op,context)});} catch { /* Each durable native receipt decides its own status. */ }
     return this.sendReceipt(op,tasks);
   }
   progress(op) {
@@ -122,15 +125,21 @@ class NativeAdapter {
       if(!binding || binding.accountId!==op.accountId)continue;
       const draft=drafts.list().find(d=>d.id===binding.draftId);
       const task=(binding.localTaskId && queue.getTask(binding.localTaskId)) || store.get().tasks.find(t=>t.templateId===binding.templateId) || draft?.submissionRecord?.task;
-      if(task?.conversationUrl && !task.submissionUncertain)tasks.push({taskId:snapshot.id,localTaskId:task.id,conversationId:task.conversationUrl,status:'submitted',confirmed:confirmed(task)});
+      if(task?.conversationUrl && !task.submissionUncertain)tasks.push({taskId:snapshot.id,localTaskId:task.id,conversationId:task.conversationUrl,...(task.receiptUserMessageId?{userMessageId:task.receiptUserMessageId}:{}),status:'submitted',confirmed:confirmed(task)});
     }
     return tasks.length?{outcome:'progress',receipt:{tasks}}:null;
   }
-  async track(op) {
+  async track(op,context={}) {
     this.account(op);
     const taskId=op.taskId||op.payload.task?.id,task=this.local(taskId,op.accountId);
     if(!task)return {outcome:'uncertain',receipt:{taskId,status:'running',error:'original local task missing'}};
-    const receipt={taskId,localTaskId:task.id,conversationId:task.conversationUrl,confirmed:confirmed(task)};
+    const receipt={taskId,localTaskId:task.id,conversationId:task.conversationUrl,...(task.receiptUserMessageId?{userMessageId:task.receiptUserMessageId}:{}),confirmed:confirmed(task)};
+    if(task.studioSendOnly || op.payload.sendOnly===true)return {outcome:'progress',receipt:{...receipt,confirmed:false,status:'running'}};
+    if(!confirmed(task) && ['submitted','queued'].includes(task.status) && task.receiptUserMessageId) {
+      await queue.confirmSubmittedTaskOnce(task.id,{checkLease:this.leaseGuard(op,context)});
+      receipt.confirmed=confirmed(task);
+      if(task.status!=='failed' && !receipt.confirmed)return {outcome:'progress',receipt:{...receipt,status:'running'}};
+    }
     if(task.status==='succeeded') {
       const files=task.result?.files||[];
       if(files.length!==1 || task.result?.unwatermarked!==true)return {outcome:'uncertain',receipt:{...receipt,status:'running',error:'inspect original output files'}};
@@ -244,14 +253,14 @@ class NativeAdapter {
   execute(op,context={}) {
     if(op.kind==='import')return this.import(op,false,context);
     if(op.kind==='send')return this.send(op,false,context);
-    if(op.kind==='track')return this.track(op);
+    if(op.kind==='track')return this.track(op,context);
     if(op.kind==='account')return op.payload.action==='reconcile_import'?this.reconcileImport(op,context):this.login(op,context);
     throw new Error('unsupported operation');
   }
   async recover(op,context={}) {
     if(op.kind==='import')return this.import(op,true,context);
     if(op.kind==='send')return this.send(op,true,context);
-    if(op.kind==='track')return this.track(op);
+    if(op.kind==='track')return this.track(op,context);
     if(op.payload.action==='reconcile_import')return this.reconcileImport(op,context);
     // Input commands may have succeeded. Never replay keystrokes after interruption.
     if(op.payload.action==='input') {
