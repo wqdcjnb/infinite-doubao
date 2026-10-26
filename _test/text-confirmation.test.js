@@ -33,6 +33,49 @@ const request = "我将为你生成短视频，请先确认参数：视频生成
 const planRequest = "以上方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 5段分镜 / 仅环境音无配乐）是否按此开始生成？视频生成为高消耗生成。";
 const livePlanRequest = "是否按以上完整方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 6段分镜 / 仅环境音无对白）开始生成视频？视频生成为高消耗生成。";
 
+test("本次空白助手回复的原生失败图标必须结束等待，旧消息和用户图标不能误判", () => {
+  const p = page();
+  const icon = p.message("icon", "", "");
+  const failed = id => {
+    const node = p.message(id, "", "assistant");
+    node.querySelectorAll = selector => selector === '[data-testid="message_box_failed_icon"]' ? [icon] : [];
+    return node;
+  };
+  p.add(failed("old-failure")); p.add(p.message("receipt", "本次编号", "user"));
+  p.api.beginTask({ taskId: "empty-failure", resume: true, baselineMessageIds: ["receipt"] });
+  assert.equal(p.api.readProgress().state, "unknown");
+  p.add(failed("current-failure"));
+  p.panel(p.message("stale-confirmation", planRequest, ""));
+  assert.equal(p.api.readProgress().state, "failed");
+  assert.equal(p.api.readProgress().errorCode, "platform_rejected");
+  assert.match(p.api.readProgress().snippet, /失败标记.*未提供具体原因/);
+  assert.equal(p.api.peekGenerationConfirmation().kind, undefined);
+  p.add(p.message("newer", "视频正在生成", "assistant"));
+  assert.equal(p.api.readProgress().state, "running");
+  icon.hidden = true;
+  const user = failed("user-icon"); user.closest = () => ({getAttribute:()=>"user"}); p.add(user);
+  assert.notEqual(p.api.readProgress().state, "failed");
+});
+
+test("本次助手的明确错误状态不依赖图标，但流式空回复与其他消息不能误判", () => {
+  const p = page(); p.api.beginTask({ taskId: "structured-error" });
+  const node = p.message("current", "", "assistant"); p.add(node);
+  const message = { message_id: "current", status: 4, final_status: {} };
+  node.__reactFiber$fixture = { memoizedProps: {}, return: { memoizedProps: { value: { message } } } };
+  assert.equal(p.api.readProgress().state, "unknown");
+  for (const final of ["Error", "Timeout"]) {
+    message.final_status.message = final;
+    assert.equal(p.api.readProgress().errorCode, "platform_rejected");
+    assert.equal(p.api.peekGenerationConfirmation().kind, undefined);
+  }
+  message.final_status.message = "Success";
+  assert.notEqual(p.api.readProgress().state, "failed");
+  message.error_details = { has_error: true };
+  assert.equal(p.api.readProgress().state, "failed");
+  message.message_id = "another-message";
+  assert.notEqual(p.api.readProgress().state, "failed");
+});
+
 test("工作任务最终收尾确认识别本次既定参数，忽略耗时及可选换模型建议", () => {
   const reminders = [
     '共用时 1 小时 1 分 8 秒 方案已经准备好了。由于你暂时不在，我没有直接开始生成，考虑到这次使用的是 seedance 2.0 会员模型（会消耗更多额度），我等你确认后再启动。你回来后回复 "按要求生成" 或 "开始生成"，我就立刻按上面的方案后台生成这条 15 秒清晨湖面小鱼视频。如果想调整任何参数（比如换成 fast 模型、改成竖屏），也直接告诉我。',

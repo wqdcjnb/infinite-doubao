@@ -444,7 +444,7 @@ test("18 条草稿最后一页登录较慢时，前 17 条已经连续投递", a
   assert.equal(liveWorkers, 0);
 });
 
-test("50 条所有回执都延迟，仍先触发全部 50 次发送，绝不按组等待", async () => {
+test("50 条回执延迟时最多保留 6 页，回执释放后继续且每条只发送一次", async () => {
   account("first");
   const ids = drafts.createMany(Array.from({ length: 50 }, (_, i) => template(String(i)).id)).map(d => d.id);
   await queue.saveDrafts(ids);
@@ -452,8 +452,9 @@ test("50 条所有回执都延迟，仍先触发全部 50 次发送，绝不按�
   const delayed = new Promise(resolve => { release = resolve; });
   hook = async method => { if (method === "waitNativeDraftAccepted") await delayed; };
   const pending = queue.submitDrafts(ids);
-  await waitFor(() => sends().length === 50);
+  await waitFor(() => sends().length === 6);
   assert.equal(store.get().tasks.length, 0);
+  assert.equal(peakWorkers, 6);
   release(); assert.equal((await pending).count, 50);
   assert.equal(new Set(sends().map(c => c.options.id)).size, 50);
   assert.equal(calls.some(c => c.method === "result"), false);
@@ -461,7 +462,7 @@ test("50 条所有回执都延迟，仍先触发全部 50 次发送，绝不按�
   assert.equal(new Set(store.get().tasks.map(t => t.draftBatchId)).size, 1);
 });
 
-test("滚动提前准备：前两页加载卡住、所有回执挂起，其余 48 条仍连续投递", async () => {
+test("滚动提前准备：前两页加载卡住仍投递其余草稿，全部挂起时遵守页面上限", async () => {
   account("first");
   const ids = drafts.createMany(Array.from({ length: 50 }, (_, i) => template(String(i)).id)).map(d => d.id);
   await queue.saveDrafts(ids);
@@ -478,15 +479,53 @@ test("滚动提前准备：前两页加载卡住、所有回执挂起，其余 4
   };
   const pending = queue.submitDrafts(ids); pending.catch(() => {});
   try {
-    await waitFor(() => sends().length === 48);
-    assert.equal(checks, 50);
+    await waitFor(() => sends().length === 4);
+    assert.equal(checks, 6);
     assert.equal(peakChecking, 3, "limit simultaneous page preparation without grouping sends");
     assert.equal(store.get().tasks.length, 0, "no receipt released yet");
-    releasePages(); await waitFor(() => sends().length === 50);
-    assert.equal(new Set(sends().map(c => c.options.id)).size, 50);
+    releasePages(); await waitFor(() => sends().length === 6);
+    assert.equal(peakWorkers, 6);
     releaseReceipts(); assert.equal((await pending).count, 50);
+    assert.equal(new Set(sends().map(c => c.options.id)).size, 50);
     assert.equal(liveWorkers, 0);
   } finally { releasePages(); releaseReceipts(); }
+});
+
+test("本批平台拒绝立即保留剩余草稿，失败任务落盘且不混入确认异常或自动重发", async () => {
+  account("first");
+  const ids = drafts.createMany(Array.from({ length: 25 }, (_, i) => template(String(i)).id)).map(d => d.id);
+  await queue.saveDrafts(ids);
+  let release;
+  const rejected = new Promise(resolve => { release = resolve; });
+  hook = async method => {
+    if (method === "readProgress") { await rejected; return { state: "failed", errorCode: "platform_rejected", snippet: "空白回复带失败标记" }; }
+  };
+  const pending = queue.submitDrafts(ids, { startQueue: false }); pending.catch(() => {});
+  await waitFor(() => sends().length === 6);
+  release();
+  await assert.rejects(pending, /未发送 19 条.*确认异常 0 条.*平台拒绝 6 条.*剩余草稿已停止/);
+  assert.equal(sends().length, 6); assert.equal(liveWorkers, 0);
+  store.load();
+  assert.equal(drafts.list().length, 19);
+  assert.ok(drafts.list().every(d => !d.submissionRecord && /停止/.test(d.nativeError)));
+  assert.ok(store.get().tasks.every(t => t.status === "failed" && t.errorCode === "platform_rejected" && t.receiptUserMessageId));
+});
+
+test("等待确认超过 30 秒也不重载原对话，停止后不自动恢复这批任务", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  const originalNow = Date.now; let offset = 0, checks = 0;
+  Date.now = () => originalNow() + offset;
+  hook = method => {
+    if (method === "readProgress") { offset += 35000; checks++; return { state: "running", generationStarted: false }; }
+  };
+  const pending = queue.submitDrafts(ids); pending.catch(() => {});
+  try {
+    await waitFor(() => checks >= 4);
+    assert.equal(calls.filter(c => c.method === "navigate").length, 0);
+    queue.stopAll(); await assert.rejects(pending, /已停止/);
+    store.load();
+    assert.ok(store.get().tasks.every(t => t.status === "cancelled" && t.receiptUserMessageId));
+  } finally { Date.now = originalNow; queue.stopAll(); }
 });
 
 test("中间一条准备失败，后续仍连续投递，失败草稿保留", async () => {

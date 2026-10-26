@@ -91,6 +91,20 @@ app.whenReady().then(async () => {
   const customEvents = await evaluate("window.events.filter(e => e.type === 'custom-confirmation')");
   assert.deepEqual(customEvents, [{ type: 'custom-confirmation', text: '按要求生成' }]);
   report.checks.push("work section/textarea selected over normal editor; delayed native send appears and receives exactly one reply");
+  await evaluate(`(()=>{window.reset();
+    document.querySelectorAll('section').forEach(n=>n.remove());
+    const user=document.createElement('div'); user.dataset.messageRole='user'; user.dataset.messageId='receipt'; document.body.append(user);
+    const reply=document.createElement('div'); reply.dataset.messageRole='assistant'; reply.dataset.messageId='response'; document.body.append(reply);
+    reply.__reactFiber$fixture={memoizedProps:{message:{message_id:'response',status:4,final_status:{}}}};
+  })()`);
+  await call("beginTask", { taskId: "native-failure", resume: true, baselineMessageIds: ["receipt"] });
+  assert.equal((await call("readProgress")).state, "unknown");
+  await evaluate(`document.querySelector('[data-message-id="response"]').__reactFiber$fixture.memoizedProps.message.final_status.message='Timeout'`);
+  assert.equal((await call("readProgress")).errorCode, "platform_rejected");
+  await evaluate(`(()=>{const reply=document.querySelector('[data-message-id="response"]');reply.__reactFiber$fixture.memoizedProps.message.final_status={};reply.innerHTML='<span data-testid="message_box_failed_icon" style="display:inline-block;width:20px;height:20px">!</span>';})()`);
+  assert.equal((await call("readProgress")).errorCode, "platform_rejected");
+  assert.equal((await call("peekGenerationConfirmation", expected)).kind, undefined);
+  report.checks.push("empty streaming reply remains pending; current terminal timeout and native failure icon stop confirmation");
   report.passed = true;
 }).catch(error => { report.error = error.stack; }).finally(() => {
   if (win && !win.isDestroyed()) win.destroy();

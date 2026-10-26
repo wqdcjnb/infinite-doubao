@@ -258,6 +258,27 @@
   function quotaExhausted(content) {
     return /(?:额度|免费数量|今日次数)\s*(?:已经?|均已|全部|已全部)?\s*(?:用完|耗尽)|已用完.{0,16}(?:额度|次数)|已达上限/.test(content);
   }
+  function failedReply(roots) {
+    var latest = roots[roots.length - 1];
+    // Work requests can be accepted but fail with an empty assistant message.
+    // The native error icon is then the only visible failure evidence. Scope
+    // it to the latest reply after this task's receipt, never sidebar/history.
+    if (!latest || messageRole(latest) !== "assistant") return false;
+    if (all('[data-testid="message_box_failed_icon"]', latest).some(visible)) return true;
+    // The native renderer also has explicit terminal errors before its icon
+    // mounts. Match the DOM message ID; never infer failure from an empty
+    // response or numeric status (the current site's status 4 is Streaming).
+    var key = Object.keys(latest).find(function (name) { return name.indexOf("__reactFiber$") === 0; });
+    var fiber = key && latest[key], id = messageId(latest);
+    for (var i = 0; fiber && i < 16; i += 1, fiber = fiber.return) {
+      var props = fiber.memoizedProps;
+      var message = props && (props.message || (props.value && props.value.message));
+      if (!message || !id || String(message.message_id || "") !== id) continue;
+      return !!(message.error_details && message.error_details.has_error) ||
+        !!(message.final_status && /^(Error|Timeout)$/.test(message.final_status.message));
+    }
+    return false;
+  }
   function followupConfirmation(content) {
     // Work tasks can finish planning with a declarative reminder instead of a
     // question. Require both an explicit confirmation hold and a quoted reply.
@@ -300,12 +321,13 @@
     var percent = pm && pm.length ? Math.min(100, Math.max.apply(null, pm.map(function (s) { return parseInt(s, 10) || 0; }))) : 0;
     var state = "unknown";
     var quotaFailure = quotaExhausted(tail);
-    if (quotaFailure || /(生成失败|视频生成未能(?:提交)?成功|视频没能生成出来|审核不通过|未通过审核|违规内容)/.test(tail)) state = "failed";
+    var rejected = failedReply(roots);
+    if (quotaFailure || rejected || /(生成失败|视频生成未能(?:提交)?成功|视频没能生成出来|审核不通过|未通过审核|违规内容)/.test(tail)) state = "failed";
     else if (/(生成中|排队中|正在生成|处理中)/.test(tail)) state = "running";
     else if (urls.length || /(生成完成|已完成|已生成)/.test(tail)) state = "done";
     else if (findConfirmation(null, roots).kind) state = "waiting_confirmation";
     var generationStarted = state === "running" && /(?:视频.{0,10}(?:正在生成|生成中|排队中)|正在(?:为你)?生成视频)/.test(tail);
-    return { state: state, errorCode: quotaFailure ? "quota" : "", generationStarted: generationStarted, percent: state === "done" ? 100 : percent, videos: urls.length, mediaUrls: urls, snippet: tail.slice(-400) };
+    return { state: state, errorCode: quotaFailure ? "quota" : rejected ? "platform_rejected" : "", generationStarted: generationStarted, percent: state === "done" ? 100 : percent, videos: urls.length, mediaUrls: urls, snippet: rejected && !tail.trim() ? "豆包已接收请求，但助手回复显示失败标记且没有返回内容；平台未提供具体原因，请查看原对话，不会自动重发" : tail.slice(-400) };
   };
   function confirmationKey(root, content, kind) {
     var hash = 2166136261;
@@ -317,7 +339,7 @@
     current = current || taskMessages();
     // An exhausted quota is a failed attempt, even if the same reply offers a
     // future reminder or a cheaper model. Neither is an immediate confirmation.
-    if (current.length && quotaExhausted(txt(current[current.length - 1]))) return { ok: false };
+    if (failedReply(current) || (current.length && quotaExhausted(txt(current[current.length - 1])))) return { ok: false };
     // Once a new assistant response exists, the earlier confirmation request
     // is history and must not be sent again.
     var roots = current.length ? [current[current.length - 1]] : [];

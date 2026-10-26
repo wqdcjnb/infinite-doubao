@@ -3,7 +3,7 @@ const { test } = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path"), vm = require("node:vm");
 
 async function page(options = {}) {
-  let now = 1000, sends = 0, active = false, remountBeforeClick = false;
+  let now = 1000, sends = 0, active = false, remountBeforeClick = false, clicks = 0;
   const prompt = "【草稿编号：DB-111111111111111111111111】\n第一段完整提示词\n第二段完整提示词";
   const binding = { id: "local-a", nativeId: "native-a", accountScope: "fixture-account", prompt, executionMode: "work" };
   const element = (body = "", attrs = {}) => ({ innerText: body, tagName: "DIV", isConnected: true, children: [], attrs,
@@ -28,7 +28,9 @@ async function page(options = {}) {
       click() {
         // React delegates the row handler through its connected root.
         if (!this.isConnected) return;
+        clicks++;
         active = true; input.value = prompt;
+        if (options.lostFirstSelection && clicks === 1) { active = false; input.value = ""; }
         if (options.remount) { row.isConnected = false; row = makeRow(); }
         options.onOpen?.({ input, mode, button, element, setEditors: value => { editors = value; }, setBusy: value => { busy = value; } });
       }
@@ -78,6 +80,15 @@ test("原生ID重挂载且选中状态改为ARIA时仍能打开正确草稿", as
   const p = await page({ remount: true, semanticSelection: true });
   assert.equal((await p.api.openNativeDraft(p.binding)).ok, true);
   assert.equal((await p.api.sendNativeDraft(p.binding)).ok, true); assert.equal(p.sends(), 1);
+});
+
+test("侧栏同步覆盖首次选中后重新按原生ID选择，不在空输入框持续等待", async () => {
+  const p = await page({ lostFirstSelection: true, semanticSelection: true });
+  const opened = await p.api.openNativeDraft(p.binding);
+  assert.equal(opened.ok, true, opened.reason);
+  assert.equal(p.sends(), 0);
+  assert.equal((await p.api.sendNativeDraft(p.binding)).ok, true);
+  assert.equal(p.sends(), 1);
 });
 
 test("隐藏旧编辑器不能遮挡当前可见编辑器，全文仍逐字核对", async () => {

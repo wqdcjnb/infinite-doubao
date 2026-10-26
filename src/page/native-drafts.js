@@ -392,11 +392,22 @@
       row.click();
       return true;
     }, "草稿数据已核对，但网页尚未显示对应条目，请检查豆包侧栏后重试；尚未发送");
-    var stableAt = 0, previousEditor = null, state;
-    await wait(function () {
+    var stableAt = 0, previousEditor = null, state, lastSelectionAt = Date.now();
+    await wait(async function () {
       state = readiness(options);
       if (state.reasons.length || state.editor !== previousEditor) { previousEditor = state.editor; stableAt = 0; }
-      if (state.reasons.length) return false;
+      if (state.reasons.length) {
+        // Sidebar synchronization may remount/collapse the selected row after
+        // its first click. Re-resolve only this native ID; a detached click must
+        // not turn into twenty seconds of waiting on an unrelated composer.
+        if (Date.now() - lastSelectionAt >= 1000) {
+          lastSelectionAt = Date.now();
+          var row = rowFor(options.id);
+          if (!row) { await expandDrafts(); row = rowFor(options.id); }
+          if (row && row.isConnected && !selected(row)) row.click();
+        }
+        return false;
+      }
       if (!stableAt) stableAt = Date.now();
       return Date.now() - stableAt >= 600;
     }, function () { return "豆包草稿未就绪：" + (state && state.reasons.length ? state.reasons.join("；") : "输入区仍在切换") + "；尚未发送"; });

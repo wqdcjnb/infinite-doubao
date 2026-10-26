@@ -321,7 +321,7 @@ async function runTask(task, inst, shot, sb) {
         // A received native draft is already a platform task. A failed result
         // must never turn it back into a fresh prompt submission.
         if (!task.studioTaskId && !task.draftBatchId) patchTask(task.id, { submittedAt: "", generatedAt: "", submissionUncertain: false });
-        throw Object.assign(new Error(quotaFailure ? (task.draftBatchId ? "已接收草稿的对话提示额度不足，请核对原对话；不会重新发送" : "账号额度用尽，等待其他可用账号") : "平台明确返回生成失败"), { code: quotaFailure ? "quota" : "generation_failed" });
+        throw Object.assign(new Error(quotaFailure ? (task.draftBatchId ? "已接收草稿的对话提示额度不足，请核对原对话；不会重新发送" : "账号额度用尽，等待其他可用账号") : progress.snippet || "平台明确返回生成失败"), { code: quotaFailure ? "quota" : progress.errorCode || "generation_failed" });
       }
       if (progress.state === "done") {
         patchTask(task.id, { generatedAt: task.generatedAt || new Date().toISOString() });
@@ -333,7 +333,7 @@ async function runTask(task, inst, shot, sb) {
     const message = String(error?.message || error);
     const code = error?.code;
     runtime.lastError = message;
-    if (task.studioTaskId || (task.draftBatchId && task.sentAt && code === "quota")) {
+    if (task.studioTaskId || (task.draftBatchId && task.sentAt && ["quota", "platform_rejected", "generation_failed"].includes(code))) {
       // Server-owned tasks and received drafts with quota errors retain their
       // original submission; neither may redispatch the prompt automatically.
       patchTask(task.id, { status: "failed", stage: "failed", error: message, errorCode: code || "unknown", finishedAt: new Date().toISOString() }, true);
@@ -665,11 +665,16 @@ async function submitDrafts(ids, options = {}) {
     const accepted = selected.filter((d) => d.submissionRecord).map((d) => ({ id: d.id, record: d.submissionRecord }));
     const pending = selected.filter((d) => !d.submissionRecord), receipts = [], errors = [], children = new Set(), pageWaiters = [];
     const bindings = nativeBindings(inst.id), draftBatchId = `draft-batch-${crypto.randomBytes(12).toString("hex")}`;
-    let failure, launched = 0;
+    const maxPages = Math.max(1, Math.min(6, Number(options.maxPages) || 6));
+    let failure, launched = 0, dispatchBlocked = "";
+    const checkDispatch = () => {
+      checkAction();
+      if (dispatchBlocked) throw new Error(dispatchBlocked);
+    };
     const progress = message => {
       const confirmed = accepted.filter(a => Object.values(a.record.task.confirmationIntents || {}).some(intent => intent.state === "sent")).length;
       const count = phase => errors.filter(e => e.phase === phase).length;
-      emit("draft", { message: `${message} · 本次发起 ${launched}/${pending.length} 条，豆包已接收 ${accepted.length}/${selected.length} 条，已回复生成确认 ${confirmed} 条；未发送 ${count("prepare")} 条，接收待核对 ${count("receipt")} 条，已接收但确认异常 ${count("confirmation")} 条`, instanceId: inst.id });
+      emit("draft", { message: `${message} · 本次发起 ${launched}/${pending.length} 条，豆包已接收 ${accepted.length}/${selected.length} 条，已回复生成确认 ${confirmed} 条；未发送 ${count("prepare")} 条，接收待核对 ${count("receipt")} 条，已接收但确认异常 ${count("confirmation")} 条，平台拒绝 ${count("platform")} 条${dispatchBlocked ? `；${dispatchBlocked}` : ""}`, instanceId: inst.id });
     };
     const abortChildren = () => {
       for (const child of children) child.controller.abort(operation.controller.signal.reason);
@@ -680,11 +685,10 @@ async function submitDrafts(ids, options = {}) {
       if (pending.length && !deps.resolveDraftDriver) throw new Error("草稿投递页面未就绪，请更新并重启应用");
       const data = pending.length ? requirePage(await draftStep(operation, "读取本批完整草稿", () => _driver.call("readNativeDrafts"))) : null;
       const catalog = data?.source === "indexeddb" ? { accountScope: data.accountScope, items: data.items } : null;
-      // Keep page loading ahead of sending. A preparation slot is released as
-      // soon as the click is issued, never when its receipt/confirmation arrives.
-      // Each ready page sends independently, so one slow page cannot hold the rest.
+      // Bound live pages, including receipt/confirmation waiters. Unbounded
+      // hidden pages exhaust renderers and repeatedly contend on shared drafts.
       async function dispatchDraft(draft, index) {
-        while (children.size >= (Number(options.maxPages) || Infinity)) {
+        while (!dispatchBlocked && children.size >= maxPages) {
           await new Promise(resolve => pageWaiters.push(resolve));
           check();
         }
@@ -696,18 +700,28 @@ async function submitDrafts(ids, options = {}) {
         const checkDraft = () => { check(); child.controller.signal.throwIfAborted(); };
         const cleanup = () => { children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); pageWaiters.shift()?.(); };
         const recordFailure = error => {
-          const message = `${received ? "草稿已接收，生成确认未完成" : issued ? "已发起发送，接收结果未确认" : "尚未发送"}：${error.message}`;
-          errors.push({ message, phase: received ? "confirmation" : issued ? "receipt" : "prepare" });
+          const platform = received && ["quota", "platform_rejected", "generation_failed"].includes(error.code);
+          const message = `${platform ? "豆包已接收，但平台处理失败" : received ? "草稿已接收，生成确认未完成" : issued ? "已发起发送，接收结果未确认" : "尚未发送"}：${error.message}`;
+          errors.push({ message, phase: platform ? "platform" : received ? "confirmation" : issued ? "receipt" : "prepare" });
+          if (platform && !dispatchBlocked) {
+            dispatchBlocked = error.code === "quota" ? "该账号对话提示额度不足，本批剩余草稿已停止发送并保留" : "豆包返回处理失败，本批剩余草稿已停止发送并保留，请核对原对话";
+            for (const wake of pageWaiters.splice(0)) wake();
+          }
           if (received) {
             record.task.waitReason = message;
             record.task.log.push({ at: new Date().toISOString(), level: "warn", message });
+            if (platform || operation.stopped) {
+              Object.assign(record.task, { status: operation.stopped ? "cancelled" : "failed", stage: operation.stopped ? "cancelled" : "failed", error: message, errorCode: error.code || "stopped", finishedAt: new Date().toISOString() });
+              Object.assign(record.sb.shots[0], { status: record.task.status, error: message });
+            }
           }
-          drafts.updateMany({ [draft.id]: { nativeError: message } });
+          drafts.updateMany({ [draft.id]: { nativeError: message, ...(received ? { submissionRecord: JSON.parse(JSON.stringify(record)) } : {}) } });
           log.warn("draft-dispatch-failed", { draftBatchId, draftId: draft.id, instanceId: inst.id, issued, message });
-          progress("本条异常已记录，继续投递其他草稿");
+          progress(dispatchBlocked ? "已停止后续投递，核对已发起请求" : "本条异常已记录，继续投递其他草稿");
         };
         progress(`正在准备第 ${index + 1} 条`);
         try {
+          checkDispatch();
           const prepared = await draftStep(child, `第 ${index + 1} 条草稿准备`, async () => {
             driver = await deps.resolveDraftDriver(inst, { signal: child.controller.signal });
             if (child.controller.signal.aborted) driver.close();
@@ -718,20 +732,20 @@ async function submitDrafts(ids, options = {}) {
               : `账号 ${inst.name} 的草稿页面登录状态尚未加载完成，请等待页面加载或检查网络后重试`);
             requirePage(await driver.call("restoreNativeDrafts", bindings.filter((b) => b.id === draft.id), catalog ? { catalog } : undefined));
             const pageOptions = { id: draft.id, prompt: draft.nativePrompt, executionMode: draft.executionMode };
-            checkAction();
+            checkDispatch();
             const opened = requirePage(await driver.call("openNativeDraft", pageOptions));
             const record = templateRecords(draft.template, draft.executionMode), task = record.task;
             Object.assign(task, { prompt: draft.nativePrompt, draftNumber: draft.draftNumber, draftBatchId, instanceId: inst.id, instanceName: inst.name, preferredInstanceId: inst.id, submissionUncertain: true });
             const tracking = requirePage(await driver.beginTask({ taskId: task.id, prompt: task.prompt, resume: false }));
             Object.assign(task, { baselineUrls: tracking.baselineUrls || [], baselineMessageIds: tracking.baselineMessageIds || [], baselineMediaKeys: [...new Set([...(tracking.baselineUrls || []).map(mediaKey), ...interceptor.list({ instanceId: inst.id, kind: "video", limit: 800 }).map((m) => mediaKey(m.url))])], confirmationIntents: {} });
-            checkAction();
+            checkDispatch();
             await driver.setGenerationOptions({ model: task.model, duration: task.duration });
             checkDraft();
             return { pageOptions, opened, record };
           }, 120000);
           const { pageOptions, opened } = prepared;
           record = prepared.record;
-          checkAction();
+          checkDispatch();
           record.task.submittedAt = new Date().toISOString();
           drafts.updateMany({ [draft.id]: { nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
           // The durable intent precedes the click. Do not await this promise here.
@@ -771,7 +785,6 @@ async function submitDrafts(ids, options = {}) {
             // message. Keep it alive instead of reloading every accepted page.
             if (driver.url && await driver.url() !== record.task.conversationUrl) await reopen();
             else await trackAccepted();
-            let refreshedAt = Date.now();
             const persist = values => {
               const snapshot = JSON.parse(JSON.stringify({ ...record, task: { ...record.task, ...values } }));
               drafts.updateMany({ [draft.id]: { submissionRecord: snapshot } });
@@ -780,6 +793,7 @@ async function submitDrafts(ids, options = {}) {
             for (;;) {
               checkDraft();
               options.checkLease?.();
+              if (driver.url && await driver.url() !== record.task.conversationUrl) await reopen();
               const confirmation = await confirmGeneration(driver, record.task, settings, null, { check: checkDraft, persist, checkLease: options.checkLease });
               checkDraft();
               if (confirmation?.blocked) throw new Error(confirmation.reason);
@@ -790,8 +804,7 @@ async function submitDrafts(ids, options = {}) {
                 if (record.task.studioTaskId) persist({ generationObservedAt: new Date().toISOString() });
                 return;
               }
-              if (state?.state === "failed") throw new Error(state.snippet || "平台处理失败");
-              if (Date.now() - refreshedAt >= 30000) { await reopen(); refreshedAt = Date.now(); }
+              if (state?.state === "failed") throw Object.assign(new Error(state.snippet || "平台处理失败"), { code: state.errorCode || "generation_failed" });
               // A generic '处理中' may still be planning; keep this page alive
               // until its own reminder arrives, without blocking other drafts.
               await new Promise(resolve => {
@@ -823,7 +836,7 @@ async function submitDrafts(ids, options = {}) {
     drafts.updateMany(bindingPatches(remainingDraftBindings(bindings, new Set(accepted.map((a) => a.id)))));
     accepted.sort((a, b) => selected.findIndex((d) => d.id === a.id) - selected.findIndex((d) => d.id === b.id));
     const items = accepted.length ? commitTemplates(accepted.map((a) => a.record), accepted.map((a) => a.id), !operation.stopped && options.startQueue !== false) : [];
-    if (failure || errors.length) throw new Error(`已确认发送 ${accepted.length}/${selected.length} 条。未发送 ${errors.filter(e => e.phase === "prepare").length} 条，接收待核对 ${errors.filter(e => e.phase === "receipt").length} 条，已接收但确认异常 ${errors.filter(e => e.phase === "confirmation").length} 条。${failure?.message || errors[0].message}；各条失败原因已保存，其余草稿记录已保留`);
+    if (failure || errors.length) throw new Error(`已确认发送 ${accepted.length}/${selected.length} 条。未发送 ${errors.filter(e => e.phase === "prepare").length} 条，接收待核对 ${errors.filter(e => e.phase === "receipt").length} 条，已接收但确认异常 ${errors.filter(e => e.phase === "confirmation").length} 条，平台拒绝 ${errors.filter(e => e.phase === "platform").length} 条。${dispatchBlocked || failure?.message || errors[0].message}；各条失败原因已保存，其余草稿记录已保留`);
     return { items, count: items.length, instanceId: inst.id, instanceName: inst.name };
   });
 }
