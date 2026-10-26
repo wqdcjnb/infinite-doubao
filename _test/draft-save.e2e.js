@@ -36,6 +36,7 @@ async function wait(fn, timeout = 15000) {
   try {
     await wait(async () => { try { c = await CDP.attach(); return true; } catch { return false; } });
     await wait(() => c.eval("document.readyState==='complete' && typeof state!=='undefined' && state.accounts.length===1"));
+    assert.equal(await c.eval("!!document.querySelector('#draftPending') && !!document.querySelector('#draftImported')"),true,"drafts must separate pending imports from preserved sending records");
     assert.equal(path.resolve((await c.eval("DM.paths()")).home), home);
     assert.equal(await c.eval("document.querySelector('#templateSubmit').disabled"), true);
     await c.eval("document.querySelector('#templateSubmit').click()");
@@ -57,6 +58,39 @@ async function wait(fn, timeout = 15000) {
     const start = Date.now();
     await c.eval("document.querySelector('#draftSave').click()");
     await wait(() => c.eval("document.querySelector('#draftStatus').textContent.includes('准备云电脑草稿')"));
+    // Interrupt the first image upload, then restart the whole app with its
+    // durable local 'saving' intent and no persisted website draft for that ID.
+    await wait(() => page("window.fixtureTrace.some(e=>e.event==='upload-start')"));
+    await page("document.querySelector('textarea').value=''");
+    await wait(() => c.eval("!document.querySelector('#draftSave').disabled"));
+    const interrupted = (await c.eval("DM.call('dm:drafts')")).data;
+    assert.equal(interrupted.filter(d=>d.nativeState==='saved').length,1);
+    assert.equal(interrupted.filter(d=>d.nativeState==='saving').length,1);
+    await wait(()=>c.eval("document.querySelectorAll('.draft-row').length===24"));
+    assert.match(await c.eval("document.querySelector('#draftImported').textContent"),/1/);
+    assert.equal(interrupted.length,25,"moving a row must not delete its sending record");
+    fs.writeFileSync(path.join(home,"drafts-pending.png"),Buffer.from((await c.send("Page.captureScreenshot")).data,"base64"));
+    const retainedBeforeRestart=interrupted.find(d=>d.nativeState==='saved').nativeBinding.nativeId;
+    await new Promise(resolve=>{child.once('exit',resolve);void c.eval("window.close()").catch(()=>{});});
+    c.close(); c=null;
+    child=spawn(process.env.DM_TEST_RUNTIME,[`--user-data-dir=${home}`,`--remote-debugging-port=${process.env.DM_TEST_CDP_PORT}`,"--remote-debugging-address=127.0.0.1"],{env,stdio:"ignore",windowsHide:true});
+    await wait(async()=>{try{c=await CDP.attach();return true;}catch{return false;}});
+    await wait(()=>c.eval("document.readyState==='complete' && typeof state!=='undefined' && state.accounts.length===1"));
+    await c.eval("document.querySelector('[data-view=drafts]').click();openAccount(state.accounts[0],{background:true})");
+    await wait(()=>page("window.fixtureReady"));
+    await page("document.querySelector('#new-work').click()");
+    await wait(()=>page("!!document.querySelector('textarea.ProseMirror')"));
+    await wait(()=>c.eval("document.querySelectorAll('.draft-row').length===24"));
+    await c.eval(`(()=>{const e=document.querySelector('#draftAccount');e.value=${JSON.stringify(account.id)};e.dispatchEvent(new Event('change',{bubbles:true}));if(!document.querySelector('#draftSelectAll').checked)document.querySelector('#draftSelectAll').click()})()`);
+    const interruptedCheckStart=Date.now();
+    await c.eval("document.querySelector('#draftSave').click()");
+    await wait(()=>c.eval("!document.querySelector('#draftSave').disabled"));
+    assert.match(await c.eval("document.querySelector('#draftStatus').textContent"),/中断.*恢复/);
+    assert.ok(Date.now()-interruptedCheckStart<3000,"interrupted input must not wait sixty seconds");
+    assert.equal(await c.eval("document.querySelector('#draftRecreate').disabled"),false);
+    const resumed=await c.eval(`DM.call('dm:drafts:save',${JSON.stringify(ids)},{instanceId:${JSON.stringify(account.id)},recreateDeleted:true})`);
+    assert.equal(resumed.ok,true,resumed.error);assert.equal(resumed.data.count,25);
+    assert.equal(await page(`JSON.parse(localStorage.getItem('fixture')).drafts.filter(d=>d.id===${JSON.stringify(retainedBeforeRestart)}).length`),1);
     await wait(async () => {
       const result = await c.eval("DM.call('dm:drafts')");
       return result.ok && result.data.length===25 && result.data.every(d=>d.nativeState==='saved');
@@ -67,6 +101,12 @@ async function wait(fn, timeout = 15000) {
     assert.ok(saved.every(d=>d.instanceId===account.id && d.nativeBinding && !d.nativeError));
     assert.equal(await page("JSON.parse(localStorage.getItem('fixture')).drafts.length"), 25);
     assert.equal(sends, 0); assert.equal((await c.eval("DM.call('dm:tasks')")).data.length, 0);
+    await c.eval("document.querySelector('#draftRefresh').click()");
+    await wait(()=>c.eval("document.querySelectorAll('.draft-row').length===0"));
+    assert.match(await c.eval("document.querySelector('#draftImported').textContent"),/25/);
+    await c.eval("document.querySelector('#draftImported').click();document.querySelector('#draftSelectAll').click()");
+    await wait(()=>c.eval("document.querySelectorAll('.draft-row').length===25 && !document.querySelector('#draftSubmit').disabled"));
+    fs.writeFileSync(path.join(home,"drafts-imported.png"),Buffer.from((await c.send("Page.captureScreenshot")).data,"base64"));
     await wait(() => c.eval("!document.querySelector('#draftSave').disabled"));
     await c.eval("document.querySelector('#draftSave').click()");
     await wait(() => c.eval("!document.querySelector('#draftSave').disabled"));
@@ -94,6 +134,6 @@ async function wait(fn, timeout = 15000) {
     assert.equal(native.length, 25); assert.equal(native.filter(d=>d.id===retained).length, 1);
     assert.equal(new Set(native.map(d=>d.prompt)).size, 25); assert.equal(sends, 0);
     assert.equal(native.filter(d=>d.refs.length===5).length,12);
-    console.log(JSON.stringify({ saved:25, templates:2, uniqueNumbers:25, sends, firstSaveMs, recoveryMs, elapsedMs:Date.now()-start, missingComposerRecovered:true, persistentError:true, hiddenSidebarVerified:25, restoredMissing:24, retainedExisting:1, retryDuplicates:0, withAttachments:12 }));
+    console.log(JSON.stringify({ saved:25, templates:2, uniqueNumbers:25, sends, firstSaveMs, recoveryMs, elapsedMs:Date.now()-start, interruptedUploadRecovered:true, wholeAppRestarted:true, retainedBeforeRestart:1, missingComposerRecovered:true, persistentError:true, hiddenSidebarVerified:25, restoredMissing:24, retainedExisting:1, retryDuplicates:0, withAttachments:12 }));
   } finally { c?.close(); child?.kill(); server.closeAllConnections(); server.close(); }
 })().catch(e => { console.error(e); process.exitCode=1; });

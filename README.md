@@ -1,6 +1,8 @@
 # 豆包工坊
 
-Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、JavaScript 和 Python 构建。当前源码版本为 **1.5.17**，公开安装包版本以 Releases 为准。
+Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、JavaScript 和 Python 构建。当前源码版本为 **1.5.19**，公开安装包版本以 Releases 为准。
+
+1.5.19 修复图片草稿导入和中断恢复：确认正文与全部附件完整保存后才导入下一条；切页或重开后明确提示恢复，核对原编号、账号和网页输入记录，避免重复导入。草稿箱分为“待导入”和“已存入豆包”，成功条目自动移出待导入列表，保留记录供原有一键发送使用。模板页“直接生成视频”按钮已禁用。本次不改发送实现或网络配置。
 
 1.5.17 将草稿批量发送与生成确认分开：所选草稿逐条提交，收到接收回执即移出草稿箱并标记“已发送”，不会等待或自动回复生成确认。发送结果待核对的旧记录保留，但不再禁用其他可发送草稿。提示词首行统一包含完整 Seedance 2.5 技能链接。
 
@@ -22,7 +24,7 @@ Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、J
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | `DoubaoWorkshop-1.5.17-Setup.exe` | 双击安装，通过桌面「豆包工坊」或「豆包工坊 网页版」启动 |
+| Windows x64 | `DoubaoWorkshop-1.5.19-Setup.exe` | 双击安装，通过桌面「豆包工坊」或「豆包工坊 网页版」启动 |
 | macOS 13+，Apple 芯片 | 最新 Release 中已验收的 `mac-arm64.dmg` | 打开镜像，将应用拖入 Applications |
 | macOS 13+，Intel | 最新 Release 中已验收的 `mac-x64.dmg` | 打开镜像，将应用拖入 Applications |
 
@@ -35,7 +37,7 @@ Mac 包使用临时签名，**尚未经过 Apple Developer ID 签名和公证**�
 发行附件中的 `SHA256SUMS.txt` 用于校验下载文件。在 PowerShell 中运行：
 
 ```powershell
-Get-FileHash .\DoubaoWorkshop-1.5.17-Setup.exe -Algorithm SHA256
+Get-FileHash .\DoubaoWorkshop-1.5.19-Setup.exe -Algorithm SHA256
 ```
 
 新安装默认使用 `%LOCALAPPDATA%\Programs\豆包工坊`。升级已有版本会沿用原安装位置和用户数据目录，保留账号、会话、任务、素材和设置。

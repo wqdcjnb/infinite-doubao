@@ -20,6 +20,7 @@ const V = {
   templateOptions: null,
   templateDirty: false,
   drafts: [],
+  draftBucket: "pending",
   selectedDrafts: new Set(),
   expandedDrafts: new Set(),
   draftBusy: false,
@@ -453,8 +454,12 @@ function bindTemplateEvents() {
   q("#draftSubmit").addEventListener("click", () => guard(submitSelectedDrafts));
   q("#draftSave").addEventListener("click", () => guard(() => saveSelectedDrafts()));
   q("#draftRecreate").addEventListener("click", () => guard(() => saveSelectedDrafts(true)));
+  for (const bucket of ["pending", "imported"]) q(bucket === "pending" ? "#draftPending" : "#draftImported").addEventListener("click", () => {
+    if (V.draftBusy) return;
+    V.draftBucket = bucket; V.selectedDrafts.clear(); V.draftError = ""; renderDrafts();
+  });
   q("#draftSelectAll").addEventListener("change", (event) => {
-    V.selectedDrafts = new Set(event.target.checked ? V.drafts.map((d) => d.id) : []);
+    V.selectedDrafts = new Set(event.target.checked ? visibleDrafts().map((d) => d.id) : []);
     renderDrafts();
   });
   q("#templateNew").addEventListener("click", () => guard(newTemplate));
@@ -483,10 +488,20 @@ async function refreshDrafts() {
   renderDrafts();
 }
 
+function importedDraft(draft) { return draft.nativeState === "saved" || !!draft.submissionRecord; }
+function visibleDrafts() { return V.drafts.filter(d => importedDraft(d) === (V.draftBucket === "imported")); }
+
 function renderDrafts() {
+  const visible = visibleDrafts(), visibleIds = new Set(visible.map(d => d.id));
+  V.selectedDrafts = new Set([...V.selectedDrafts].filter(id => visibleIds.has(id)));
+  const imported = V.drafts.filter(importedDraft).length;
+  for (const [id, bucket, count, label] of [["#draftPending", "pending", V.drafts.length - imported, "待导入"], ["#draftImported", "imported", imported, "已存入豆包"]]) {
+    const button = q(id); button.textContent = `${label}（${count}）`; button.disabled = V.draftBusy;
+    button.classList.toggle("active", V.draftBucket === bucket); button.setAttribute("aria-pressed", String(V.draftBucket === bucket));
+  }
   q("#draftCount").textContent = String(V.drafts.length);
-  q("#draftSelection").textContent = `已选 ${V.selectedDrafts.size} / ${V.drafts.length} 条`;
-  const selected = V.drafts.filter((d) => V.selectedDrafts.has(d.id));
+  q("#draftSelection").textContent = `已选 ${V.selectedDrafts.size} / ${visible.length} 条`;
+  const selected = visible.filter((d) => V.selectedDrafts.has(d.id));
   q("#draftDelete").disabled = V.draftBusy || !selected.length;
   const account = q("#draftAccount").value;
   const mismatch = selected.find((d) => d.instanceId && d.instanceId !== account);
@@ -496,19 +511,20 @@ function renderDrafts() {
   q("#draftSubmit").disabled = blocked || !ready || !selected.some(d => d.nativeState === "saved" && !d.submissionRecord?.task.submissionUncertain || d.nativeState === "sent");
   q("#draftSave").disabled = blocked || selected.some((d) => d.submissionRecord);
   q("#draftSave").textContent = selected.some(d => d.nativeState === "saving") ? "① 核对保存结果并继续" : "① 存入所选账号的豆包草稿";
-  q("#draftRecreate").disabled = q("#draftSave").disabled || !selected.some((d) => d.nativeState === "saved");
+  q("#draftRecreate").disabled = q("#draftSave").disabled || !selected.some((d) => d.nativeState === "saved" || d.nativeState === "saving");
   q("#draftStatus").textContent = V.draftBusy ? V.draftMessage || "正在处理所选草稿，请稍候…" : !selected.length ? "勾选要一起保存或发送的草稿。" : !account ? "请在上方选择一个豆包账号，再保存或发送所选草稿。" : mismatch ? `所选草稿包含 ${mismatch.instanceName || "其他账号"} 的网页草稿，请只勾选同一账号的草稿，并选择该账号。` : uncertain ? "上次发送待核对的草稿会保留；其余所选草稿继续发送。" : !ready ? "先点击 ①，将所选草稿全部存入豆包网页，再点击 ② 一起发送。" : `所选草稿将由 ${V.instances.find((i) => i.id === account)?.name || "所选账号"} 逐条发送全部 ${selected.length} 条草稿；发送成功即移出草稿箱，暂不处理生成确认。`;
   if (!V.draftBusy && V.draftError) q("#draftStatus").textContent = V.draftError;
+  else if (!V.draftBusy && selected.some(d => d.nativeState === "saving")) q("#draftStatus").textContent = "上次导入结果待核对。请先核对保存结果；若原输入区已消失，使用“恢复中断/缺失草稿”。";
   q("#templateAddDraft").disabled = V.draftBusy;
   q("#draftAccount").disabled = V.draftBusy;
   const all = q("#draftSelectAll");
-  all.checked = !!V.drafts.length && V.selectedDrafts.size === V.drafts.length;
-  all.indeterminate = V.selectedDrafts.size > 0 && V.selectedDrafts.size < V.drafts.length;
-  all.disabled = V.draftBusy || !V.drafts.length;
+  all.checked = !!visible.length && V.selectedDrafts.size === visible.length;
+  all.indeterminate = V.selectedDrafts.size > 0 && V.selectedDrafts.size < visible.length;
+  all.disabled = V.draftBusy || !visible.length;
   const box = q("#draftList");
   box.replaceChildren();
-  if (!V.drafts.length) box.appendChild(node("div", "empty-hint", "在「任务提交」中勾选多个不同模板，点击「所选模板加入草稿箱」，再到这里指定账号、统一保存和发送。"));
-  for (const draft of V.drafts) {
+  if (!visible.length) box.appendChild(node("div", "empty-hint", V.draftBucket === "imported" ? "尚无已确认存入豆包的草稿。" : imported ? "待导入列表已清空。请切换到“已存入豆包”选择草稿并一键发送。" : "在「任务提交」中将模板加入草稿箱，再到这里指定账号、保存和发送。"));
+  for (const draft of visible) {
     const t = draft.template;
     const row = node("div", "draft-row");
     const check = node("input");
@@ -549,6 +565,7 @@ async function addTemplateDraft(multiple = false) {
   try {
     const template = await saveTemplate();
     const added = await call("dm:drafts:collect", multiple ? [...V.selectedTemplates] : [template.id]);
+    V.draftBucket = "pending";
     V.selectedDrafts = new Set(added.map((d) => d.id));
     draftSuccess(`${multiple ? `${added.length} 条任务` : `「${template.name}」`}已加入草稿箱`);
   } finally { V.draftBusy = false; await refreshDrafts(); renderTemplateList(); }
@@ -577,9 +594,9 @@ async function deleteSelectedDrafts() {
 async function saveSelectedDrafts(recreateDeleted = false) {
   if (q(recreateDeleted ? "#draftRecreate" : "#draftSave").disabled) return;
   const ids = [...V.selectedDrafts], instanceId = q("#draftAccount").value;
-  if (recreateDeleted && !await window.DMDialogs.confirm({ title: "重新存入已删除的网页草稿？",
+  if (recreateDeleted && !await window.DMDialogs.confirm({ title: "恢复中断或缺失的网页草稿？",
     message: `核对选中的 ${ids.length} 条草稿，只重新存入网页中已缺失的条目。`,
-    detail: "保留原编号、提示词和附件，已存在的网页草稿会跳过，不会发送生成任务。无法确认账号或草稿内容时会停止。",
+    detail: "保留原编号、提示词和附件，已存在的草稿会核对或补齐图片。中断条目需确认网页草稿和输入记录均已缺失才重新存入，不会发送生成任务。请保持账号页面不变，等待导入完成。",
     confirmLabel: "核对并恢复缺失草稿" })) return;
   if (V.draftBusy) return;
   V.draftBusy = true; V.draftError = ""; V.draftMessage = ""; renderDrafts(); renderTemplateList();

@@ -608,7 +608,7 @@ async function saveDrafts(ids, options = {}) {
     };
     try {
     const selectedIds = new Set(selected.map((d) => d.id));
-    for (const d of selected.filter(d => d.nativeState === "saving" && !d.template.attachments.length)) {
+    for (const d of selected.filter(d => d.nativeState === "saving" && !d.template.attachments.length && (options.recreateDeleted !== true || d.nativeBinding))) {
       const verified = await step("正在核对上次草稿保存结果", () => driver.call("verifyNativeDraftSaved", { id: d.id, prompt: d.nativePrompt, executionMode: d.executionMode, accountScope: d.nativeBinding?.accountScope }));
       const binding = verified.bindings?.find(b => b.id === d.id && b.nativeId && b.accountScope);
       if (!binding) throw new Error("上次操作未确认：未返回可核对的原生草稿记录，不会重复存入");
@@ -616,6 +616,7 @@ async function saveDrafts(ids, options = {}) {
     }
     selected = selectedDrafts(ids);
     const bindings = nativeBindings(inst.id).filter((b) => selectedIds.has(b.id));
+    if (options.recreateDeleted === true) bindings.push(...selected.filter(d => d.nativeState === "saving" && d.nativeBinding).map(d => ({ ...d.nativeBinding, draftNumber: d.draftNumber, prompt: d.nativePrompt, executionMode: d.executionMode })));
     // New local drafts have no website bindings to restore. An old conversation
     // may not expose a composer until New work task is clicked.
     if (bindings.length) {
@@ -626,7 +627,7 @@ async function saveDrafts(ids, options = {}) {
       if (options.recreateDeleted === true && restored.missingIds?.length) {
         const missing = new Set(restored.missingIds);
         const reset = selected.filter(d => d.nativeState === "saved" && missing.has(d.id));
-        drafts.updateMany(Object.fromEntries(reset.map(d => [d.id, { nativeState: "", nativeBinding: null, nativePrompt: "", nativeError: "" }])));
+        drafts.updateMany(Object.fromEntries(reset.map(d => [d.id, { nativeState: "", nativeBinding: null, nativeError: "" }])));
         selected = selectedDrafts(ids);
       }
     }
@@ -638,12 +639,13 @@ async function saveDrafts(ids, options = {}) {
       const draftNumber = draft.draftNumber || drafts.numberFor(draft.id);
       record.task.prompt = draft.nativePrompt || withSeedanceSkill(`【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`);
       const attachmentNames = record.task.refs.map(file => path.basename(file));
-      const importOptions = { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode, attachmentNames, nativeId: draft.nativeBinding?.nativeId, accountScope: draft.nativeBinding?.accountScope };
+      const importOptions = { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode, attachmentNames, nativeId: draft.nativeBinding?.nativeId, accountScope: draft.nativeBinding?.accountScope, recreateDeleted: options.recreateDeleted === true };
       let uploadRefs = record.task.refs;
       try {
       checkAction();
       const position = `${count + 1}/${selected.length}`;
-      if (draft.nativeState === "saved" || draft.nativeState === "saving") {
+      let prepare = draft.nativeState !== "saved" && draft.nativeState !== "saving";
+      if (!prepare) {
         const resumed = await step(`正在核对草稿图片 ${position}`, () => driver.call("resumeNativeDraftImport", importOptions), 75000);
         if (resumed.bindings?.length) drafts.updateMany(bindingPatches(resumed.bindings));
         const binding = resumed.bindings?.find(b => b.id === draft.id);
@@ -651,14 +653,22 @@ async function saveDrafts(ids, options = {}) {
         if (resumed.complete) {
           drafts.updateMany({ [draft.id]: { nativeState: "saved", nativeError: "" } }); count++; continue;
         }
-        if (!Array.isArray(resumed.missingNames) || resumed.missingNames.some(name => !attachmentNames.includes(name))) throw new Error("未确认原草稿缺失的素材，未重复导入");
-        uploadRefs = record.task.refs.filter(file => resumed.missingNames.includes(path.basename(file)));
-      } else {
-      await step(`正在准备云电脑草稿 ${position}`, () => driver.call("prepareNativeDraft", { executionMode: draft.executionMode, model: record.task.model, duration: record.task.duration, ratio: record.task.ratio }));
+        if (resumed.restart) {
+          if (options.recreateDeleted !== true || !resumed.accountScope || (draft.nativeBinding && draft.nativeBinding.accountScope !== resumed.accountScope)) throw new Error("未确认中断草稿可恢复，未重复导入");
+          delete importOptions.nativeId;
+          importOptions.accountScope = resumed.accountScope; prepare = true;
+        } else {
+          if (!Array.isArray(resumed.missingNames) || resumed.missingNames.some(name => !attachmentNames.includes(name))) throw new Error("未确认原草稿缺失的素材，未重复导入");
+          uploadRefs = record.task.refs.filter(file => resumed.missingNames.includes(path.basename(file)));
+        }
+      }
+      if (prepare) {
+      const prepared = await step(`正在准备云电脑草稿 ${position}`, () => driver.call("prepareNativeDraft", { executionMode: draft.executionMode, model: record.task.model, duration: record.task.duration, ratio: record.task.ratio }));
+      if (importOptions.accountScope && prepared.accountScope !== importOptions.accountScope) throw new Error("恢复期间豆包账号已变化，未填写或上传草稿");
       }
       checkAction();
       // Save intent before uploading/filling: an interrupted save must not create duplicates.
-      drafts.updateMany({ [draft.id]: { draftNumber, instanceId: inst.id, instanceName: inst.name, nativeState: "saving", nativePrompt: record.task.prompt, nativeError: "" } });
+      drafts.updateMany({ [draft.id]: { draftNumber, instanceId: inst.id, instanceName: inst.name, nativeState: "saving", nativePrompt: record.task.prompt, nativeError: "", ...(prepare ? { nativeBinding: null } : {}) } });
       await step(`正在填写草稿提示词 ${position}`, () => driver.setText(record.task.prompt));
       checkAction();
       if (uploadRefs.length) { await step(`正在上传草稿素材 ${position}`, () => driver.pasteFiles(uploadRefs)); }

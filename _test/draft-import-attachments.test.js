@@ -2,13 +2,13 @@
 const { test } = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path"), vm = require("node:vm");
 const names = ["1.png", "2.png", "3.png", "4.png", "5.png"];
-function fixture({ appearAt = 0, readyAt = 0, persistedAt = 0, persistedCount = 5, failed = false, existing = false, activeExisting = false, collapsed = false, richSkill = false, wrongSkill = false, alternateState = false, staleReady = false, sharedReturn = false, present = names, persistedOrder = names } = {}) {
-  let now = 1000, switched = 0, clicks = 0, unrelatedClicks = 0, active = activeExisting, expanded = !collapsed;
+function fixture({ appearAt = 0, readyAt = 0, persistedAt = 0, persistedCount = 5, failed = false, existing = false, activeExisting = false, collapsed = false, richSkill = false, wrongSkill = false, alternateState = false, staleReady = false, sharedReturn = false, present = names, persistedOrder = names, interrupted = false, pending = "target", catalogAvailable = true, accountKnown = true, changeAccountOnRead = false } = {}) {
+  let now = 1000, switched = 0, clicks = 0, unrelatedClicks = 0, active = activeExisting, expanded = !collapsed, changedAccount = false;
   const scope = "account-a", body = "【草稿编号：DB-111111111111111111111111】 视频";
   const prompt = (richSkill ? "[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)\n" : "") + body;
   const visiblePrompt = richSkill ? "Seedance 2.5\n" + body : prompt;
   const metadata = { id: "native", title: prompt, scene: "new-office-task", inputDraftIndex: { accountScope: scope, conversationScope: "local:native", inputId: "primary" } };
-  const current = { tagName: "TEXTAREA", value: visiblePrompt, editor: { getText: () => current.value } };
+  const current = { tagName: "TEXTAREA", value: interrupted ? "" : visiblePrompt, editor: { getText: () => current.value } };
   if (richSkill) current.pmViewDesc = { node: { toJSON: () => ({type:"doc",content:[{type:"paragraph",content:[{type:"mention",attrs:{mentionType:"skill",label:"Seedance 2.5",skillId:"seedance-25",skill_type:2,external_skill_id:wrongSkill?"wrong":"353376777986"}},{type:"text",text:"\n"+body}]}]}) } };
   const row = { dataset: {}, classList: { contains: () => active }, querySelector: () => ({ innerText: prompt }), __reactFiber$test: { memoizedProps: { draft: metadata } }, click() { clicks++; active = true; current.value = visiblePrompt; } };
   const button = { disabled: false, getAttribute: () => null };
@@ -30,18 +30,18 @@ function fixture({ appearAt = 0, readyAt = 0, persistedAt = 0, persistedCount = 
   const unrelated = { innerText: "展开更多草稿", getAttribute: () => null, click() { unrelatedClicks++; } };
   const document = { querySelector: s => s.includes("draft-conversation-section") ? section : s.includes("chat_input_action_mode") ? mode : s.includes("chat_input_send_button") ? button : current,
     querySelectorAll: s => s.includes("attachment_area") ? cards() : s.includes("draft-conversation-section") ? expanded && (existing || switched) ? [row] : [] : [newChat, ...(collapsed ? [unrelated, more] : [])] };
-  const inputs = () => ({ state: { accountScope: scope, records: [{ address: metadata.inputDraftIndex, updatedAt: now, units: {
-    "input.document": { updatedAt: now, payload: { format: "plain-text", text: prompt } },
+  const inputs = () => ({ state: { accountScope: scope, records: pending === "empty" ? [] : [{ address: metadata.inputDraftIndex, updatedAt: now, units: {
+    "input.document": pending === "attachments-only" ? undefined : { updatedAt: now, payload: pending === "unknown" ? { format: "unknown" } : { format: "plain-text", text: prompt } },
     "input.attachments": { payload: { items: now >= 1000 + persistedAt ? persistedOrder.slice(0, persistedCount).map((fileName, i) => ({ fileName, fileKey: "key-" + i })) : [] } }
   } }] } });
-  const indexedDB = { databases: async () => [{ name: "flow-draft-conversations-v2" }, { name: "samantha-web" }], open(name) {
+  const indexedDB = { databases: async () => catalogAvailable ? [{ name: "flow-draft-conversations-v2" }, { name: "samantha-web" }] : [], open(name) {
     const q = {}; queueMicrotask(() => { q.result = { close() {}, transaction(_name, mode) {
-      assert.equal(mode, "readonly"); const tx = { objectStore: () => ({ get: () => read(inputs()), getAll: () => read(existing || switched ? [{ accountScope: scope, id: "native", data: metadata }] : []) }) };
+      assert.equal(mode, "readonly"); const tx = { objectStore: () => ({ get: () => { changedAccount=changeAccountOnRead; return read(inputs()); }, getAll: () => read(existing || switched ? [{ accountScope: scope, id: "native", data: metadata }] : []) }) };
       function read(value) { const r = {}; queueMicrotask(() => { r.result = value; r.onsuccess(); queueMicrotask(() => tx.oncomplete()); }); return r; } return tx;
     } }; q.onsuccess(); }); return q;
   } };
   class Clock extends Date { static now() { return now; } }
-  const api = {}, context = vm.createContext({ window: { auto: api }, CFG: { autoKey: "auto" }, document, indexedDB, localStorage: { getItem: () => scope }, Date: Clock,
+  const api = {}, context = vm.createContext({ window: { auto: api }, CFG: { autoKey: "auto" }, document, indexedDB, localStorage: { getItem: () => accountKnown ? changedAccount ? "other-account" : scope : "" }, Date: Clock,
     clearTimeout, setTimeout: (fn, delay) => delay > 100 ? setTimeout(fn, delay) : (now += 100, queueMicrotask(fn)) });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/page/native-drafts.js"), "utf8"), context);
   return { api, options: { id: "local", prompt, executionMode: "work", attachmentNames: names }, state: () => ({ elapsed: now - 1000, switched: switched ? switched - 1000 : null, clicks, unrelatedClicks }) };
@@ -108,6 +108,37 @@ test("中断后卡片延迟挂载时等待原上传，不误判缺图重复上�
   assert.ok(f.state().elapsed >= 2000);
   assert.equal(f.state().clicks, 0); assert.equal(f.state().switched, null);
 });
+
+test("重开后原输入区已清空时立即提示恢复，不空等六十秒", async () => {
+  const f = fixture({ interrupted: true, pending: "empty", present: [] });
+  const result = await f.api.resumeNativeDraftImport(f.options);
+  assert.equal(result.ok, false); assert.match(result.reason, /中断.*恢复/);
+  assert.ok(f.state().elapsed < 3000); assert.equal(f.state().switched, null);
+});
+
+test("明确恢复中断导入时，完整存储和输入记录均无原编号才允许重新准备", async () => {
+  const f = fixture({ interrupted: true, pending: "empty", present: [] });
+  const result = await f.api.resumeNativeDraftImport({ ...f.options, recreateDeleted: true });
+  assert.equal(result.ok, true, result.reason); assert.equal(result.restart, true);
+  assert.equal(result.accountScope, "account-a"); assert.equal(f.state().switched, null);
+});
+
+test("恢复中断不能覆盖残留输入记录，未知存储或未知账号不能认定缺失", async () => {
+  for (const options of [{pending:"target"}, {pending:"unknown"}, {pending:"attachments-only"}, {pending:"empty",catalogAvailable:false}, {pending:"empty",accountKnown:false}, {pending:"empty",changeAccountOnRead:true}]) {
+    const f = fixture({ interrupted:true, present:[], ...options });
+    const result = await f.api.resumeNativeDraftImport({ ...f.options, recreateDeleted:true });
+    assert.equal(result.ok, false, JSON.stringify(options)); assert.notEqual(result.restart, true);
+    assert.ok(f.state().elapsed < 3000); assert.equal(f.state().switched, null);
+  }
+});
+
+test("中断后已保存完整的草稿直接确认原ID，不重新准备", async () => {
+  const f = fixture({ existing:true, interrupted:true });
+  const result = await f.api.resumeNativeDraftImport({ ...f.options, recreateDeleted:true });
+  assert.equal(result.ok,true,result.reason); assert.equal(result.complete,true);
+  assert.notEqual(result.restart,true); assert.equal(result.bindings[0].nativeId,"native");
+  assert.equal(f.state().clicks,0); assert.equal(f.state().switched,null);
+});
 test("中断上传没有持久回执且图片不足时停止，不推断缺失再上传", async () => {
   const f = fixture({ present: names.slice(0, 2) });
   const result = await f.api.resumeNativeDraftImport(f.options);
@@ -131,6 +162,16 @@ test("已知原生ID的草稿已删除时，不进入新草稿续接或切页", 
   const result = await f.api.resumeNativeDraftImport({ ...f.options, nativeId: "original-native" });
   assert.equal(result.ok, false); assert.match(result.reason, /原草稿/);
   assert.equal(f.state().switched, null);
+});
+
+test("有原生ID的中断恢复也必须排除残留正文，不能只看草稿列表缺失",async()=>{
+  for(const pending of ["empty","target"]){
+    const f=fixture({interrupted:true,present:[],pending});
+    const result=await f.api.resumeNativeDraftImport({...f.options,nativeId:"original-native",accountScope:"account-a",recreateDeleted:true});
+    assert.equal(result.ok,pending==="empty",result.reason);
+    if(pending==="empty")assert.equal(result.restart,true);else assert.match(result.reason,/输入记录/);
+    assert.equal(f.state().switched,null);
+  }
 });
 test("原草稿出现不属于本次任务的图片时停止，不追加或覆盖", async () => {
   const f = fixture({ existing: true, present: ["other.png"], persistedCount: 1 });

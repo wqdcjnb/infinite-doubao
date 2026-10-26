@@ -66,6 +66,8 @@ const server = http.createServer((req,res)=>{
     assert.equal(await page("document.querySelector('aside').children.length"),3);
     const ds=await call('dm:drafts');assert.equal(new Set(ds.map(d=>d.instanceId)).size,1);
     assert.equal(new Set(ds.map(d=>d.draftNumber)).size,3);
+    await wait(()=>c.eval("document.querySelectorAll('.draft-row').length===0"));
+    await click('#draftImported');await click('#draftSelectAll');
     assert.ok(ds.every(d=>/^DB-[0-9A-F]{24}$/.test(d.draftNumber)&&d.nativePrompt.startsWith('【草稿编号：'+d.draftNumber+'】')));
     assert.equal(await c.eval("document.querySelectorAll('.draft-number').length"),3);
     assert.ok(ds.every(d=>d.instanceId==='batch-fixture-2'),'explicitly selected account owns the entire batch');

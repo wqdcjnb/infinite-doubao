@@ -300,12 +300,50 @@
     return payload.items;
   }
   api.cancelNativeDraftImport = function () { importEpoch++; return { ok: true }; };
+  async function confirmInterruptedImportMissing(options) {
+    var data = await catalog(), number = numberIn(options.prompt);
+    if (!data || !data.accountScope || !number || data.items.some(function (d) { return d.prompt === null; })) throw new Error("无法完整核对账号草稿，未重新导入，请等待页面加载完成后重试");
+    if (options.accountScope && data.accountScope !== options.accountScope) throw new Error("当前豆包账号与原草稿账号不一致，未重新导入");
+    if (data.items.some(function (d) { return numberIn(d.prompt) === number; })) throw new Error("原草稿刚刚保存，请重新核对，未重复导入");
+    var input = await readStore("samantha-web", "store", "input-engine-draft:v3:account:" + encodeURIComponent(data.accountScope));
+    if (!input || !input.state || input.state.accountScope !== data.accountScope || !Array.isArray(input.state.records)) throw new Error("未能核对网页输入记录，未重新导入");
+    for (var record of input.state.records) {
+      if (!record.address || record.address.accountScope !== data.accountScope) throw new Error("网页输入记录归属不明，未重新导入");
+      var unit = record.units && record.units["input.document"], payload = unit && !unit.tombstone && unit.payload;
+      if (unit && unit.tombstone) continue;
+      if (!unit) {
+        var attachments = record.units && record.units["input.attachments"];
+        if (attachments && !attachments.tombstone && (!attachments.payload || !Array.isArray(attachments.payload.items) || attachments.payload.items.length)) throw new Error("网页残留附件的正文不明，无法确认缺失，未重新导入");
+        continue;
+      }
+      var prompt = payload && (payload.format === "plain-text" ? payload.text : payload.plainTextFallback);
+      if (typeof prompt !== "string") throw new Error("网页仍有未能识别的输入记录，无法确认缺失，未重新导入");
+      if (prompt.includes(number)) throw new Error("原草稿仍保留在网页输入记录中，请恢复原输入区后核对；未新建重复草稿");
+    }
+    if (String(localStorage.getItem("flow_tea_user_id") || "").trim() !== data.accountScope) throw new Error("核对期间豆包账号已变化，未重新导入");
+    if (!editor() || importText() || importCards().length) throw new Error("请先打开空白工作任务输入区，再恢复中断草稿；未覆盖当前内容");
+    return { ok: true, restart: true, accountScope: data.accountScope };
+  }
   api.resumeNativeDraftImport = result(async function (options) {
     var epoch = importEpoch, expected = options.attachmentNames || [], verified = await savedDraft(options);
     checkImport(epoch);
-    if (options.nativeId && !verified) throw new Error("未找到原草稿，未新建或重复导入；如已删除，请使用重新存入恢复");
+    if (options.nativeId && !verified) {
+      if (options.recreateDeleted === true) {
+        var missingBound = await confirmInterruptedImportMissing(options); checkImport(epoch); return missingBound;
+      }
+      throw new Error("未找到原草稿，未新建或重复导入；如已删除，请使用重新存入恢复");
+    }
     var persisted = verified ? await persistedImportAttachments(verified.bindings[0]) : [];
     if (verified && sameNames(persisted.map(function (a) { return a.fileName; }), expected) && persisted.every(function (a) { return !!a.fileKey; })) return { ...verified, complete: true, missingNames: [] };
+    if (!verified) {
+      await wait(function () { checkImport(epoch); return editor(); }, "账号输入区尚未加载，请打开工作任务页面后重试");
+      if (importText() !== normalize(options.prompt)) {
+        if (options.recreateDeleted === true) {
+          var missing = await confirmInterruptedImportMissing(options); checkImport(epoch); return missing;
+        }
+        throw new Error("上次导入已中断，当前输入区已变化；请点击“恢复中断/缺失草稿”核对后继续，未重复导入");
+      }
+    }
     var uploading = !verified;
     if (verified) {
       await expandDrafts();
@@ -369,7 +407,7 @@
         usedIds.add(match.nativeId);
         resolved.push({ id: binding.id, nativeId: match.nativeId, accountScope: match.accountScope, title: match.title, index: full.indexOf(match), titles: titles });
       }
-      if (missingIds.length && !(options && options.allowMissing)) throw new Error("豆包网页中已找不到所选的 " + missingIds.length + " 条草稿，本地提示词和素材已保留。请点击「网页草稿已删除？重新存入」恢复缺失草稿");
+      if (missingIds.length && !(options && options.allowMissing)) throw new Error("豆包网页中已找不到所选的 " + missingIds.length + " 条草稿，本地提示词和素材已保留。请点击「恢复中断/缺失草稿」重新存入缺失草稿");
       resolved.forEach(function (b) { storedBindings.set(b.id, b); });
       return { ok: true, source: "indexeddb", total: full.length, bindings: resolved, missingIds: missingIds };
     }
@@ -469,7 +507,7 @@
         try { inputScope = String(localStorage.getItem("flow_tea_user_id") || "").trim(); } catch (_) {}
       }
     }
-    return { ok: true };
+    return { ok: true, accountScope: inputScope };
   });
   api.saveNativeDraft = result(async function (options) {
     var epoch = importEpoch, expected = options.attachmentNames || [];
