@@ -26,7 +26,7 @@ beforeEach(() => {
         calls.push({ method, options, instanceId: inst.id });
         const override = await hook(method, options, { draftId, taskId, restoreOptions }); if (override) return override;
         if (method === "saveNativeDraft") { native.push(options.id); return { ok: true, bindings: bindings() }; }
-        if (method === "waitNativeDraftAccepted") { native = native.filter((id) => id !== options.id); currentUrl = `https://www.doubao.com/chat/${options.id}`; return { ok: true, conversationUrl: currentUrl, bindings: bindings() }; }
+        if (method === "waitNativeDraftAccepted") { native = native.filter((id) => id !== options.id); currentUrl = `https://www.doubao.com/chat/${options.id}`; return { ok: true, conversationUrl: currentUrl, userMessageId: `user-${options.id}`, bindings: bindings() }; }
         if (method === "readProgress") return { state: "running", generationStarted: true };
         return { ok: true, conversationIds: [] };
       },
@@ -34,7 +34,7 @@ beforeEach(() => {
       setGenerationOptions: async () => ({}), setText: async value => { text = value; return { ok: true }; },
       beginTask: async (input) => { taskId = input.taskId; calls.push({ method: "beginTask", input, draftId }); return { ok: true, baselineUrls: [], baselineMessageIds: ["old-route"] }; },
       send: async () => { calls.push({ method: "normalSend", instanceId: inst.id, draftId, text }); return await hook("send", { text }, { draftId, taskId }) || { ok: true }; },
-      readProgress: async () => { calls.push({ method: "result" }); return { state: "done", mediaUrls: [`https://fixture.invalid/${index}/${taskId}.mp4`] }; }
+      readProgress: async () => { calls.push({ method: "result" }); return await hook("result", {}, { taskId }) || { state: "done", mediaUrls: [`https://fixture.invalid/${index}/${taskId}.mp4`] }; }
     };
   };
   queue.init({ sessionFor: () => ({ cookies: { get: async () => [{ name: "sessionid" }] } }), resolveDriver, resolveDraftDriver: async inst => {
@@ -105,12 +105,14 @@ test("接收后在已核对的新对话重置基线，直接检测生成确认�
     if (method === "peekGenerationConfirmation" && context.draftId) {
       assert.equal(calls.some(c => c.method === "navigate" && c.draftId === context.draftId), false, "verified conversation should not reload");
       const tracking = calls.filter(c => c.method === "beginTask" && c.draftId === context.draftId).at(-1).input;
-      assert.equal(tracking.resume, true); assert.equal(tracking.reset, true); assert.deepEqual(tracking.baselineMessageIds, []);
+      assert.equal(tracking.resume, true); assert.equal(tracking.reset, true); assert.deepEqual(tracking.baselineMessageIds, [`user-${context.draftId}`]);
+      const receipt = calls.find(c => c.method === "waitNativeDraftAccepted" && c.options.id === context.draftId);
+      assert.deepEqual(receipt.options.baselineMessageIds, ["old-route"]);
     }
   };
   assert.equal((await queue.submitDrafts(ids)).count, 2);
   assert.equal(sends().length, 2);
-  assert.ok(store.get().tasks.every(t => t.baselineMessageIds.length === 0));
+  assert.ok(store.get().tasks.every(t => t.baselineMessageIds.length === 1 && t.baselineMessageIds[0].startsWith("user-")));
 });
 
 test("整批只读取一次完整草稿，投递页复用快照而非重复访问数据库", async () => {
@@ -155,7 +157,7 @@ test("未发送、接收未知与已接收确认异常分别计数，不能混�
 test("回执后页面离开已接收对话时，恢复正确会话再核对生成确认", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   hook = (method, options) => method === "waitNativeDraftAccepted"
-    ? { ok: true, conversationUrl: `https://www.doubao.com/chat/${options.id}` } : null;
+    ? { ok: true, conversationUrl: `https://www.doubao.com/chat/${options.id}`, userMessageId: `user-${options.id}` } : null;
   assert.equal((await queue.submitDrafts(ids)).count, 2);
   assert.deepEqual(calls.filter(c => c.method === "navigate" && c.draftId).map(c => c.url).sort(), ids.map(id => `https://www.doubao.com/chat/${id}`).sort());
 });
@@ -201,6 +203,66 @@ test("确认发送回执丢失时保留 pending，恢复取回不重复草稿或
   store.load(); queue.recoverTemplateTasks(); queue.wakeQueue();
   await waitFor(() => store.get().tasks.every(t => t.status === "succeeded"));
   assert.equal(calls.filter(c => c.method === "normalSend").length, 2);
+});
+
+test("已接收草稿提示额度不足保留发送意图，恢复取回不重发原始任务", async () => {
+  const inst = account("first"), ids = batch(); await queue.saveDrafts(ids);
+  await queue.submitDrafts(ids, { startQueue: false });
+  const stamps = store.get().tasks.map(t => t.submittedAt);
+  hook = method => method === "result" ? { state: "failed", snippet: "今日次数已用完" } : null;
+  await queue.retryTask(store.get().tasks[0].id);
+  await waitFor(() => store.get().tasks.every(t => t.status === "failed"));
+  assert.deepEqual(store.get().tasks.map(t => t.submittedAt), stamps);
+  assert.ok(store.get().tasks.every(t => t.error.includes("不会重新发送")));
+  assert.equal(calls.filter(c => c.method === "normalSend").length, 0);
+  assert.equal(sends().length, 2);
+  hook = () => null;
+  queue.quota.reset(inst.id); await queue.retryTask(store.get().tasks[0].id);
+  await waitFor(() => store.get().tasks[0].status === "succeeded");
+  assert.equal(calls.filter(c => c.method === "normalSend").length, 0);
+  assert.equal(sends().length, 2);
+});
+
+test("旧版本误清submittedAt的已接收草稿依靠sentAt保护，只取回原对话", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  await queue.submitDrafts(ids, { startQueue: false });
+  for (const task of store.get().tasks) task.submittedAt = "";
+  store.save(); store.load(); queue.recoverTemplateTasks();
+  await queue.retryTask(store.get().tasks[0].id);
+  await waitFor(() => store.get().tasks.every(t => t.status === "succeeded"));
+  assert.ok(store.get().tasks.every(t => t.submittedAt === t.sentAt));
+  assert.equal(calls.filter(c => c.method === "normalSend").length, 0);
+  assert.equal(sends().length, 2);
+  assert.equal(calls.filter(c => c.method === "prepareWorkTask").length, 0);
+});
+
+test("四条接收待核对意图重载后仍拒绝重投，也不能虚增已接收任务", async () => {
+  account("first");
+  const ids = drafts.createMany(["A", "B", "C", "D"].map(name => template(name).id)).map(d => d.id);
+  await queue.saveDrafts(ids);
+  drafts.updateMany(Object.fromEntries(ids.map((id, i) => [id, {
+    nativeState: "saved", nativeError: "已发起发送，接收结果未确认；不会自动重发",
+    submissionRecord: { task: { id: `receipt-pending-${i}`, submittedAt: new Date().toISOString(), submissionUncertain: true } }
+  }])));
+  store.load(); const before = structuredClone(drafts.list()); calls.length = 0;
+  await assert.rejects(queue.submitDrafts(ids), /发送结果尚未确认.*不会自动重发/);
+  assert.deepEqual(drafts.list(), before); assert.equal(store.get().tasks.length, 0); assert.equal(calls.length, 0);
+  // An incomplete older record is not acceptance evidence even if its flag is absent.
+  drafts.updateMany({ [ids[0]]: { submissionRecord: { task: { submittedAt: new Date().toISOString() } } } });
+  await assert.rejects(queue.submitDrafts([ids[0]]), /发送结果尚未确认/);
+  assert.equal(store.get().tasks.length, 0); assert.equal(calls.length, 0);
+});
+
+test("回执缺少精确用户消息标识时保留待核对意图，不开始确认", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  hook = method => method === "waitNativeDraftAccepted" ? { ok: true, conversationUrl: "https://www.doubao.com/chat/unverified" } : null;
+  await assert.rejects(queue.submitDrafts(ids), /已确认发送 0\/2.*接收待核对 2 条/);
+  assert.equal(store.get().tasks.length, 0);
+  assert.ok(drafts.list().every(d => d.submissionRecord.task.submissionUncertain));
+  assert.equal(calls.filter(c => c.method === "peekGenerationConfirmation").length, 0);
+  assert.equal(sends().length, 2);
+  await assert.rejects(queue.submitDrafts(ids), /发送结果尚未确认/);
+  assert.equal(sends().length, 2);
 });
 
 test("等待确认提醒时停止立即关闭独立页面，迟到提醒不再发送", async () => {
@@ -504,6 +566,28 @@ test("点击前写盘失败不发送，入队失败从持久化接收记录恢�
   assert.equal(sends().length, 2); assert.equal(store.get().tasks.length, 0);
   store.load(); assert.equal((await queue.submitDrafts(ids)).count, 2); assert.equal(sends().length, 2);
 });
+test("旧版已接收草稿在最终入队写盘失败后可恢复提交原记录，不重新发送", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  const save = store.save;
+  store.save = () => store.get().tasks.length ? false : save();
+  try { await assert.rejects(queue.submitDrafts(ids, { startQueue: false }), /任务保存失败/); }
+  finally { store.save = save; }
+  assert.equal(sends().length, 2); assert.equal(store.get().tasks.length, 0);
+  store.load();
+  for (const d of drafts.list()) {
+    assert.equal(d.nativeState, "sent"); assert.equal(d.submissionRecord.task.submissionUncertain, false);
+    delete d.submissionRecord.task.receiptUserMessageId;
+    d.submissionRecord.task.baselineMessageIds = [];
+  }
+  store.save(); store.load(); calls.length = 0;
+  const records = drafts.list().map(d => ({ id: d.submissionRecord.task.id, sentAt: d.submissionRecord.task.sentAt, url: d.submissionRecord.task.conversationUrl }));
+  assert.equal((await queue.submitDrafts(ids, { startQueue: false })).count, 2);
+  assert.equal(sends().length, 0); assert.equal(calls.filter(c => c.method === "normalSend").length, 0);
+  assert.equal(calls.filter(c => c.method === "peekGenerationConfirmation").length, 0);
+  assert.equal(drafts.list().length, 0);
+  assert.deepEqual(store.get().tasks.map(t => ({ id: t.id, sentAt: t.sentAt, url: t.conversationUrl })), records);
+});
+
 test("保存中断不重复存入", async () => {
   account("first"); const ids = batch();
   hook = (method) => method === "saveNativeDraft" ? { ok: false, reason: "未确认保存" } : null;

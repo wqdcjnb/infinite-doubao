@@ -25,7 +25,7 @@ function page(items, delayed, loading) {
     } };
   const document = {
     querySelector: selector => selector.includes("draft-conversation-section") ? current.length ? section : null : selector.includes("chat_input_action_mode") ? mode : selector.includes("chat_input_send_button") ? button : editor,
-    querySelectorAll: selector => selector.includes("draft-conversation-section") ? rows.filter(row => current.includes(row.item)) : selector === 'button, [role="button"]' && !current.length ? [heading] : []
+    querySelectorAll: selector => selector.includes("draft-conversation-section") ? rows.filter(row => current.includes(row.item)) : selector.includes("contenteditable") ? [editor] : selector.includes("chat_input_action_mode") ? [mode] : selector.includes("chat_input_send_button") ? [button] : selector === 'button, [role="button"]' && !current.length ? [heading] : []
   };
   const context = vm.createContext({ window: { auto: {} }, document, CFG: { autoKey: "auto" }, Date: { now: () => now },
     setTimeout: fn => { now += 100; if ((delayed && now >= 1600) || now >= loadAt) current = items; fn(); } });
@@ -42,16 +42,32 @@ const numbered = (number, body = "相同视频提示词") => `【草稿编号：
 test("回执按当前对话的完整用户提示词核对，侧栏迟到或残留草稿不影响，超过20秒仍等待", async () => {
   let now = 0, content = "错误任务";
   const prompt = numbered(numberA);
-  const node = { innerText: "", closest: () => ({ getAttribute: key => key === "data-message-role" ? "user" : null }) };
+  const node = { innerText: "", getAttribute: key => key === "data-message-id" ? "accepted-user-message" : null, closest: () => ({ getAttribute: key => key === "data-message-role" ? "user" : null }) };
   const document = { querySelectorAll: sel => sel === '[data-message-id]' ? [{ ...node, innerText: content }] : [], getElementById: () => null };
   const location = { pathname: '/chat/late-receipt', href: 'https://www.doubao.com/chat/late-receipt' };
   const context = vm.createContext({ window: { auto: {} }, document, location, CFG: { autoKey: 'auto' }, Date: { now: () => now }, setTimeout: fn => { now += 100; if (now >= 35000) content = prompt; fn(); } });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/page/native-drafts.js'), 'utf8'), context);
   const result = await context.window.auto.waitNativeDraftAccepted({ id: 'a', prompt, conversationIds: [] });
-  assert.equal(result.ok, true, result.reason); assert.equal(result.conversationUrl, location.href);
+  assert.equal(result.ok, true, result.reason); assert.equal(result.conversationUrl, location.href); assert.equal(result.userMessageId, "accepted-user-message");
   assert.ok(now >= 35000);
   content = numbered(numberB);
   assert.equal(context.window.auto.readNativeDraftReceipt({ prompt }).ok, false);
+});
+
+test("接收回执排除发送前同编号旧消息，缺失ID和多个新增同编号消息不报成功", () => {
+  const prompt = numbered(numberA);
+  const message = id => ({ innerText: prompt, getAttribute: key => key === "data-message-id" ? id : null,
+    closest: () => ({ getAttribute: key => key === "data-message-role" ? "user" : null }) });
+  let messages = [message("old-user")];
+  const context = vm.createContext({ window: { auto: {} }, CFG: { autoKey: "auto" },
+    document: { querySelectorAll: selector => selector === '[data-message-id]' ? messages : [] },
+    location: { pathname: "/chat/accepted", href: "https://www.doubao.com/chat/accepted" } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/page/native-drafts.js"), "utf8"), context);
+  const options = { prompt, baselineMessageIds: ["old-user"] }, read = () => context.window.auto.readNativeDraftReceipt(options);
+  assert.equal(read().ok, false, "历史同编号用户消息不能冒充本轮接收");
+  messages.push(message("")); assert.equal(read().ok, false, "无精确messageID不能建立跟踪锚点");
+  messages.push(message("new-user")); assert.equal(read().ok, true); assert.equal(read().userMessageId, "new-user");
+  messages.push(message("another-new-user")); assert.equal(read().ok, false, "多个不同新增ID不能随便选一个");
 });
 
 test("19 条草稿只展示最近 5 条时，展开或滚动后仍逐条按完整编号找到全部", async () => {

@@ -255,6 +255,17 @@
     if (!match) match = content.match(/(?:请确认)?是否按(?:此|以上|上述)[^?？。]{0,240}(?:生成|调用)[^?？。]{0,100}[？?。]/);
     return match ? match[0] : "";
   }
+  function quotaExhausted(content) {
+    return /(?:额度|免费数量|今日次数)\s*(?:已经?|均已|全部|已全部)?\s*(?:用完|耗尽)|已用完.{0,16}(?:额度|次数)|已达上限/.test(content);
+  }
+  function followupConfirmation(content) {
+    // Work tasks can finish planning with a declarative reminder instead of a
+    // question. Require both an explicit confirmation hold and a quoted reply.
+    if (!/(?:等待.{0,8}确认|等.{0,8}确认后|停在确认环节|没有回复确认)/.test(content)) return "";
+    var reply = content.match(/(?:回复(?:一句)?|说一声)\s*["“「](按(?:要求|方案)生成|开始生成)["”」]/);
+    if (!reply || !/(?:即可开始(?:制作|生成)|我就.{0,100}(?:生成|跑.{0,35}视频)|确认后.{0,15}开始生成)/.test(content)) return "";
+    return reply[1];
+  }
   api.beginTask = function (input) {
     var opts = typeof input === "string" ? { taskId: input } : input || {};
     if (tracking && tracking.taskId === opts.taskId && opts.resume && !opts.reset) return { ok: true, baselineUrls: tracking.urls, baselineMessageIds: tracking.messageIds };
@@ -288,12 +299,13 @@
     var pm = tail.match(/(\d{1,3})\s*%/g);
     var percent = pm && pm.length ? Math.min(100, Math.max.apply(null, pm.map(function (s) { return parseInt(s, 10) || 0; }))) : 0;
     var state = "unknown";
-    if (/(生成失败|审核不通过|未通过审核|违规内容|免费数量用完|额度已用完|今日次数已用完|已达上限)/.test(tail)) state = "failed";
+    var quotaFailure = quotaExhausted(tail);
+    if (quotaFailure || /(生成失败|视频生成未能(?:提交)?成功|视频没能生成出来|审核不通过|未通过审核|违规内容)/.test(tail)) state = "failed";
     else if (/(生成中|排队中|正在生成|处理中)/.test(tail)) state = "running";
     else if (urls.length || /(生成完成|已完成|已生成)/.test(tail)) state = "done";
     else if (findConfirmation(null, roots).kind) state = "waiting_confirmation";
     var generationStarted = state === "running" && /(?:视频.{0,10}(?:正在生成|生成中|排队中)|正在(?:为你)?生成视频)/.test(tail);
-    return { state: state, generationStarted: generationStarted, percent: state === "done" ? 100 : percent, videos: urls.length, mediaUrls: urls, snippet: tail.slice(-400) };
+    return { state: state, errorCode: quotaFailure ? "quota" : "", generationStarted: generationStarted, percent: state === "done" ? 100 : percent, videos: urls.length, mediaUrls: urls, snippet: tail.slice(-400) };
   };
   function confirmationKey(root, content, kind) {
     var hash = 2166136261;
@@ -303,6 +315,9 @@
   function findConfirmation(options, current) {
     if (!tracking) return { ok: false };
     current = current || taskMessages();
+    // An exhausted quota is a failed attempt, even if the same reply offers a
+    // future reminder or a cheaper model. Neither is an immediate confirmation.
+    if (current.length && quotaExhausted(txt(current[current.length - 1]))) return { ok: false };
     // Once a new assistant response exists, the earlier confirmation request
     // is history and must not be sent again.
     var roots = current.length ? [current[current.length - 1]] : [];
@@ -314,9 +329,13 @@
       if (!/生成/.test(content)) continue;
       var question = planQuestion(content);
       var planRequest = !!question && (messageRole(root) === "assistant" || panels.indexOf(root) >= 0);
+      var followupText = messageRole(root) === "assistant" ? followupConfirmation(content) : "";
       if (panels.indexOf(root) >= 0 && tracking.oldPanels.indexOf(question) >= 0) continue;
-      var textRequest = planRequest || (messageRole(root) === "assistant" && /视频生成参数确认/.test(content) && /确认后.{0,25}(开始|生成)/.test(content));
-      var blocked = /购买|支付|充值|订阅|开通会员|付费|扣费|升级/.test(content);
+      var textRequest = planRequest || !!followupText || (messageRole(root) === "assistant" && /视频生成参数确认/.test(content) && /确认后.{0,25}(开始|生成)/.test(content));
+      // Using the already selected model's quota is covered by auto-confirm;
+      // purchasing or upgrading a plan is not.
+      var paymentContent = followupText ? content.replace(/付费额度/g, "额度") : content;
+      var blocked = /购买|支付|充值|订阅|开通会员|付费|扣费|升级/.test(paymentContent);
       var buttons = all('button, [role="button"]', root).filter(function (button) {
         if (!visible(button) || button.disabled || button.getAttribute("aria-disabled") === "true") return false;
         var label = txt(button);
@@ -333,9 +352,12 @@
         var latest = current.length && messageRole(current[current.length - 1]) === "assistant" ? txt(current[current.length - 1]) : "";
         var modelPattern = /Seedance\s*2\.\d+(?:\s+(?:Fast|Mini))?/i;
         var secondsPattern = /(?:时长\s*[:：]?\s*)(\d+)\s*秒/;
+        // The settled plan precedes optional "if you want to change..." advice.
+        // Elapsed planning time is not the requested clip duration.
+        var parameterContent = followupText ? content.replace(/^共用时\s*(?:\d+\s*(?:小时|分钟|分|秒)\s*)+/, "").split(/(?:如果|若)(?:你|您)?想(?:调整|改|换|去掉)/)[0] : content;
         var conflicting = false;
         function parameter(pattern, value, preferred) {
-          var sources = [question, content, planRequest ? latest : ""];
+          var sources = [question, parameterContent, planRequest ? latest : ""];
           for (var s = 0; s < sources.length; s += 1) {
             // Only the separate plan fallback may contain shot timings. In a
             // reminder itself every stated duration must agree, labelled or not.
@@ -351,10 +373,10 @@
           return null;
         }
         var model = parameter(modelPattern, function (m) { return m[0].replace(/\s+/g, " ").toLowerCase(); });
-        var seconds = parameter(planRequest ? /(\d+)\s*秒/ : secondsPattern, function (m) { return Number(m[1]); }, secondsPattern);
+        var seconds = parameter(planRequest || followupText ? /(\d+)\s*秒/ : secondsPattern, function (m) { return Number(m[1]); }, secondsPattern);
         if (!model || !seconds) {
           pending = !blocked && !conflicting;
-          reason = pending ? "平台尚未给出完整的模型或时长，等待确认内容加载" : "平台确认的模型或时长相互冲突，请手动检查";
+          if (!blocked) reason = pending ? "平台尚未给出完整的模型或时长，等待确认内容加载" : "平台确认的模型或时长相互冲突，请手动检查";
         } else if (model[0].replace(/\s+/g, " ").toLowerCase() !== String(labels[options.model] || "").toLowerCase() || Number(seconds[1]) !== Number(options.duration)) reason = "平台确认的模型或时长与任务不一致，请手动检查";
         if (options.ratio && options.ratio !== "adaptive") {
           var ratioPattern = /(\d+)\s*[:：]\s*(\d+)/;
@@ -362,7 +384,7 @@
           if (!ratio || ratio[1] + ":" + ratio[2] !== options.ratio) reason = "平台未确认所选画面比例，请手动检查";
         }
       }
-      return { ok: !reason, pending: pending, kind: kind, key: key, text: planRequest ? "按要求生成" : kind === "text" ? "确认，开始生成视频。" : txt(buttons[0]), reason: reason, button: buttons[0] || null, alreadyConfirmed: tracking.confirmed.indexOf(key) >= 0 };
+      return { ok: !reason, pending: pending, kind: kind, key: key, text: followupText || (planRequest ? "按要求生成" : kind === "text" ? "确认，开始生成视频。" : txt(buttons[0])), nativeOnly: !!(planRequest || followupText), reason: reason, button: buttons[0] || null, alreadyConfirmed: tracking.confirmed.indexOf(key) >= 0 };
     }
     return { ok: false };
   };

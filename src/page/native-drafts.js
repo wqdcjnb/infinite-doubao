@@ -13,6 +13,60 @@
   function sendButton() { return document.querySelector('button[data-testid="chat_input_send_button"]'); }
   function enabled(button) { return button && !button.disabled && !["aria-disabled", "aria-busy", "data-disabled", "data-loading"].some(function (attr) { return button.getAttribute(attr) === "true"; }); }
   function normalize(value) { return String(value || "").replace(/\s+/g, " ").trim(); }
+  function visible(el) {
+    if (!el || el.isConnected === false || el.hidden) return false;
+    if (el.closest && el.closest('[hidden], [aria-hidden="true"]')) return false;
+    if (el.getClientRects && !el.getClientRects().length) return false;
+    if (typeof getComputedStyle === "function") {
+      var style = getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+    }
+    return true;
+  }
+  function visibleNodes(root, selector) {
+    return Array.from(root.querySelectorAll(selector)).filter(visible);
+  }
+  function selected(row) {
+    if (!row || row.isConnected === false) return false;
+    if (row.getAttribute) {
+      var aria = row.getAttribute("aria-selected");
+      if (aria !== null) return aria === "true";
+      var current = row.getAttribute("aria-current"), state = row.getAttribute("data-state");
+      if (current === "page" || current === "true" || state === "selected") return true;
+    }
+    return row.classList && row.classList.contains("bg-dbx-bg-float");
+  }
+  function readiness(options) {
+    var reasons = [], row = rowFor(options.id);
+    if (!row || row.isConnected === false) reasons.push("对应原生草稿条目尚未挂载");
+    else if (!selected(row)) reasons.push("对应原生草稿尚未选中");
+    var editors = visibleNodes(document, '#input-engine-container .tiptap[contenteditable="true"], #input-engine-container textarea, .tiptap.ProseMirror[contenteditable="true"]');
+    var current = editors.length === 1 ? editors[0] : null;
+    if (!current) reasons.push(editors.length ? "存在多个可见输入框，无法确认当前草稿输入区" : "当前草稿输入框尚未挂载");
+    var root = current && current.closest && current.closest("#input-engine-container") || document;
+    var prompt = current ? text(current) : "", rich = current && current.editor;
+    if (rich && typeof rich.getText === "function") {
+      try { prompt = rich.isDestroyed ? "" : normalize(rich.getText()); } catch (_) { prompt = ""; }
+    }
+    if (current && (!normalize(options.prompt) || prompt !== normalize(options.prompt))) reasons.push("完整提示词不一致（预期 " + normalize(options.prompt).length + " 字，当前 " + prompt.length + " 字）");
+    var modes = visibleNodes(root, '[data-testid="chat_input_action_mode"]'), modeNode = modes.length === 1 ? modes[0] : null;
+    var isWork = modeNode && (text(modeNode) === "云电脑" || (modeNode.querySelectorAll && Array.from(modeNode.querySelectorAll("*")).some(function (node) {
+      return (!node.children || !node.children.length) && visible(node) && text(node) === "云电脑";
+    })));
+    if (options.executionMode === "work" && !isWork) reasons.push("工作模式未就绪（当前：" + (modeNode ? text(modeNode).slice(0, 40) : "模式标签未唯一加载") + "）");
+    var uploading = root.querySelectorAll('[aria-busy="true"], [data-loading="true"], [role="progressbar"], progress');
+    if (Array.from(uploading).some(function (node) {
+      if (!visible(node)) return false;
+      if (node.getAttribute("aria-busy") === "true" || node.getAttribute("data-loading") === "true") return true;
+      var now = node.tagName === "PROGRESS" ? node.value : node.getAttribute("aria-valuenow");
+      var max = node.tagName === "PROGRESS" ? node.max : node.getAttribute("aria-valuemax");
+      return now === null || now === "" || !Number.isFinite(Number(now)) || Number(now) < (Number(max) || 100);
+    })) reasons.push("输入区素材仍在上传或加载");
+    var buttons = visibleNodes(root, 'button[data-testid="chat_input_send_button"]'), button = buttons.length === 1 ? buttons[0] : null;
+    if (!button) reasons.push("发送按钮尚未唯一加载");
+    else if (!enabled(button) || button.getAttribute("data-disabled") === "" || button.getAttribute("data-loading") === "") reasons.push("发送按钮仍不可用（可能仍在上传素材）");
+    return { reasons: reasons, editor: current, button: button };
+  }
   function numberIn(value) { var match = normalize(value).match(/^【草稿编号：(DB-[0-9A-F]{24})】/); return match && match[1]; }
   function rowDraft(row) {
     // The native row keeps the complete record even when its label is ellipsized.
@@ -113,7 +167,7 @@
   async function wait(read, message, deadline) {
     var end = deadline || Date.now() + 20000;
     while (Date.now() < end) { var result = await read(); if (result) return result; await new Promise(function (r) { setTimeout(r, 100); }); }
-    throw new Error(message);
+    throw new Error(typeof message === "function" ? message() : message);
   }
   function snapshot() {
     var current = rows(), titles = current.map(title);
@@ -329,40 +383,45 @@
     // IndexedDB can finish before the sidebar mounts in a fresh sender page.
     // Wait for this verified native ID, rather than treating a missing DOM row
     // as a deleted draft or selecting a similar title.
-    var row = await wait(async function () {
+    await wait(async function () {
       if (!rowFor(options.id)) await expandDrafts();
-      return rowFor(options.id);
+      var row = rowFor(options.id);
+      if (!row || !row.isConnected) return false;
+      // React can replace a row at the await boundary. Click the freshly
+      // resolved connected row before yielding to storage/render callbacks.
+      row.click();
+      return true;
     }, "草稿数据已核对，但网页尚未显示对应条目，请检查豆包侧栏后重试；尚未发送");
-    row.click();
-    var stableAt = 0;
+    var stableAt = 0, previousEditor = null, state;
     await wait(function () {
-      row = rowFor(options.id);
-      var ready = row && row.isConnected && row.classList.contains("bg-dbx-bg-float") && text(editor()) === normalize(options.prompt) && enabled(sendButton()) &&
-        (options.executionMode !== "work" || mode() === "云电脑");
-      if (!ready) { stableAt = 0; return false; }
+      state = readiness(options);
+      if (state.reasons.length || state.editor !== previousEditor) { previousEditor = state.editor; stableAt = 0; }
+      if (state.reasons.length) return false;
       if (!stableAt) stableAt = Date.now();
       return Date.now() - stableAt >= 600;
-    }, "豆包草稿的完整提示词、素材或模式未就绪，已停止发送");
+    }, function () { return "豆包草稿未就绪：" + (state && state.reasons.length ? state.reasons.join("；") : "输入区仍在切换") + "；尚未发送"; });
     return { ok: true, conversationIds: Array.from(document.querySelectorAll('a[id^="conversation_"]')).map(function (a) { return a.id.slice(13); }) };
   });
   api.sendNativeDraft = result(async function (options) {
-    var row = rowFor(options.id), button = sendButton();
-    if (!row || !row.classList.contains("bg-dbx-bg-float") || text(editor()) !== normalize(options.prompt) || !enabled(button)) throw new Error("当前草稿发生变化，尚未点击发送");
-    button.click();
+    var state = readiness(options);
+    if (state.reasons.length) throw new Error("当前草稿未就绪：" + state.reasons.join("；") + "；尚未点击发送");
+    state.button.click();
     return { ok: true, clickedAt: new Date().toISOString() };
   });
   api.readNativeDraftReceipt = function (options) {
     var match = location.pathname.match(/^\/chat\/([^/]+)$/), id = match && match[1];
     if (!id || (options.conversationIds || []).includes(id) || !normalize(options.prompt)) return { ok: false };
-    var number = numberIn(options.prompt);
-    var accepted = Array.from(document.querySelectorAll('[data-message-id]')).some(function (node) {
+    var number = numberIn(options.prompt), baseline = new Set(options.baselineMessageIds || []), accepted = new Set();
+    Array.from(document.querySelectorAll('[data-message-id]')).forEach(function (node) {
+      var messageId = String(node.getAttribute("data-message-id") || "").trim();
+      if (!messageId || baseline.has(messageId)) return;
       var owner = node.closest('[data-message-role], [data-role]');
       // Rendered paragraphs/attachments can change whitespace and truncate the
       // displayed body. Our complete, unique draft number survives that render.
-      return owner && (owner.getAttribute('data-message-role') || owner.getAttribute('data-role')) === 'user' &&
-        (number ? String(node.textContent || text(node)).includes('【草稿编号：' + number + '】') : text(node).includes(normalize(options.prompt)));
+      if (owner && (owner.getAttribute('data-message-role') || owner.getAttribute('data-role')) === 'user' &&
+        (number ? String(node.textContent || text(node)).includes('【草稿编号：' + number + '】') : text(node).includes(normalize(options.prompt)))) accepted.add(messageId);
     });
-    return accepted ? { ok: true, conversationUrl: location.href, bindings: snapshot() } : { ok: false };
+    return accepted.size === 1 ? { ok: true, conversationUrl: location.href, userMessageId: Array.from(accepted)[0], bindings: snapshot() } : { ok: false };
   };
   api.waitNativeDraftAccepted = result(async function (options) {
     return await wait(function () {

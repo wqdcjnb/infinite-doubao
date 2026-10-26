@@ -87,7 +87,7 @@ function setupNative() {
   P.init({home:path.join(root,`native-${++n}`)});store.load();queue.pause('');
   const calls=[];
   const driver={isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),pasteFiles:async()=>({ok:true}),setText:async()=>({ok:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),close:()=>{},
-    call:async(method,opts)=>{calls.push({method,opts}); if(method==='restoreNativeDrafts')return {ok:true,bindings:[]};if(method==='saveNativeDraft')return {ok:true,bindings:[{id:opts.id,nativeId:'real-native-1'}]};if(method==='openNativeDraft')return {ok:true,conversationIds:[]};if(method==='waitNativeDraftAccepted')return {ok:true,conversationUrl:'https://www.doubao.com/chat/real1'};if(method==='peekGenerationConfirmation')return {ok:true};if(method==='readProgress')return {state:'running',generationStarted:true};return {ok:true};}};
+    call:async(method,opts)=>{calls.push({method,opts}); if(method==='restoreNativeDrafts')return {ok:true,bindings:[]};if(method==='saveNativeDraft')return {ok:true,bindings:[{id:opts.id,nativeId:'real-native-1'}]};if(method==='openNativeDraft')return {ok:true,conversationIds:[]};if(method==='waitNativeDraftAccepted')return {ok:true,conversationUrl:'https://www.doubao.com/chat/real1',userMessageId:'receipt-user-1'};if(method==='peekGenerationConfirmation')return {ok:true};if(method==='readProgress')return {state:'running',generationStarted:true};return {ok:true};}};
   queue.init({resolveDriver:async()=>driver,resolveDraftDriver:async()=>driver});
   return {calls,driver};
 }
@@ -146,7 +146,7 @@ test('temporary MP4 upload error keeps operation recoverable and retries origina
   await b.flushReports();assert.equal(executions,1);assert.equal(recoveries,1);assert.equal(api.reports[0].result.receipt.status,'completed');
 });
 
-test('server quota rejection is terminal locally and preserves original submission; desktop keeps existing quota behavior',async()=>{
+test('server and accepted desktop native drafts retain their original submission on quota rejection',async()=>{
   for(const serverOwned of [true,false]) {
     const {driver}=setupNative(), j=journal(),adapter=new executorModule.NativeAdapter({journal:j,client:{},accounts:{}});
     await adapter.execute(nativeOperation());
@@ -157,8 +157,7 @@ test('server quota rejection is terminal locally and preserves original submissi
     let seen;const progressRead=new Promise(resolve=>{seen=resolve;});
     driver.readProgress=async()=>{seen();return {state:'failed',snippet:'今日额度已达上限'};};
     queue.resume(task.storyboardId);await progressRead;await new Promise(resolve=>setImmediate(resolve));
-    if(serverOwned) {assert.equal(task.status,'failed');assert.equal(task.errorCode,'quota');assert.equal(task.submittedAt,submitted);}
-    else {assert.equal(task.status,'queued');assert.equal(task.submittedAt,'');}
+    assert.equal(task.status,'failed');assert.equal(task.errorCode,'quota');assert.equal(task.submittedAt,submitted);
     queue.stopAll();
   }
 });
@@ -169,7 +168,7 @@ test('native 100-task batch limits independent receipt pages and sends each draf
   queue.init({resolveDraftDriver:async()=>{
     live++;max=Math.max(max,live);const own={...driver,close:()=>{live--;},call:async(method,opts)=>{
       if(method==='sendNativeDraft')sends++;
-      if(method==='waitNativeDraftAccepted'){await new Promise(resolve=>setTimeout(resolve,20));return {ok:true,conversationUrl:'https://www.doubao.com/chat/'+opts.id};}
+      if(method==='waitNativeDraftAccepted'){await new Promise(resolve=>setTimeout(resolve,20));return {ok:true,conversationUrl:'https://www.doubao.com/chat/'+opts.id,userMessageId:'receipt-user-'+opts.id};}
       return driver.call(method,opts);
     }};return own;
   }});

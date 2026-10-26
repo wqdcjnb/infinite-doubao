@@ -151,7 +151,7 @@ async function confirmGeneration(driver, task, options, sb, context = {}) {
       }
       checkAction();
       actionAttempted = true;
-      const sent = await driver.send(candidate.text === "按要求生成" ? { nativeOnly: true } : undefined, checkAction);
+      const sent = await driver.send(candidate.nativeOnly || candidate.text === "按要求生成" ? { nativeOnly: true } : undefined, checkAction);
       if (!sent?.ok) { actionAttempted = false; throw new Error(`发送视频参数确认失败：${sent?.reason || "未找到发送按钮"}`); }
     } else {
       checkAction();
@@ -317,9 +317,11 @@ async function runTask(task, inst, shot, sb) {
         if (task.stage !== "waiting_result") patchTask(task.id, { stage: "waiting_result", waitReason: "已提交，等待豆包返回本次视频结果" });
       } else if (progress.state === "running" && task.stage !== "generating") patchTask(task.id, { stage: "generating", waitReason: "" });
       if (progress.state === "failed") {
-        const quotaFailure = /额度|免费数量|今日次数|已达上限|quota/i.test(progress.snippet || "");
-        if (!task.studioTaskId) patchTask(task.id, { submittedAt: "", generatedAt: "", submissionUncertain: false });
-        throw Object.assign(new Error(quotaFailure ? (task.draftBatchId ? "批次账号额度用尽，等待同一账号额度恢复" : "账号额度用尽，等待其他可用账号") : "平台明确返回生成失败"), { code: quotaFailure ? "quota" : "generation_failed" });
+        const quotaFailure = progress.errorCode === "quota" || /额度|免费数量|今日次数|已达上限|quota/i.test(progress.snippet || "");
+        // A received native draft is already a platform task. A failed result
+        // must never turn it back into a fresh prompt submission.
+        if (!task.studioTaskId && !task.draftBatchId) patchTask(task.id, { submittedAt: "", generatedAt: "", submissionUncertain: false });
+        throw Object.assign(new Error(quotaFailure ? (task.draftBatchId ? "已接收草稿的对话提示额度不足，请核对原对话；不会重新发送" : "账号额度用尽，等待其他可用账号") : "平台明确返回生成失败"), { code: quotaFailure ? "quota" : "generation_failed" });
       }
       if (progress.state === "done") {
         patchTask(task.id, { generatedAt: task.generatedAt || new Date().toISOString() });
@@ -331,8 +333,9 @@ async function runTask(task, inst, shot, sb) {
     const message = String(error?.message || error);
     const code = error?.code;
     runtime.lastError = message;
-    if (task.studioTaskId) {
-      // Server-owned tasks retain their original submission and never redispatch.
+    if (task.studioTaskId || (task.draftBatchId && task.sentAt && code === "quota")) {
+      // Server-owned tasks and received drafts with quota errors retain their
+      // original submission; neither may redispatch the prompt automatically.
       patchTask(task.id, { status: "failed", stage: "failed", error: message, errorCode: code || "unknown", finishedAt: new Date().toISOString() }, true);
       storyboard.setStatus(sb.id, shot.id, "failed", { error: message });
     } else if (code === "login_required" || code === "quota" || code === "model_unavailable") {
@@ -379,6 +382,9 @@ async function dispatchOne(sbId, opts = {}) {
     storyboard.updateShot(sb.id, shot.id, { taskId: task.id, status: "queued" });
   }
   if (runtime.running.has(task.id) || Number(task.nextAttemptAt) > Date.now()) return { ok: false, error: "等待重试" };
+  // Older versions cleared submittedAt after a quota error even for accepted
+  // drafts. Their durable sentAt still forbids sending the prompt again.
+  if (task.draftBatchId && task.sentAt && !task.submittedAt) patchTask(task.id, { submittedAt: task.sentAt }, true);
   const fixedId = task.submittedAt ? task.instanceId : task.preferredInstanceId;
   const fixed = fixedId ? store.find(fixedId) : null;
   const exclude = new Set([...(opts.triedInstances || []), ...Object.keys(task.accountExclusions || {})]);
@@ -647,7 +653,11 @@ async function saveDrafts(ids, options = {}) {
 async function submitDrafts(ids, options = {}) {
   const selected = selectedDrafts(ids);
   for (const d of selected) {
-    if (d.submissionRecord?.task.submissionUncertain) throw new Error(`草稿「${d.template.name}」发送结果尚未确认，请核对豆包最近任务，不会自动重发`);
+    const recorded = d.submissionRecord?.task;
+    // Pre-1.5.14 accepted records have no message anchor. Their persisted sent
+    // state and locked conversation still permit committing the existing task.
+    const legacyAccepted = d.nativeState === "sent" && recorded?.submissionUncertain === false && recorded.sentAt && recorded.conversationLocked === true && /^https?:\/\/[^/]+\/chat\/[^/?#]+(?:[?#].*)?$/.test(recorded.conversationUrl || "");
+    if (d.submissionRecord && (!recorded || recorded.submissionUncertain || !recorded.conversationUrl || (!recorded.receiptUserMessageId && !legacyAccepted))) throw new Error(`草稿「${d.template.name}」发送结果尚未确认，请核对豆包最近任务，不会自动重发`);
     if (d.executionMode !== "work" && !d.submissionRecord) throw new Error(`草稿「${d.template.name}」仅支持通过云电脑提交，请先存入云电脑草稿`);
     if (!d.submissionRecord && d.nativeState !== "saved") throw new Error("请先将所选草稿存入豆包网页，再一起发送");
   }
@@ -733,20 +743,21 @@ async function submitDrafts(ids, options = {}) {
             const clicked = await sent;
             if (!clicked?.ok) { issued = false; drafts.updateMany({ [draft.id]: { submissionRecord: null } }); requirePage(clicked); }
             record.task.sentAt = clicked.clickedAt || record.task.submittedAt;
-            const receipt = requirePage(await driver.call("waitNativeDraftAccepted", { ...pageOptions, conversationIds: opened.conversationIds }));
+            const receipt = requirePage(await driver.call("waitNativeDraftAccepted", { ...pageOptions, conversationIds: opened.conversationIds, baselineMessageIds: record.task.baselineMessageIds }));
             checkDraft();
-            Object.assign(record.task, { conversationUrl: receipt.conversationUrl, conversationLocked: true, submissionUncertain: false, baselineMessageIds: [] });
+            if (!receipt.userMessageId) throw new Error("回执缺少本次用户消息标识，请核对原对话；不会自动重发");
+            Object.assign(record.task, { conversationUrl: receipt.conversationUrl, conversationLocked: true, submissionUncertain: false, receiptUserMessageId: receipt.userMessageId, baselineMessageIds: [receipt.userMessageId] });
             drafts.updateMany({ [draft.id]: { nativeState: "sent", nativeBinding: null, nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
             received = true;
             accepted.push({ id: draft.id, record });
             progress("后台已确认接收");
           }, 125000).then(() => draftStep(child, "等待生成确认提醒", async () => {
             const settings = store.get().settings.orchestrator;
-            // The accepted conversation has its own message history. The draft
-            // composer's baseline may belong to the previous route entirely.
+            // Follow only assistant output after the user message verified by
+            // the receipt, not the previous conversation's complete history.
             const trackAccepted = async () => {
               checkDraft();
-              requirePage(await driver.beginTask({ taskId: record.task.id, prompt: record.task.prompt, resume: true, reset: true, baselineMessageIds: [], baselineUrls: record.task.baselineUrls || [], confirmedKeys: Object.keys(record.task.confirmationIntents || {}) }));
+              requirePage(await driver.beginTask({ taskId: record.task.id, prompt: record.task.prompt, resume: true, reset: true, baselineMessageIds: record.task.baselineMessageIds, baselineUrls: record.task.baselineUrls || [], confirmedKeys: Object.keys(record.task.confirmationIntents || {}) }));
               checkDraft();
             };
             const reopen = async () => {

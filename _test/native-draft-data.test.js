@@ -29,7 +29,7 @@ function page({ collapsed = false, duplicate = false, missingBody = false, wrong
   const section = { querySelector: s => s.includes("section-header") ? { click: () => { collapsed = false; } } : expanded ? null : more };
   const document = {
     querySelector: s => pendingSidebar() ? null : s.includes("draft-conversation-section") ? section : s.includes("chat_input_action_mode") ? mode : s.includes("chat_input_send_button") ? button : editor,
-    querySelectorAll: s => s.includes("draft-conversation-section") ? visible() : []
+    querySelectorAll: s => s.includes("draft-conversation-section") ? visible() : pendingSidebar() ? [] : s.includes("contenteditable") ? [editor] : s.includes("chat_input_action_mode") ? [mode] : s.includes("chat_input_send_button") ? [button] : []
   };
   const indexedDB = {
     databases: async () => [{ name: "flow-draft-conversations-v2" }, { name: "samantha-web" }],

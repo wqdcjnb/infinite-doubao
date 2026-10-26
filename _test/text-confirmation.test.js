@@ -33,6 +33,47 @@ const request = "我将为你生成短视频，请先确认参数：视频生成
 const planRequest = "以上方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 5段分镜 / 仅环境音无配乐）是否按此开始生成？视频生成为高消耗生成。";
 const livePlanRequest = "是否按以上完整方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 6段分镜 / 仅环境音无对白）开始生成视频？视频生成为高消耗生成。";
 
+test("工作任务最终收尾确认识别本次既定参数，忽略耗时及可选换模型建议", () => {
+  const reminders = [
+    '共用时 1 小时 1 分 8 秒 方案已经准备好了。由于你暂时不在，我没有直接开始生成，考虑到这次使用的是 seedance 2.0 会员模型（会消耗更多额度），我等你确认后再启动。你回来后回复 "按要求生成" 或 "开始生成"，我就立刻按上面的方案后台生成这条 15 秒清晨湖面小鱼视频。如果想调整任何参数（比如换成 fast 模型、改成竖屏），也直接告诉我。',
+    '共用时 1 小时 1 分 15 秒 方案已经拟好并停在确认环节，你没有回复确认，我就不擅自消耗会员额度去生成了。你回来后只要说一声 "按方案生成"，我就立即用 seedance 2.0、15 秒、16:9 跑这条清晨湖面小鱼的视频；如果想改比例、或换成更快的 seedance 2.0 fast，也直接告诉我。',
+    '共用时 1 小时 1 分 6 秒 方案已经备好，但在等待您确认期间没有收到回复。考虑到您此前明确不希望在未确认的情况下消耗付费额度，我没有自动开始生成这条 seedance 2.0（会员模型）的视频，避免误扣额度。您回来后只需回复一句 "开始生成"，我就按上面的参数（15 秒、16:9、清晨湖面小鱼）直接提交生成；如果想改用消耗更低的 seedance 2.0 fast（同样 15 秒、16:9），也可以直接告诉我。',
+    '共用时 1 小时 1 分 25 秒 方案已整理完毕，等待你确认。当前状态：视频生成参数和分镜表已展示在上方，你回来后直接回复 "按要求生成" 即可开始制作，或者告诉我需要调整的地方。核心参数回顾：模型：seedance 2.0（会员模型，消耗更多额度） 时长：15 秒 ｜ 比例：16:9 横版。确认后我会立即开始生成。'
+  ];
+  const expected = { model: "seedance_v2.0", duration: 15, ratio: "adaptive" };
+  reminders.forEach((text, i) => {
+    const p = page(); p.api.beginTask({ taskId: "final-reminder" }); p.add(p.message("new", text, "assistant"));
+    const found = p.api.peekGenerationConfirmation(expected);
+    assert.equal(found.ok, true, found.reason); assert.equal(found.kind, "text"); assert.equal(found.nativeOnly, true);
+    assert.equal(found.text, ["按要求生成", "按方案生成", "开始生成", "按要求生成"][i]);
+    assert.equal(p.api.readProgress().state, "waiting_confirmation");
+    assert.equal(p.api.peekGenerationConfirmation({ ...expected, duration: 10 }).ok, false);
+    assert.equal(p.api.peekGenerationConfirmation({ ...expected, model: "seedance_v2.0_fast" }).ok, false);
+    p.add(p.message("paid", text + " 请先支付 20 元购买会员升级套餐。", "assistant"));
+    const paid = p.api.peekGenerationConfirmation(expected); assert.equal(paid.ok, false); assert.equal(paid.pending, false);
+  });
+});
+
+test("额度已经用完与恢复后替代建议判失败，不能触发生成确认或面板旧确认", () => {
+  for (const quota of ["当前 7 天的视频生成额度已经用完了", "近 7 天额度已用完", "近 7 天生成额度已耗尽", "已用完近 7 天的生成额度"]) {
+    const p = page(); p.api.beginTask({ taskId: "quota" });
+    p.add(p.message("new", `${quota}，预计 11 月 2 日恢复。方案准备好了，等待你确认。恢复后回复 "按要求生成" 即可开始制作，模型 Seedance 2.0，15 秒。是否按此参数开始生成？`, "assistant"));
+    p.panel(p.message("old", planRequest, ""));
+    assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.0", duration: 15 }).kind, undefined);
+    assert.equal(p.api.readProgress().state, "failed"); assert.equal(p.api.readProgress().errorCode, "quota");
+  }
+});
+
+test("已接收消息锚点之前的旧失败和旧确认不属于本次草稿", () => {
+  const p = page(); p.add(p.message("old", "额度已用完。" + request, "assistant"));
+  p.add(p.message("receipt-user", "本次草稿", "user"));
+  p.api.beginTask({ taskId: "received", resume: true, baselineMessageIds: ["receipt-user"] });
+  assert.equal(p.api.readProgress().state, "unknown"); assert.equal(p.api.peekGenerationConfirmation().kind, undefined);
+  p.add(p.message("new", request, "assistant"));
+  assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.0_mini", duration: 5 }).ok, true);
+  assert.equal(p.api.readProgress().state, "waiting_confirmation");
+});
+
 test("流式确认先出现问句但尚无参数时等待，参数齐全后才允许确认", () => {
   const p = page(); p.api.beginTask({ taskId: "streaming" });
   const node = p.message("new", "视频生成参数确认，确认后开始生成视频。", "assistant"); p.add(node);
