@@ -226,7 +226,10 @@
     if (!matches.length) return null;
     var match = matches[0];
     if (options.nativeId && match.nativeId !== options.nativeId) throw new Error("原生草稿 ID 已变化，未重绑或重复导入");
-    if (normalize(match.prompt) !== normalize(options.prompt) || match.executionMode !== options.executionMode) throw new Error("已保存草稿的完整正文或工作模式不一致，请核对网页草稿");
+    if (normalize(match.prompt) !== normalize(options.prompt) || match.executionMode !== options.executionMode) {
+      if (options.waitForPersistence) return { pending: true };
+      throw new Error("已保存草稿的完整正文或工作模式不一致，请核对网页草稿");
+    }
     var binding = { id: options.id, nativeId: match.nativeId, accountScope: data.accountScope, title: match.title, index: data.items.indexOf(match), titles: data.items.map(function (d) { return d.title; }) };
     if (!options.strictReadOnly) storedBindings.set(binding.id, binding);
     return { ok: true, bindings: [binding] };
@@ -550,7 +553,9 @@
       checkImport(epoch);
       // Sidebar rows may all remount, remain collapsed, or omit the new draft.
       // The complete account-scoped record is the receipt, not a DOM delta.
-      verified = await savedDraft({ ...options, accountScope: inputScope });
+      var saved = await savedDraft({ ...options, accountScope: inputScope, waitForPersistence: true });
+      if (saved && saved.pending) return false;
+      verified = saved;
       if (verified) {
         if (!expected.length) return true;
         var items = await persistedImportAttachments(verified.bindings[0]);
