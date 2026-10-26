@@ -336,13 +336,19 @@ async function runTask(task, inst, shot, sb) {
     }
     throw Object.assign(new Error("等待生成超时；重试只继续查询本次结果，不会重复提交"), { code: "timeout" });
   } catch (error) {
-    const message = String(error?.message || error);
+    let message = String(error?.message || error);
     const code = error?.code;
     runtime.lastError = message;
-    if (task.studioTaskId || (task.draftBatchId && task.sentAt && ["quota", "platform_rejected", "generation_failed"].includes(code))) {
-      // Server-owned tasks and received drafts with quota errors retain their
-      // original submission; neither may redispatch the prompt automatically.
-      patchTask(task.id, { status: "failed", stage: "failed", error: message, errorCode: code || "unknown", finishedAt: new Date().toISOString() }, true);
+    if (task.studioTaskId || (task.draftBatchId && code !== "stopped")) {
+      // Draft failures require manual recovery, regardless of legacy retry
+      // settings. Preserve the original submission and conversation.
+      const failed = { status: "failed", stage: "failed", error: message, errorCode: code || "unknown", finishedAt: new Date().toISOString() };
+      try { patchTask(task.id, failed, true); }
+      catch {
+        message += "；失败状态未保存，请检查本地存储后人工核对";
+        Object.assign(task, failed, { error: message });
+        runtime.lastError = message;
+      }
       storyboard.setStatus(sb.id, shot.id, "failed", { error: message });
     } else if (code === "login_required" || code === "quota" || code === "model_unavailable") {
       if (code === "login_required") runtime.blocked.set(inst.id, { reason: message, retryAt: Date.now() + 30000 });
@@ -711,9 +717,8 @@ async function submitDrafts(ids, options = {}) {
   }
   return withNativeDrafts(requested, options, async (_driver, inst, check, operation, checkAction) => {
     const accepted = selected.filter((d) => d.submissionRecord).map((d) => ({ id: d.id, record: d.submissionRecord }));
-    const pending = selected.filter((d) => !d.submissionRecord), receipts = [], errors = unresolved.map(d => ({ phase: "receipt", message: `草稿「${d.template.name}」上次发送结果尚未确认，不会自动重发` })), children = new Set(), pageWaiters = [];
+    const pending = selected.filter((d) => !d.submissionRecord), errors = unresolved.map(d => ({ phase: "receipt", message: `草稿「${d.template.name}」上次发送结果尚未确认，不会自动重发` })), children = new Set();
     const bindings = nativeBindings(inst.id), draftBatchId = `draft-batch-${crypto.randomBytes(12).toString("hex")}`;
-    const maxPages = Math.max(1, Math.min(6, Number(options.maxPages) || 6));
     let failure, launched = 0;
     const checkDispatch = () => {
       checkAction();
@@ -724,27 +729,22 @@ async function submitDrafts(ids, options = {}) {
     };
     const abortChildren = () => {
       for (const child of children) child.controller.abort(operation.controller.signal.reason);
-      for (const wake of pageWaiters.splice(0)) wake();
     };
     operation.controller.signal.addEventListener("abort", abortChildren, { once: true });
     try {
       if (pending.length && !deps.resolveDraftDriver) throw new Error("草稿投递页面未就绪，请更新并重启应用");
       const data = pending.length ? requirePage(await draftStep(operation, "读取本批完整草稿", () => _driver.call("readNativeDrafts"))) : null;
       const catalog = data?.source === "indexeddb" ? { accountScope: data.accountScope, items: data.items } : null;
-      // Bound pages only until the send receipt. Generation confirmation must
-      // never occupy the page slots needed to send the remaining drafts.
+      // Finish this receipt and close its page before preparing the next draft.
+      // Generation confirmation remains separate from draft submission.
       async function dispatchDraft(draft, index) {
-        while (children.size >= maxPages) {
-          await new Promise(resolve => pageWaiters.push(resolve));
-          check();
-        }
         checkAction();
         const preparingAt = Date.now();
         const child = { controller: new AbortController() };
         children.add(child);
         let driver, record, issued = false, received = false, trackingReceipt = false;
         const checkDraft = () => { check(); child.controller.signal.throwIfAborted(); };
-        const cleanup = () => { children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); pageWaiters.shift()?.(); };
+        const cleanup = () => { children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); };
         const recordFailure = error => {
           const message = `${received ? "草稿已接收，保存任务失败" : issued ? "已发起发送，接收结果未确认" : "尚未发送"}：${error.message}`;
           errors.push({ message, phase: received ? "commit" : issued ? "receipt" : "prepare" });
@@ -786,7 +786,7 @@ async function submitDrafts(ids, options = {}) {
           issued = true; launched++; trackingReceipt = true;
           log.info("draft-dispatch-started", { draftBatchId, draftId: draft.id, instanceId: inst.id, index: index + 1, total: pending.length, preparationMs: Date.now() - preparingAt });
           progress("已发起发送，后台核对回执");
-          receipts.push(draftStep(child, "豆包接收回执", async () => {
+          await draftStep(child, "豆包接收回执", async () => {
             const clicked = await sent;
             if (!clicked?.ok) { issued = false; drafts.updateMany({ [draft.id]: { submissionRecord: null } }); requirePage(clicked); }
             record.task.sentAt = clicked.clickedAt || record.task.submittedAt;
@@ -805,24 +805,17 @@ async function submitDrafts(ids, options = {}) {
             // other drafts or its generation reminder.
             commitTemplates([record], [draft.id], false);
             progress("后台已确认接收");
-          }, 15 * 60 * 1000).catch(recordFailure).finally(cleanup));
+          }, 15 * 60 * 1000).catch(recordFailure).finally(cleanup);
         } catch (error) { recordFailure(error); }
         finally { if (!trackingReceipt) cleanup(); }
       }
-      let next = 0;
-      const preparing = await Promise.allSettled(Array.from({ length: Math.min(3, pending.length) }, async () => {
-        while (next < pending.length) {
-          check();
-          const index = next++;
-          await dispatchDraft(pending[index], index);
-        }
-      }));
-      failure = preparing.find(o => o.status === "rejected")?.reason;
+      for (let index = 0; index < pending.length; index++) {
+        check();
+        await dispatchDraft(pending[index], index);
+      }
     } catch (error) { failure = error; }
     finally {
       progress("投递阶段结束，核对发送回执");
-      const outcomes = await Promise.allSettled(receipts);
-      failure ||= outcomes.find(o => o.status === "rejected")?.reason;
       operation.controller.signal.removeEventListener("abort", abortChildren);
     }
     drafts.updateMany(bindingPatches(remainingDraftBindings(bindings, new Set(accepted.map((a) => a.id)))));

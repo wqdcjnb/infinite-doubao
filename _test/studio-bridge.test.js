@@ -161,7 +161,7 @@ test('server and accepted desktop native drafts retain their original submission
     queue.stopAll();
   }
 });
-test('native 100-task batch limits independent receipt pages and sends each draft exactly once',async()=>{
+test('native 100-task batch sends drafts serially even with legacy page concurrency configured',async()=>{
   const {driver}=setupNative(),j=journal(),adapter=new executorModule.NativeAdapter({journal:j,client:{},accounts:{},maxDraftPages:2});
   const tasks=[];for(let i=0;i<100;i++) {const op=nativeOperation();op.id='import'+i;op.payload.task.id='task'+i;await adapter.execute(op);tasks.push(op.payload.task);}
   let live=0,max=0,sends=0;
@@ -173,7 +173,7 @@ test('native 100-task batch limits independent receipt pages and sends each draf
     }};return own;
   }});
   const result=await adapter.execute({...operation('send'),id:'limited',payload:{account:{id:'account1',name:'测试'},tasks}});
-  assert.equal(sends,100);assert.equal(result.receipt.tasks.every(t=>t.status==='submitted'),true);assert.equal(max,2);assert.equal(live,0);queue.stopAll();
+  assert.equal(sends,100);assert.equal(result.receipt.tasks.every(t=>t.status==='submitted'),true);assert.equal(max,1);assert.equal(live,0);queue.stopAll();
 });
 
 test('a new import operation for an already sent task cannot recreate a native draft after local draft removal',async()=>{

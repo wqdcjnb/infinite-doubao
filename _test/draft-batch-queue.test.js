@@ -197,6 +197,68 @@ test("旧版本误清submittedAt的已接收草稿依靠sentAt保护，只取回
   assert.equal(calls.filter(c => c.method === "prepareWorkTask").length, 0);
 });
 
+test("草稿异常收尾写盘失败仍显示失败原因，保留原提交且不自动重跑", async () => {
+  account("first"); const ids = batch().slice(0, 1); await queue.saveDrafts(ids);
+  await queue.submitDrafts(ids, { sendOnly: true });
+  const task = store.get().tasks[0], submittedAt = task.submittedAt, save = store.save;
+  let attempts = 0;
+  queue.init({ resolveDriver: async () => {
+    attempts++;
+    store.save = () => false;
+    throw new Error("原对话暂不可用");
+  } });
+  try {
+    await queue.retryTask(task.id);
+    await waitFor(() => !queue.state().running.length);
+    assert.equal(task.status, "failed");
+    assert.match(task.error, /原对话暂不可用.*未保存/);
+    assert.equal(store.get().storyboards[0].shots[0].status, "failed");
+    queue.wakeQueue();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(attempts, 1);
+    assert.equal(task.submittedAt, submittedAt);
+    assert.equal(sends().length, 1);
+  } finally { store.save = save; }
+});
+
+for (const code of ["unknown", "login_required", "quota", "model_unavailable"]) {
+  test(`已接收草稿遇到 ${code} 异常不自动重试，人工继续取回不重复发送`, async () => {
+    account("first"); const ids = batch().slice(0, 1); await queue.saveDrafts(ids);
+    await queue.submitDrafts(ids, { sendOnly: true });
+    store.get().settings.orchestrator.retryLimit = 3;
+    const task = store.get().tasks[0], submittedAt = task.submittedAt, conversationUrl = task.conversationUrl;
+    let attempts = 0, fail = true;
+    queue.init({ resolveDriver: async () => {
+      attempts++;
+      if (fail) throw Object.assign(new Error("原对话暂不可用，请人工核对"), { code });
+      return {
+        isLoggedIn: async () => ({ loggedIn: true }),
+        url: async () => conversationUrl,
+        beginTask: async () => ({ ok: true }),
+        readProgress: async () => ({ state: "done", mediaUrls: [`https://fixture.invalid/${task.id}.mp4`] })
+      };
+    } });
+    await queue.retryTask(task.id);
+    await waitFor(() => !queue.state().running.length);
+    assert.equal(task.status, "failed");
+    assert.equal(task.errorCode, code);
+    assert.equal(task.retryCount, 0);
+    queue.wakeQueue();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(attempts, 1);
+    assert.equal(task.submittedAt, submittedAt);
+    assert.equal(task.conversationUrl, conversationUrl);
+    assert.equal(sends().length, 1);
+    fail = false;
+    await queue.retryTask(task.id);
+    await waitFor(() => task.status === "succeeded");
+    assert.equal(attempts, 2);
+    assert.equal(sends().length, 1);
+    assert.equal(calls.some(c => c.method === "normalSend"), false);
+    assert.equal(task.conversationUrl, conversationUrl);
+  });
+}
+
 test("四条接收待核对意图重载后仍拒绝重投，也不能虚增已接收任务", async () => {
   account("first");
   const ids = drafts.createMany(["A", "B", "C", "D"].map(name => template(name).id)).map(d => d.id);
@@ -232,7 +294,7 @@ test("等待发送回执时停止立即关闭页面，迟到回执不再入队",
   const delayed = new Promise(resolve => { release = resolve; });
   hook = async method => { if (method === "waitNativeDraftAccepted") { receipts++; await delayed; return { ok: true, conversationUrl: "https://www.doubao.com/chat/late", userMessageId: "late" }; } };
   const submission = queue.submitDrafts(ids); submission.catch(() => {});
-  await waitFor(() => receipts === 2);
+  await waitFor(() => receipts === 1);
   queue.stopAll(); await assert.rejects(submission, /已停止/);
   assert.equal(liveWorkers, 0); release(); await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(store.get().tasks.length, 0); assert.equal(drafts.list().length, 2);
@@ -343,19 +405,26 @@ test("混合选择现有和缺失草稿时，重新存入仅保存缺失条目",
   assert.deepEqual(calls.filter(c => c.method === "saveNativeDraft").map(c => c.options.id), [ids[1]]);
   assert.deepEqual(native, ids); assert.equal(sends().length, 0);
 });
-test("逐条触发后继续下一条，第一条回执不返回也不能阻塞第二条", async () => {
+test("逐条发送等待本条回执，关闭本页后才准备下一条", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
   let release;
   const delayed = new Promise((resolve) => { release = resolve; });
   hook = async (method, options) => {
     if (method === "waitNativeDraftAccepted" && options.id === ids[0]) await delayed;
   };
-  const submission = queue.submitDrafts(ids);
-  await waitFor(() => sends().length === 2);
-  assert.equal(store.get().tasks.length, 1);
-  assert.deepEqual(drafts.list().map(d => d.id), [ids[0]]);
-  assert.ok(drafts.list()[0].submissionRecord);
-  release(); assert.equal((await submission).count, 2);
+  const submission = queue.submitDrafts(ids, { startQueue: false });
+  try {
+    await waitFor(() => calls.some(c => c.method === "waitNativeDraftAccepted"));
+    assert.equal(sends().length, 1);
+    assert.equal(calls.filter(c => c.method === "openNativeDraft").length, 1);
+    assert.equal(store.get().tasks.length, 0);
+    assert.deepEqual(drafts.list().map(d => d.id), ids);
+    assert.ok(drafts.list()[0].submissionRecord.task.submissionUncertain);
+    assert.equal(drafts.list()[1].submissionRecord, undefined);
+  } finally { release(); await submission; }
+  assert.deepEqual(sends().map(c => c.options.id), ids);
+  const closed = calls.findIndex(c => c.method === "close");
+  assert.ok(closed < calls.findIndex(c => c.method === "openNativeDraft" && c.options.id === ids[1]));
   assert.equal(calls.filter((c) => c.method === "close").length, 2);
   assert.equal(new Set(store.get().tasks.map((t) => t.draftBatchId)).size, 1);
 });
@@ -415,25 +484,29 @@ test("18 条草稿最后一页登录较慢时，前 17 条已经连续投递", a
   assert.equal(liveWorkers, 0);
 });
 
-test("50 条回执延迟时最多保留 6 页，回执释放后继续且每条只发送一次", async () => {
+test("50 条回执延迟时只保留一页，旧 maxPages 参数不能恢复并发", async () => {
   account("first");
   const ids = drafts.createMany(Array.from({ length: 50 }, (_, i) => template(String(i)).id)).map(d => d.id);
   await queue.saveDrafts(ids);
   let release;
   const delayed = new Promise(resolve => { release = resolve; });
   hook = async method => { if (method === "waitNativeDraftAccepted") await delayed; };
-  const pending = queue.submitDrafts(ids);
-  await waitFor(() => sends().length === 6);
-  assert.equal(store.get().tasks.length, 0);
-  assert.equal(peakWorkers, 6);
-  release(); assert.equal((await pending).count, 50);
+  const pending = queue.submitDrafts(ids, { maxPages: 6 });
+  try {
+    await waitFor(() => sends().length > 0);
+    assert.equal(sends().length, 1);
+    assert.equal(store.get().tasks.length, 0);
+    assert.equal(peakWorkers, 1);
+  } finally { release(); await pending; }
+  assert.equal(store.get().tasks.length, 50);
+  assert.equal(peakWorkers, 1);
   assert.equal(new Set(sends().map(c => c.options.id)).size, 50);
   assert.equal(calls.some(c => c.method === "result"), false);
   assert.equal(liveWorkers, 0);
   assert.equal(new Set(store.get().tasks.map(t => t.draftBatchId)).size, 1);
 });
 
-test("滚动提前准备：前两页加载卡住仍投递其余草稿，全部挂起时遵守页面上限", async () => {
+test("首条页面加载较慢时不提前打开后续草稿，回执完成后再逐条推进", async () => {
   account("first");
   const ids = drafts.createMany(Array.from({ length: 50 }, (_, i) => template(String(i)).id)).map(d => d.id);
   await queue.saveDrafts(ids);
@@ -450,16 +523,18 @@ test("滚动提前准备：前两页加载卡住仍投递其余草稿，全部�
   };
   const pending = queue.submitDrafts(ids); pending.catch(() => {});
   try {
-    await waitFor(() => sends().length === 4);
-    assert.equal(checks, 6);
-    assert.equal(peakChecking, 3, "limit simultaneous page preparation without grouping sends");
+    await waitFor(() => checks > 0);
+    assert.equal(checks, 1);
+    assert.equal(sends().length, 0);
+    assert.equal(peakChecking, 1);
     assert.equal(store.get().tasks.length, 0, "no receipt released yet");
-    releasePages(); await waitFor(() => sends().length === 6);
-    assert.equal(peakWorkers, 6);
+    releasePages(); await waitFor(() => sends().length > 0);
+    assert.equal(sends().length, 1);
+    assert.equal(peakWorkers, 1);
     releaseReceipts(); assert.equal((await pending).count, 50);
     assert.equal(new Set(sends().map(c => c.options.id)).size, 50);
     assert.equal(liveWorkers, 0);
-  } finally { releasePages(); releaseReceipts(); }
+  } finally { releasePages(); releaseReceipts(); await pending; }
 });
 
 test("首条后续生成失败也不阻挡剩余草稿，25 条全部提交后由任务队列处理结果", async () => {
