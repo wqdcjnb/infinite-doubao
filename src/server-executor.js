@@ -149,6 +149,27 @@ class NativeAdapter {
     } else if(task.status==='queued')queue.resume(task.storyboardId);
     return {outcome:'progress',receipt:{...receipt,status:'running'}};
   }
+  async inspectPendingDrafts(accountId,inst,driver) {
+    const pending=drafts.list().filter(d=>d.instanceId===inst.id && d.nativeState==='saving' && !d.nativeBinding && !d.submissionRecord && d.template?.studioTaskId);
+    if(!pending.length)return;
+    const entries=[];
+    for(const draft of pending.slice(0,100)) {
+      const taskId=draft.template.studioTaskId,binding=this.journal.task(taskId);
+      const entry={taskId,draftId:draft.id,draftNumber:draft.draftNumber,status:'unverified'};
+      entries.push(entry);
+      if(binding?.accountId!==accountId || binding.draftId!==draft.id || !/^[a-f0-9]{64}$/.test(binding.snapshotHash||'') || !draft.nativePrompt)continue;
+      entry.snapshotHash=binding.snapshotHash;
+      entry.nativePromptSha256=crypto.createHash('sha256').update(draft.nativePrompt.replace(/\s+/g,' ').trim()).digest('hex');
+      try {
+        const proof=await driver.call('verifyNativeDraftSaved',{id:draft.id,prompt:draft.nativePrompt,executionMode:draft.executionMode});
+        const native=proof?.bindings?.[0];
+        if(proof?.ok===true && proof.readOnly===true && proof.bindings.length===1 && native.id===draft.id && typeof native.nativeId==='string' && native.nativeId && typeof native.accountScope==='string' && native.accountScope) {
+          entry.status='matched';entry.nativeBinding={id:native.id,nativeId:native.nativeId,accountScope:native.accountScope};
+        }
+      } catch { /* Inspection failure preserves the original uncertain state. */ }
+    }
+    return {version:1,readOnly:true,accountId,executorSessionId:this.sessionId,inspectedAt:Date.now(),entries};
+  }
   async login(op,context={}) {
     const action=op.payload.action||'frame';
     const input=action==='input'?decryptInput(op.payload.inputEncrypted,this.client.token):{};
@@ -196,8 +217,9 @@ class NativeAdapter {
     const jpeg=image.toJPEG(70);
     if(jpeg.length>1024*1024)throw new Error('login screenshot too large');
     const driver=await this.driverFactory(inst,wc),login=await driver.isLoggedIn().catch(()=>({}));
+    const draftInspection=action==='frame'?await this.inspectPendingDrafts(op.accountId,inst,driver):undefined;
     const [width,height]=win.getContentSize();
-    return {outcome:'success',receipt:{imageBase64:jpeg.toString('base64'),contentType:'image/jpeg',width,height,capturedAt:new Date().toISOString(),loginState:login?.loggedIn===true?'logged_in':login?.loggedIn===false?'logged_out':'unknown'}};
+    return {outcome:'success',receipt:{imageBase64:jpeg.toString('base64'),contentType:'image/jpeg',width,height,capturedAt:new Date().toISOString(),loginState:login?.loggedIn===true?'logged_in':login?.loggedIn===false?'logged_out':'unknown',...(draftInspection?{draftInspection}:{})}};
   }
   leaseGuard(op,context) {
     return context.checkLease||(()=>{const until=typeof op.leaseUntil==='number'?op.leaseUntil:Date.parse(op.leaseUntil);if(!Number.isFinite(until)||Date.now()>=until)throw new Error('studio operation lease expired');});

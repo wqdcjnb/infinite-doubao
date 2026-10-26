@@ -61,6 +61,27 @@ test("技能链接在首行时仍按第二行的完整编号核对、打开和�
   assert.equal((await p.api.sendNativeDraft(binding)).ok, true); assert.equal(p.sends(), 1);
 });
 
+test("严格只读草稿核对返回账号范围，缺少账号身份时不展开侧栏", async () => {
+  const identified = page({ noSidebar: true });
+  assert.equal((await identified.api.readNativeDrafts({ strictReadOnly: true })).accountScope, "account-a");
+  const unknown = page({ collapsed: true, currentScope: "" });
+  const result = await unknown.api.readNativeDrafts({ strictReadOnly: true });
+  assert.equal(result.ok, false); assert.equal(unknown.visible(), 0); assert.equal(unknown.sends(), 0);
+});
+
+test("原草稿只读核对只接收同账号同编号完整正文，不依赖侧栏或触发发送", async () => {
+  const p = page({ noSidebar: true, skillPrefix: "[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)\n" });
+  const result = await p.api.verifyNativeDraftSaved(p.bindings[49]);
+  assert.equal(result.ok, true, result.reason); assert.equal(result.readOnly, true);
+  assert.equal(result.bindings[0].nativeId, "local-49"); assert.equal(result.bindings[0].accountScope, "account-a");
+  assert.equal(p.sends(), 0); assert.equal(p.visible(), 0);
+  for (const options of [{ duplicate: true }, { missingBody: true }, { currentScope: "account-b" }]) {
+    const unsafe = page({ noSidebar: true, ...options });
+    assert.equal((await unsafe.api.verifyNativeDraftSaved(unsafe.bindings[49])).ok, false);
+    assert.equal(unsafe.sends(), 0);
+  }
+});
+
 test("新投递页面先读到完整数据、侧栏延迟挂载时等待原生 ID，不能让整批提前失败", async () => {
   const p = page({ sidebarDelayMs: 1800 });
   const binding = p.bindings[49];

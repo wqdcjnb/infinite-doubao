@@ -1,6 +1,6 @@
 "use strict";
 const { test } = require("node:test"), assert = require("node:assert/strict"), vm = require("node:vm"), fs = require("node:fs"), path = require("node:path");
-async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, richDocument = false, remount = false, hidden = false, duplicate = false } = {}) {
+async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, richDocument = false, remount = false, hidden = false, duplicate = false, partialBody = false } = {}) {
   let now = 1000, switched = 0, filledAt = 0, current = { tagName: "TEXTAREA", value: "" };
   const prompt = "【草稿编号：DB-111111111111111111111111】 视频", scope = "account-a";
   const metadata = { id: "native", title: prompt, scene: "new-office-task", inputDraftIndex: { accountScope: scope, conversationScope: "local:native", inputId: "primary" } };
@@ -12,8 +12,8 @@ async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, richDocume
     querySelectorAll: s => s.includes("draft-conversation-section") ? switched ? hidden ? [] : remount ? [row, { ...row, dataset: {}, querySelector: () => ({ innerText: "旧草稿" }) }] : [row] : [] : [newChat] };
   function input() {
     const ready = bodyAfterSwitch ? switched && now >= switched + bodyAfterSwitch : now >= filledAt + 200;
-    return { state: { accountScope: scope, records: ready ? [{ address: metadata.inputDraftIndex, updatedAt: stale ? 1 : now,
-      units: { "input.document": { updatedAt: stale ? 1 : now, payload: { format: "plain-text", text: prompt } } } }] : [] } };
+    return { state: { accountScope: scope, records: ready || partialBody ? [{ address: metadata.inputDraftIndex, updatedAt: stale ? 1 : now,
+      units: { "input.document": { updatedAt: stale ? 1 : now, payload: { format: "plain-text", text: ready ? prompt : prompt.split(" ")[0] + " 正文保存中" } } } }] : [] } };
   }
   const indexedDB = { databases: async () => [{ name: "flow-draft-conversations-v2" }, { name: "samantha-web" }], open(name) {
     const q = {}; queueMicrotask(() => { q.result = { close() {}, transaction() {
@@ -53,6 +53,11 @@ test("旧正文不能触发快速确认，素材上传未完成不能离开输�
 });
 test("侧栏新条目出现后仍核对完整正文落盘，不能提前显示保存成功", async () => {
   const result = await save({ bodyAfterSwitch: 400 }); assert.ok(result.savedMs >= result.switchMs + 400);
+});
+
+test("同编号的部分正文仍在落盘时继续等待完整记录，不提前判为未知", async () => {
+  const result = await save({ bodyAfterSwitch: 400, partialBody: true });
+  assert.ok(result.savedMs >= result.switchMs + 400);
 });
 
 test("富文本内部文档已同步可立即保存，仍等待上传和完整正文持久化", async () => {
