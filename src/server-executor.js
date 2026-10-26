@@ -3,6 +3,7 @@
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const P=require('./paths'),store=require('./store'),drafts=require('./task-drafts'),templates=require('./task-templates'),queue=require('./orchestrator');
 const {Journal,StudioClient,StudioBridge,downloadReferences}=require('./studio-bridge');
+const {StudioControl}=require('./studio-control');
 function stableId(prefix,id) {return prefix+crypto.createHash('sha256').update(id).digest('hex').slice(0,24);}
 function durableSave() {if(!store.save())throw new Error('executor local state could not be persisted');}
 function requireTask(op) {const task=op.payload.task;if(!task?.id || !task.prompt || !task.parameters)throw new Error('invalid task snapshot');return task;}
@@ -284,11 +285,13 @@ async function start() {
   const journal=new Journal(path.join(cfg.stateDir,'studio-journal.json')),client=new StudioClient(cfg);
   const adapter=new NativeAdapter({journal,client,accounts,environment,sessionId:client.sessionId,maxDraftPages:cfg.maxDraftPages||4});
   const bridge=new StudioBridge({journal,api:client,adapter,operationConcurrency:cfg.operationConcurrency||2,onError:code=>process.stderr.write(`studio-executor: ${code}\n`)});
+  const control=new StudioControl({client,adapter,decryptInput,onError:code=>process.stderr.write(`studio-executor: ${code}\n`)});
   const controller=new AbortController();
   app.on('window-all-closed',()=>{});
   app.on('before-quit',()=>{controller.abort();queue.pause('');accounts.stop();for(const win of pages)if(!win.isDestroyed())win.destroy();});
   for(const event of ['SIGTERM','SIGINT'])process.once(event,()=>app.quit());
   bridge.run(controller.signal).catch(()=>{process.stderr.write('studio-executor: stopped\n');app.exit(1);});
-  return {bridge,adapter};
+  control.run(controller.signal).catch(()=>{process.stderr.write('studio-executor: control stopped\n');});
+  return {bridge,adapter,control};
 }
 module.exports={NativeAdapter,decryptInput,assertDedicatedState,readConfig,studioConfigFile,createStudioWindow,start};
