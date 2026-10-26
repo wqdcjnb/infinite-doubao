@@ -137,3 +137,11 @@ npm test
 上游差异单独说明：本分支起点是 `fe95bf7`（1.5.10），生产执行端为 `f5afc23`。`f5afc23..fe95bf7` 的 13 文件、191 增/18 删属于已有上游：原生草稿保存时无输入框先点新工作任务、无旧 binding 不做恢复、保存阶段日志和相关测试/版本号；不是本次环境补丁。发布前必须单独审核并明确决定是否纳入，不能把整版 main 当成本补丁发布。
 
 技术依据：[Electron ClientRequest login](https://www.electronjs.org/docs/latest/api/client-request)、[Electron app login](https://www.electronjs.org/docs/latest/api/app#event-login)、[Electron Session setProxy](https://www.electronjs.org/docs/latest/api/session#sessetproxyconfig)、[Chromium proxy support](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md)。
+
+## 2026-10-26 内置 Seedance 2.5 Skill 精确补丁
+
+用户仅填写创意正文。新导入豆包草稿在最终原生提示词第一行自动加入 `[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)`，随后保留草稿编号、说明及原正文；正文已有完整独立Skill调用行时先去重。模板原文、参考图顺序、草稿绑定与防重发逻辑不变，已保存草稿不重写。
+
+此运行分支从当前服务器2d880376构造，仅7行提示词组装差异及直接验证/说明；不会带入主线后续导入恢复、并发、安装包或其他软件功能。验证为90项直接相关测试（含NativeAdapter导入、去重、恢复不重存、不发送）。真实豆包生成未执行，仍由用户验收。
+
+回滚保留数据与配置，只在无活动导入、发送及控制时把专用执行端current切回2d880376并重启同一服务，确认新心跳；不动共享Worker、网络、用户正文或已有草稿。

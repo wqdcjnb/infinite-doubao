@@ -44,6 +44,11 @@ function newTask(input) {
     error: "", result: null, log: []
   };
 }
+function withSeedanceSkill(prompt) {
+  const skill = "[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)";
+  const body = String(prompt || "").split(/\r?\n/).filter(line => line.trim() !== skill).join("\n").trim();
+  return `${skill}\n${body}`;
+}
 function addTask(task) {
   store.get().tasks.push(task);
   if (!store.save()) { store.get().tasks.pop(); throw new Error("任务保存失败，请检查配置目录是否可写"); }
@@ -609,7 +614,7 @@ async function saveDrafts(ids, options = {}) {
       if (draft.nativeState === "saved") { count++; continue; }
       const record = templateRecords(draft.template, draft.executionMode);
       const draftNumber = draft.draftNumber || drafts.numberFor(draft.id);
-      record.task.prompt = `【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`;
+      record.task.prompt = withSeedanceSkill(`【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`);
       try {
       checkAction();
       const position = `${count + 1}/${selected.length}`;
