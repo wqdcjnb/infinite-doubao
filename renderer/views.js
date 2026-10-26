@@ -508,11 +508,11 @@ function renderDrafts() {
   const uncertain = selected.some((d) => d.nativeState === "saving" || d.submissionRecord?.task.submissionUncertain);
   const ready = selected.every((d) => d.nativeState === "saved" || d.submissionRecord);
   const blocked = V.draftBusy || !selected.length || !account || !!mismatch;
-  q("#draftSubmit").disabled = blocked || uncertain || !ready;
+  q("#draftSubmit").disabled = blocked || !ready || !selected.some(d => d.nativeState === "saved" && !d.submissionRecord?.task.submissionUncertain || d.nativeState === "sent");
   q("#draftSave").disabled = blocked || selected.some((d) => d.submissionRecord);
   q("#draftSave").textContent = selected.some(d => d.nativeState === "saving") ? "① 核对保存结果并继续" : "① 存入所选账号的豆包草稿";
   q("#draftRecreate").disabled = q("#draftSave").disabled || !selected.some((d) => d.nativeState === "saved");
-  q("#draftStatus").textContent = V.draftBusy ? V.draftMessage || "正在处理所选草稿，请稍候…" : !selected.length ? "勾选要一起保存或发送的草稿。" : !account ? "请在上方选择一个豆包账号，再保存或发送所选草稿。" : mismatch ? `所选草稿包含 ${mismatch.instanceName || "其他账号"} 的网页草稿，请只勾选同一账号的草稿，并选择该账号。` : uncertain ? "部分草稿上次操作尚未确认，请先打开所属账号的豆包页面核对。" : !ready ? "先点击 ①，将所选草稿全部存入豆包网页，再点击 ② 一起发送。" : `所选草稿将由 ${V.instances.find((i) => i.id === account)?.name || "所选账号"} 通过云电脑同时提交。`;
+  q("#draftStatus").textContent = V.draftBusy ? V.draftMessage || "正在处理所选草稿，请稍候…" : !selected.length ? "勾选要一起保存或发送的草稿。" : !account ? "请在上方选择一个豆包账号，再保存或发送所选草稿。" : mismatch ? `所选草稿包含 ${mismatch.instanceName || "其他账号"} 的网页草稿，请只勾选同一账号的草稿，并选择该账号。` : uncertain ? "上次发送待核对的草稿会保留；其余所选草稿继续发送。" : !ready ? "先点击 ①，将所选草稿全部存入豆包网页，再点击 ② 一起发送。" : `所选草稿将由 ${V.instances.find((i) => i.id === account)?.name || "所选账号"} 逐条发送全部 ${selected.length} 条草稿；发送成功即移出草稿箱，暂不处理生成确认。`;
   if (!V.draftBusy && V.draftError) q("#draftStatus").textContent = V.draftError;
   q("#templateAddDraft").disabled = V.draftBusy;
   q("#draftAccount").disabled = V.draftBusy;
@@ -616,7 +616,7 @@ async function submitSelectedDrafts() {
   renderDrafts(); renderTemplateList();
   let result;
   try {
-    result = await call("dm:drafts:submit", ids, { instanceId: q("#draftAccount").value });
+    result = await call("dm:drafts:submit", ids, { instanceId: q("#draftAccount").value, sendOnly: true });
     ids.forEach((id) => V.selectedDrafts.delete(id));
     say(`${result.count} 条草稿已由 ${result.instanceName} 全部发送，正在取回视频结果`);
   } catch (error) {
@@ -651,8 +651,8 @@ async function updateTasks() {
 }
 
 function taskStatusText(task) {
-  const statuses = { queued: "排队中", running: "处理中", succeeded: "已完成", failed: "失败", cancelled: "已取消" };
-  const stages = { waiting_account: "等待可用账号", waiting_confirmation: "等待参数确认", waiting_result: "等待平台结果", retrying: "等待重试", preparing: "准备账号", submitting: "提交中", generating: "生成中", downloading: "下载并检查成片", completed: "已完成", failed: "失败", cancelled: "已取消" };
+  const statuses = { submitted: "已发送", queued: "排队中", running: "处理中", succeeded: "已完成", failed: "失败", cancelled: "已取消" };
+  const stages = { submitted: "已发送到豆包", waiting_account: "等待可用账号", waiting_confirmation: "等待参数确认", waiting_result: "等待平台结果", retrying: "等待重试", preparing: "准备账号", submitting: "提交中", generating: "生成中", downloading: "下载并检查成片", completed: "已完成", failed: "失败", cancelled: "已取消" };
   if (["failed", "cancelled"].includes(task.status)) return statuses[task.status];
   const label = stages[task.stage] || statuses[task.status] || task.status;
   const progress = Number(task.progress);
@@ -731,7 +731,7 @@ function renderTaskTable() {
     tr.appendChild(info);
     const ops = node("td", "task-ops");
     const actions = node("div", "task-actions");
-    if (["failed", "cancelled", "queued"].includes(t.status)) {
+    if (["submitted", "failed", "cancelled", "queued"].includes(t.status)) {
       const retry = node("button", "ghost tiny task-retry", t.submittedAt || t.generatedAt ? "继续取回" : t.status === "queued" ? "继续" : "重试");
       retry.addEventListener("click", async () => {
         await guard(async () => {

@@ -868,8 +868,23 @@ orchestrator.init({
         webSecurity: true, spellcheck: false, backgroundThrottling: false }
     });
     draftWindows.add(win);
-    const close = () => { if (!win.isDestroyed()) win.destroy(); };
-    win.on("closed", () => { draftWindows.delete(win); signal?.removeEventListener("abort", close); });
+    let verificationShown = false, checkingVerification = false;
+    const verificationTimer = setInterval(async () => {
+      if (checkingVerification || win.isDestroyed()) return;
+      checkingVerification = true;
+      try {
+        const required = await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('iframe[src*="/verifycenter/captcha"]')).some(frame => frame.getClientRects().length && getComputedStyle(frame).visibility !== 'hidden')`);
+        if (required && !verificationShown) {
+          verificationShown = true;
+          win.setTitle(`${inst.name} · 请完成人机验证`);
+          win.show(); win.focus();
+          pushToUi("dm:event", { type: "draft", message: `${inst.name} 需要人机验证，请在弹出的豆包窗口完成验证，随后继续核对发送回执。`, instanceId: inst.id });
+          log.warn("draft-human-verification", { instanceId: inst.id });
+        }
+      } catch {} finally { checkingVerification = false; }
+    }, 750);
+    const close = () => { clearInterval(verificationTimer); if (!win.isDestroyed()) win.destroy(); };
+    win.on("closed", () => { clearInterval(verificationTimer); draftWindows.delete(win); signal?.removeEventListener("abort", close); });
     signal?.addEventListener("abort", close, { once: true });
     win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     try {

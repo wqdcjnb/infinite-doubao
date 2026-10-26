@@ -56,6 +56,27 @@ async function waitFor(check) {
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
 
+test("只发送模式提交全部 18 条，重启和唤醒队列也不自动处理生成确认", async () => {
+  account("first");
+  const ids = drafts.createMany(Array.from({ length: 18 }, (_, i) => template(String(i)).id)).map(d => d.id);
+  await queue.saveDrafts(ids);
+  assert.equal((await queue.submitDrafts(ids, { sendOnly: true })).count, 18);
+  store.load(); queue.recoverTemplateTasks(); queue.wakeQueue();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(sends().length, 18); assert.equal(drafts.list().length, 0);
+  assert.ok(store.get().tasks.every(t => t.status === "submitted" && t.receiptUserMessageId));
+  assert.equal(calls.some(c => ["peekGenerationConfirmation", "normalSend", "result"].includes(c.method)), false);
+});
+
+test("旧草稿接收未知时仍发送其余所选草稿，保留旧意图避免重复", async () => {
+  account("first"); const ids = batch(); await queue.saveDrafts(ids);
+  drafts.updateMany({ [ids[0]]: { submissionRecord: { task: { submissionUncertain: true, submittedAt: new Date().toISOString() } } } });
+  await assert.rejects(queue.submitDrafts(ids, { sendOnly: true }), /已确认发送 1\/2.*接收待核对 1 条/);
+  assert.deepEqual(sends().map(c => c.options.id), [ids[1]]);
+  assert.deepEqual(drafts.list().map(d => d.id), [ids[0]]);
+  assert.equal(store.get().tasks[0].status, "submitted");
+});
+
 test("新草稿直接准备云电脑，不等待旧会话输入框或恢复空绑定", async () => {
   account("first"); const ids = batch(), progress = [];
   const onProgress = event => progress.push(event.message);
@@ -99,20 +120,13 @@ test("保存回执卡住时停止立即退出，保留待核对记录并禁止�
   assert.equal(calls.filter(c => c.method === "saveNativeDraft").length, 1);
 });
 
-test("接收后在已核对的新对话重置基线，直接检测生成确认而不重复加载", async () => {
+test("接收后保存精确消息锚点，不在投递页等待生成确认", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
-  hook = (method, options, context) => {
-    if (method === "peekGenerationConfirmation" && context.draftId) {
-      assert.equal(calls.some(c => c.method === "navigate" && c.draftId === context.draftId), false, "verified conversation should not reload");
-      const tracking = calls.filter(c => c.method === "beginTask" && c.draftId === context.draftId).at(-1).input;
-      assert.equal(tracking.resume, true); assert.equal(tracking.reset, true); assert.deepEqual(tracking.baselineMessageIds, [`user-${context.draftId}`]);
-      const receipt = calls.find(c => c.method === "waitNativeDraftAccepted" && c.options.id === context.draftId);
-      assert.deepEqual(receipt.options.baselineMessageIds, ["old-route"]);
-    }
-  };
-  assert.equal((await queue.submitDrafts(ids)).count, 2);
+  assert.equal((await queue.submitDrafts(ids, { startQueue: false })).count, 2);
   assert.equal(sends().length, 2);
-  assert.ok(store.get().tasks.every(t => t.baselineMessageIds.length === 1 && t.baselineMessageIds[0].startsWith("user-")));
+  assert.ok(store.get().tasks.every(t => t.baselineMessageIds[0] === t.receiptUserMessageId));
+  assert.equal(calls.some(c => c.method === "peekGenerationConfirmation" || c.method === "navigate"), false);
+  assert.equal(liveWorkers, 0);
 });
 
 test("整批只读取一次完整草稿，投递页复用快照而非重复访问数据库", async () => {
@@ -126,83 +140,30 @@ test("整批只读取一次完整草稿，投递页复用快照而非重复访�
   assert.equal(calls.filter(c => c.method === "readNativeDrafts").length, 1);
 });
 
-test("确认参数未加载或填写时仍在流式变化，等待下一轮且只发送一次确认", async () => {
-  account("first"); const ids = batch(); await queue.saveDrafts(ids);
-  const seen = new Map();
-  hook = (method, options, context) => {
-    if (method === "peekGenerationConfirmation") {
-      const n = (seen.get(context.draftId) || 0) + 1; seen.set(context.draftId, n);
-      if (n === 1) return { ok: false, pending: true, kind: "text", reason: "尚未给出完整参数" };
-      return { ok: true, kind: "text", key: n === 2 ? "streaming" : "complete", text: "按要求生成" };
-    }
-    if (method === "readProgress") return { state: "running", generationStarted: false };
-  };
-  assert.equal((await queue.submitDrafts(ids, { startQueue: false })).count, 2);
-  assert.equal(calls.filter(c => c.method === "normalSend").length, 2);
-  assert.ok(store.get().tasks.every(t => !t.confirmationIntents.streaming && t.confirmationIntents.complete.state === "sent"));
+test("18 条草稿全部发送，确认提醒一直不返回也不能卡在前 6 条", async () => {
+  account("first"); const ids = drafts.createMany(Array.from({ length: 18 }, (_, i) => template(String(i)).id)).map(d => d.id);
+  await queue.saveDrafts(ids);
+  hook = method => { if (["peekGenerationConfirmation", "readProgress"].includes(method)) throw new Error("发送期间不应等待生成"); };
+  assert.equal((await queue.submitDrafts(ids, { startQueue: false })).count, 18);
+  assert.equal(sends().length, 18); assert.equal(new Set(sends().map(c => c.options.id)).size, 18);
+  assert.equal(drafts.list().length, 0); assert.equal(store.get().tasks.length, 18); assert.equal(liveWorkers, 0);
 });
 
-test("未发送、接收未知与已接收确认异常分别计数，不能混成发送失败数", async () => {
+test("未发送和接收未知分别计数，后续确认不影响发送统计", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids); const progress = [];
-  hook = (method, options, context) => {
-    if (method === "openNativeDraft" && options.id === ids[0]) return { ok: false, reason: "未就绪" };
-    if (method === "peekGenerationConfirmation") return { ok: false, kind: "text", reason: "明确的参数不一致" };
-  };
+  hook = (method, options) => method === "openNativeDraft" && options.id === ids[0] ? { ok: false, reason: "未就绪" } : null;
   const onProgress = e => progress.push(e.message); queue.events.on("draft", onProgress);
-  try { await assert.rejects(queue.submitDrafts(ids, { startQueue: false }), /未发送 1 条，接收待核对 0 条，已接收但确认异常 1 条/); }
+  try { await assert.rejects(queue.submitDrafts(ids, { startQueue: false }), /未发送 1 条，接收待核对 0 条/); }
   finally { queue.events.off("draft", onProgress); }
-  assert.ok(progress.some(s => /豆包已接收 1\/2.*未发送 1 条.*已接收但确认异常 1 条/.test(s)));
+  assert.ok(progress.some(s => /豆包已接收 1\/2.*未发送 1 条/.test(s)));
 });
 
-test("回执后页面离开已接收对话时，恢复正确会话再核对生成确认", async () => {
+test("收到回执后关闭投递页，取回任务保留原对话地址", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
-  hook = (method, options) => method === "waitNativeDraftAccepted"
-    ? { ok: true, conversationUrl: `https://www.doubao.com/chat/${options.id}`, userMessageId: `user-${options.id}` } : null;
-  assert.equal((await queue.submitDrafts(ids)).count, 2);
-  assert.deepEqual(calls.filter(c => c.method === "navigate" && c.draftId).map(c => c.url).sort(), ids.map(id => `https://www.doubao.com/chat/${id}`).sort());
-});
-
-test("同账号的确认提醒乱序到达，独立回复按要求生成且先落盘，不等第一条完成", async () => {
-  account("first"); const ids = batch(); await queue.saveDrafts(ids);
-  let firstReady = false;
-  const confirmed = [];
-  hook = (method, options, context) => {
-    if (method === "peekGenerationConfirmation") return context.draftId === ids[1] || firstReady
-      ? { ok: true, kind: "text", key: context.draftId, text: "按要求生成" } : { ok: false };
-    if (method === "readProgress") return { state: "running", generationStarted: false };
-    if (method === "send") {
-      const saved = JSON.parse(fs.readFileSync(path.join(P.home(), "store.json"), "utf8"));
-      const task = saved.tasks.find(t => t.id === context.taskId);
-      assert.equal(task.confirmationIntents[context.draftId].state, "pending");
-      assert.equal(options.text, "按要求生成"); confirmed.push(context.draftId);
-    }
-  };
-  const submission = queue.submitDrafts(ids);
-  // Attach a handler now so a failed assertion cannot leave a rejected promise unobserved.
-  submission.catch(() => {});
-  await waitFor(() => confirmed.includes(ids[1]));
-  assert.deepEqual(confirmed, [ids[1]]);
-  assert.equal(sends().length, 2); assert.equal(liveWorkers, 1);
-  firstReady = true;
-  assert.equal((await submission).count, 2);
-  assert.deepEqual(confirmed, [ids[1], ids[0]]);
-  assert.ok(store.get().tasks.every(t => Object.values(t.confirmationIntents)[0].state === "sent"));
+  hook = (method, options) => method === "waitNativeDraftAccepted" ? { ok: true, conversationUrl: `https://www.doubao.com/chat/${options.id}`, userMessageId: `user-${options.id}` } : null;
+  assert.equal((await queue.submitDrafts(ids, { startQueue: false })).count, 2);
+  assert.deepEqual(store.get().tasks.map(t => t.conversationUrl).sort(), ids.map(id => `https://www.doubao.com/chat/${id}`).sort());
   assert.equal(liveWorkers, 0);
-});
-
-test("确认发送回执丢失时保留 pending，恢复取回不重复草稿或确认", async () => {
-  account("first"); const ids = batch(); await queue.saveDrafts(ids);
-  hook = (method, options, context) => {
-    if (method === "peekGenerationConfirmation") return { ok: true, kind: "text", key: context.draftId || "resumed", text: "按要求生成" };
-    if (method === "send") throw new Error("确认发送后的 IPC 丢失");
-  };
-  await assert.rejects(queue.submitDrafts(ids), /已接收.*确认/);
-  assert.equal(sends().length, 2);
-  assert.equal(calls.filter(c => c.method === "normalSend").length, 2);
-  assert.ok(store.get().tasks.every(t => Object.values(t.confirmationIntents)[0].state === "pending"));
-  store.load(); queue.recoverTemplateTasks(); queue.wakeQueue();
-  await waitFor(() => store.get().tasks.every(t => t.status === "succeeded"));
-  assert.equal(calls.filter(c => c.method === "normalSend").length, 2);
 });
 
 test("已接收草稿提示额度不足保留发送意图，恢复取回不重发原始任务", async () => {
@@ -265,21 +226,16 @@ test("回执缺少精确用户消息标识时保留待核对意图，不开始�
   assert.equal(sends().length, 2);
 });
 
-test("等待确认提醒时停止立即关闭独立页面，迟到提醒不再发送", async () => {
+test("等待发送回执时停止立即关闭页面，迟到回执不再入队", async () => {
   account("first"); const ids = batch(); await queue.saveDrafts(ids);
-  let release, peeks = 0;
+  let release, receipts = 0;
   const delayed = new Promise(resolve => { release = resolve; });
-  hook = async method => {
-    if (method === "peekGenerationConfirmation") { peeks++; await delayed; return { ok: true, kind: "text", key: "late", text: "按要求生成" }; }
-    if (method === "readProgress") return { state: "unknown" };
-  };
+  hook = async method => { if (method === "waitNativeDraftAccepted") { receipts++; await delayed; return { ok: true, conversationUrl: "https://www.doubao.com/chat/late", userMessageId: "late" }; } };
   const submission = queue.submitDrafts(ids); submission.catch(() => {});
-  await waitFor(() => peeks === 2);
-  assert.equal(peeks, 2);
+  await waitFor(() => receipts === 2);
   queue.stopAll(); await assert.rejects(submission, /已停止/);
   assert.equal(liveWorkers, 0); release(); await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(calls.filter(c => c.method === "normalSend").length, 0);
-  assert.equal(store.get().tasks.length, 2);
+  assert.equal(store.get().tasks.length, 0); assert.equal(drafts.list().length, 2);
 });
 
 test("新草稿和旧版本地草稿保存编号，普通提交不带草稿编号", async () => {
@@ -506,41 +462,14 @@ test("滚动提前准备：前两页加载卡住仍投递其余草稿，全部�
   } finally { releasePages(); releaseReceipts(); }
 });
 
-test("本批平台拒绝立即保留剩余草稿，失败任务落盘且不混入确认异常或自动重发", async () => {
-  account("first");
-  const ids = drafts.createMany(Array.from({ length: 25 }, (_, i) => template(String(i)).id)).map(d => d.id);
+test("首条后续生成失败也不阻挡剩余草稿，25 条全部提交后由任务队列处理结果", async () => {
+  account("first"); const ids = drafts.createMany(Array.from({ length: 25 }, (_, i) => template(String(i)).id)).map(d => d.id);
   await queue.saveDrafts(ids);
-  let release;
-  const rejected = new Promise(resolve => { release = resolve; });
-  hook = async method => {
-    if (method === "readProgress") { await rejected; return { state: "failed", errorCode: "platform_rejected", snippet: "空白回复带失败标记" }; }
-  };
-  const pending = queue.submitDrafts(ids, { startQueue: false }); pending.catch(() => {});
-  await waitFor(() => sends().length === 6);
-  release();
-  await assert.rejects(pending, /未发送 19 条.*确认异常 0 条.*平台拒绝 6 条.*剩余草稿已停止/);
-  assert.equal(sends().length, 6); assert.equal(liveWorkers, 0);
-  store.load();
-  assert.equal(drafts.list().length, 19);
-  assert.ok(drafts.list().every(d => !d.submissionRecord && /停止/.test(d.nativeError)));
-  assert.ok(store.get().tasks.every(t => t.status === "failed" && t.errorCode === "platform_rejected" && t.receiptUserMessageId));
-});
-
-test("等待确认超过 30 秒也不重载原对话，停止后不自动恢复这批任务", async () => {
-  account("first"); const ids = batch(); await queue.saveDrafts(ids);
-  const originalNow = Date.now; let offset = 0, checks = 0;
-  Date.now = () => originalNow() + offset;
-  hook = method => {
-    if (method === "readProgress") { offset += 35000; checks++; return { state: "running", generationStarted: false }; }
-  };
-  const pending = queue.submitDrafts(ids); pending.catch(() => {});
-  try {
-    await waitFor(() => checks >= 4);
-    assert.equal(calls.filter(c => c.method === "navigate").length, 0);
-    queue.stopAll(); await assert.rejects(pending, /已停止/);
-    store.load();
-    assert.ok(store.get().tasks.every(t => t.status === "cancelled" && t.receiptUserMessageId));
-  } finally { Date.now = originalNow; queue.stopAll(); }
+  hook = method => method === "readProgress" ? { state: "failed", errorCode: "platform_rejected" } : null;
+  assert.equal((await queue.submitDrafts(ids, { startQueue: false })).count, 25);
+  assert.equal(sends().length, 25); assert.equal(liveWorkers, 0);
+  store.load(); assert.equal(drafts.list().length, 0);
+  assert.ok(store.get().tasks.every(t => t.status === "queued" && t.receiptUserMessageId));
 });
 
 test("中间一条准备失败，后续仍连续投递，失败草稿保留", async () => {
@@ -625,7 +554,7 @@ test("一条接收成功即从草稿箱删除并持久入队，不等其他回�
   const disk = JSON.parse(fs.readFileSync(path.join(P.home(), "store.json")));
   assert.equal(disk.tasks.length, 1); assert.equal(disk.tasks[0].receiptUserMessageId, `user-${ids[0]}`);
   assert.deepEqual(disk.taskDrafts.map(d=>d.id), [ids[1]]);
-  assert.equal(liveWorkers, 2); assert.equal(calls.filter(c=>c.method==="normalSend").length, 0);
+  assert.equal(liveWorkers, 1); assert.equal(calls.filter(c=>c.method==="normalSend").length, 0);
   queue.stopAll(); release(); await assert.rejects(submitting);
   assert.equal(store.get().tasks.length, 1); assert.equal(store.get().tasks[0].status, "cancelled");
   assert.deepEqual(drafts.list().map(d=>d.id), [ids[1]]);

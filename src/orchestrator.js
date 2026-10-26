@@ -663,7 +663,12 @@ async function saveDrafts(ids, options = {}) {
   });
 }
 async function submitDrafts(ids, options = {}) {
-  const selected = selectedDrafts(ids);
+  const requested = selectedDrafts(ids), unresolved = [];
+  const selected = requested.filter(d => {
+    if (!d.submissionRecord?.task.submissionUncertain) return true;
+    unresolved.push(d); return false;
+  });
+  if (!selected.length) throw new Error("所选草稿发送结果尚未确认，请核对豆包最近任务，不会自动重发");
   for (const d of selected) {
     const recorded = d.submissionRecord?.task;
     // Pre-1.5.14 accepted records have no message anchor. Their persisted sent
@@ -673,20 +678,18 @@ async function submitDrafts(ids, options = {}) {
     if (d.executionMode !== "work" && !d.submissionRecord) throw new Error(`草稿「${d.template.name}」仅支持通过云电脑提交，请先存入云电脑草稿`);
     if (!d.submissionRecord && d.nativeState !== "saved") throw new Error("请先将所选草稿存入豆包网页，再一起发送");
   }
-  return withNativeDrafts(selected, options, async (_driver, inst, check, operation, checkAction) => {
+  return withNativeDrafts(requested, options, async (_driver, inst, check, operation, checkAction) => {
     const accepted = selected.filter((d) => d.submissionRecord).map((d) => ({ id: d.id, record: d.submissionRecord }));
-    const pending = selected.filter((d) => !d.submissionRecord), receipts = [], errors = [], children = new Set(), pageWaiters = [];
+    const pending = selected.filter((d) => !d.submissionRecord), receipts = [], errors = unresolved.map(d => ({ phase: "receipt", message: `草稿「${d.template.name}」上次发送结果尚未确认，不会自动重发` })), children = new Set(), pageWaiters = [];
     const bindings = nativeBindings(inst.id), draftBatchId = `draft-batch-${crypto.randomBytes(12).toString("hex")}`;
     const maxPages = Math.max(1, Math.min(6, Number(options.maxPages) || 6));
-    let failure, launched = 0, dispatchBlocked = "";
+    let failure, launched = 0;
     const checkDispatch = () => {
       checkAction();
-      if (dispatchBlocked) throw new Error(dispatchBlocked);
     };
     const progress = message => {
-      const confirmed = accepted.filter(a => Object.values(a.record.task.confirmationIntents || {}).some(intent => intent.state === "sent")).length;
       const count = phase => errors.filter(e => e.phase === phase).length;
-      emit("draft", { message: `${message} · 本次发起 ${launched}/${pending.length} 条，豆包已接收 ${accepted.length}/${selected.length} 条，已回复生成确认 ${confirmed} 条；未发送 ${count("prepare")} 条，接收待核对 ${count("receipt")} 条，已接收但确认异常 ${count("confirmation")} 条，平台拒绝 ${count("platform")} 条${dispatchBlocked ? `；${dispatchBlocked}` : ""}`, instanceId: inst.id });
+      emit("draft", { message: `${message} · 本次发起 ${launched}/${pending.length} 条，豆包已接收 ${accepted.length}/${requested.length} 条；未发送 ${count("prepare")} 条，接收待核对 ${count("receipt")} 条`, instanceId: inst.id });
     };
     const abortChildren = () => {
       for (const child of children) child.controller.abort(operation.controller.signal.reason);
@@ -697,10 +700,10 @@ async function submitDrafts(ids, options = {}) {
       if (pending.length && !deps.resolveDraftDriver) throw new Error("草稿投递页面未就绪，请更新并重启应用");
       const data = pending.length ? requirePage(await draftStep(operation, "读取本批完整草稿", () => _driver.call("readNativeDrafts"))) : null;
       const catalog = data?.source === "indexeddb" ? { accountScope: data.accountScope, items: data.items } : null;
-      // Bound live pages, including receipt/confirmation waiters. Unbounded
-      // hidden pages exhaust renderers and repeatedly contend on shared drafts.
+      // Bound pages only until the send receipt. Generation confirmation must
+      // never occupy the page slots needed to send the remaining drafts.
       async function dispatchDraft(draft, index) {
-        while (!dispatchBlocked && children.size >= maxPages) {
+        while (children.size >= maxPages) {
           await new Promise(resolve => pageWaiters.push(resolve));
           check();
         }
@@ -712,24 +715,11 @@ async function submitDrafts(ids, options = {}) {
         const checkDraft = () => { check(); child.controller.signal.throwIfAborted(); };
         const cleanup = () => { children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); pageWaiters.shift()?.(); };
         const recordFailure = error => {
-          const platform = received && ["quota", "platform_rejected", "generation_failed"].includes(error.code);
-          const message = `${platform ? "豆包已接收，但平台处理失败" : received ? "草稿已接收，生成确认未完成" : issued ? "已发起发送，接收结果未确认" : "尚未发送"}：${error.message}`;
-          errors.push({ message, phase: platform ? "platform" : received ? "confirmation" : issued ? "receipt" : "prepare" });
-          if (platform && !dispatchBlocked) {
-            dispatchBlocked = error.code === "quota" ? "该账号对话提示额度不足，本批剩余草稿已停止发送并保留" : "豆包返回处理失败，本批剩余草稿已停止发送并保留，请核对原对话";
-            for (const wake of pageWaiters.splice(0)) wake();
-          }
-          if (received) {
-            record.task.waitReason = message;
-            record.task.log.push({ at: new Date().toISOString(), level: "warn", message });
-            if (platform || operation.stopped) {
-              Object.assign(record.task, { status: operation.stopped ? "cancelled" : "failed", stage: operation.stopped ? "cancelled" : "failed", error: message, errorCode: error.code || "stopped", finishedAt: new Date().toISOString() });
-              Object.assign(record.sb.shots[0], { status: record.task.status, error: message });
-            }
-          }
+          const message = `${received ? "草稿已接收，保存任务失败" : issued ? "已发起发送，接收结果未确认" : "尚未发送"}：${error.message}`;
+          errors.push({ message, phase: received ? "commit" : issued ? "receipt" : "prepare" });
           drafts.updateMany({ [draft.id]: { nativeError: message, ...(received ? { submissionRecord: JSON.parse(JSON.stringify(record)) } : {}) } });
           log.warn("draft-dispatch-failed", { draftBatchId, draftId: draft.id, instanceId: inst.id, issued, message });
-          progress(dispatchBlocked ? "已停止后续投递，核对已发起请求" : "本条异常已记录，继续投递其他草稿");
+          progress("本条异常已记录，继续投递其他草稿");
         };
         progress(`正在准备第 ${index + 1} 条`);
         try {
@@ -773,64 +763,18 @@ async function submitDrafts(ids, options = {}) {
             checkDraft();
             if (!receipt.userMessageId) throw new Error("回执缺少本次用户消息标识，请核对原对话；不会自动重发");
             Object.assign(record.task, { conversationUrl: receipt.conversationUrl, conversationLocked: true, submissionUncertain: false, receiptUserMessageId: receipt.userMessageId, baselineMessageIds: [receipt.userMessageId] });
+            if (options.sendOnly) {
+              Object.assign(record.task, { status: "submitted", stage: "submitted", waitReason: "已发送到豆包；生成确认暂不处理" });
+              record.sb.shots[0].status = "submitted";
+            }
             drafts.updateMany({ [draft.id]: { nativeState: "sent", nativeBinding: null, nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
             received = true;
             accepted.push({ id: draft.id, record });
             // Move this confirmed receipt atomically, without waiting for the
-            // other drafts or its generation reminder. The account remains
-            // busy until these pages finish, so the queue cannot race them.
+            // other drafts or its generation reminder.
             commitTemplates([record], [draft.id], false);
             progress("后台已确认接收");
-          }, 125000).then(() => draftStep(child, "等待生成确认提醒", async () => {
-            const settings = store.get().settings.orchestrator;
-            // Follow only assistant output after the user message verified by
-            // the receipt, not the previous conversation's complete history.
-            const trackAccepted = async () => {
-              checkDraft();
-              requirePage(await driver.beginTask({ taskId: record.task.id, prompt: record.task.prompt, resume: true, reset: true, baselineMessageIds: record.task.baselineMessageIds, baselineUrls: record.task.baselineUrls || [], confirmedKeys: Object.keys(record.task.confirmationIntents || {}) }));
-              checkDraft();
-            };
-            const reopen = async () => {
-              if (!driver.navigate) return;
-              await driver.navigate(record.task.conversationUrl);
-              checkDraft();
-              if (driver.ready && !await driver.ready()) throw new Error("已接收对话尚未加载完成");
-              await trackAccepted();
-            };
-            // The receipt already matched this conversation's numbered user
-            // message. Keep it alive instead of reloading every accepted page.
-            if (driver.url && await driver.url() !== record.task.conversationUrl) await reopen();
-            else await trackAccepted();
-            const persist = values => {
-              if (getTask(record.task.id)) { patchTask(record.task.id, values, true); return; }
-              const snapshot = JSON.parse(JSON.stringify({ ...record, task: { ...record.task, ...values } }));
-              drafts.updateMany({ [draft.id]: { submissionRecord: snapshot } });
-              Object.assign(record.task, values);
-            };
-            for (;;) {
-              checkDraft();
-              options.checkLease?.();
-              if (driver.url && await driver.url() !== record.task.conversationUrl) await reopen();
-              const confirmation = await confirmGeneration(driver, record.task, settings, null, { check: checkDraft, persist, checkLease: options.checkLease });
-              checkDraft();
-              if (confirmation?.blocked) throw new Error(confirmation.reason);
-              if (confirmation?.sent || confirmation?.recorded) { progress("本条已回复确认，继续跟踪其他草稿"); return; }
-              const state = await driver.call("readProgress");
-              checkDraft();
-              if (state?.generationStarted || state?.mediaUrls?.length) {
-                if (record.task.studioTaskId) persist({ generationObservedAt: new Date().toISOString() });
-                return;
-              }
-              if (state?.state === "failed") throw Object.assign(new Error(state.snippet || "平台处理失败"), { code: state.errorCode || "generation_failed" });
-              // A generic '处理中' may still be planning; keep this page alive
-              // until its own reminder arrives, without blocking other drafts.
-              await new Promise(resolve => {
-                const done = () => { clearTimeout(timer); child.controller.signal.removeEventListener("abort", done); resolve(); };
-                const timer = setTimeout(done, Math.max(1500, Number(settings.pollInterval) || 4000));
-                child.controller.signal.addEventListener("abort", done, { once: true });
-              });
-            }
-          }, Number(store.get().settings.orchestrator.taskTimeoutMs) || 12 * 60 * 1000)).catch(recordFailure).finally(cleanup));
+          }, 15 * 60 * 1000).catch(recordFailure).finally(cleanup));
         } catch (error) { recordFailure(error); }
         finally { if (!trackingReceipt) cleanup(); }
       }
@@ -845,7 +789,7 @@ async function submitDrafts(ids, options = {}) {
       failure = preparing.find(o => o.status === "rejected")?.reason;
     } catch (error) { failure = error; }
     finally {
-      progress("投递阶段结束，各对话独立等待回执与生成确认");
+      progress("投递阶段结束，核对发送回执");
       const outcomes = await Promise.allSettled(receipts);
       failure ||= outcomes.find(o => o.status === "rejected")?.reason;
       operation.controller.signal.removeEventListener("abort", abortChildren);
@@ -855,8 +799,8 @@ async function submitDrafts(ids, options = {}) {
     const remaining = accepted.filter(a => !getTask(a.record.task.id));
     if (remaining.length) commitTemplates(remaining.map(a => a.record), remaining.map(a => a.id), false);
     const items = accepted.map(a => ({ taskId: a.record.task.id, status: a.record.task.status }));
-    if (items.length && !operation.stopped && options.startQueue !== false) { runtime.paused = false; wakeQueue(); }
-    if (failure || errors.length) throw new Error(`已确认发送 ${accepted.length}/${selected.length} 条。未发送 ${errors.filter(e => e.phase === "prepare").length} 条，接收待核对 ${errors.filter(e => e.phase === "receipt").length} 条，已接收但确认异常 ${errors.filter(e => e.phase === "confirmation").length} 条，平台拒绝 ${errors.filter(e => e.phase === "platform").length} 条。${dispatchBlocked || failure?.message || errors[0].message}；各条失败原因已保存，其余草稿记录已保留`);
+    if (items.length && !operation.stopped && !options.sendOnly && options.startQueue !== false) { runtime.paused = false; wakeQueue(); }
+    if (failure || errors.length) throw new Error(`已确认发送 ${accepted.length}/${requested.length} 条。未发送 ${errors.filter(e => e.phase === "prepare").length} 条，接收待核对 ${errors.filter(e => e.phase === "receipt").length} 条，任务保存异常 ${errors.filter(e => e.phase === "commit").length} 条。${failure?.message || errors[0].message}；各条失败原因已保存，其余草稿记录已保留`);
     return { items, count: items.length, instanceId: inst.id, instanceName: inst.name };
   });
 }

@@ -462,9 +462,13 @@
     return accepted.size === 1 ? { ok: true, conversationUrl: location.href, userMessageId: Array.from(accepted)[0], bindings: snapshot() } : { ok: false };
   };
   api.waitNativeDraftAccepted = result(async function (options) {
-    return await wait(function () {
+    var deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
       var receipt = api.readNativeDraftReceipt(options);
-      return receipt.ok && receipt;
-    }, "尚未确认豆包接收本条草稿，请核对最近任务；不会自动重发", Date.now() + 120000);
+      if (receipt.ok) return receipt;
+      if (Array.from(document.querySelectorAll('iframe[src*="/verifycenter/captcha"]')).some(visible)) deadline = Date.now() + 120000;
+      await new Promise(function (resolve) { setTimeout(resolve, 250); });
+    }
+    throw new Error("尚未确认豆包接收本条草稿，请核对最近任务；不会自动重发");
   });
 })();

@@ -1,8 +1,8 @@
 # 豆包工坊
 
-Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、JavaScript 和 Python 构建。当前源码版本为 **1.5.16**，公开安装包版本以 Releases 为准。
+Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、JavaScript 和 Python 构建。当前源码版本为 **1.5.17**，公开安装包版本以 Releases 为准。
 
-1.5.16 在每条草稿收到豆包的精确接收回执后，立即将任务持久化并从草稿箱移除，不再等整批结束；未发送和接收待核对的草稿保留。草稿保存改为核对账号、完整编号、正文和工作模式，不依赖侧栏新增节点数量；保存结果待核对时可点击 ① 只核对原生记录，确认已保存后恢复状态，不重复存入。新任务和新存入网页的草稿在提示词首行自动加入完整的 `[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)`，已填写相同整行时不会重复。
+1.5.17 将草稿批量发送与生成确认分开：所选草稿逐条提交，收到接收回执即移出草稿箱并标记“已发送”，不会等待或自动回复生成确认。发送结果待核对的旧记录保留，但不再禁用其他可发送草稿。提示词首行统一包含完整 Seedance 2.5 技能链接。
 
 1.5.15 修复批量草稿已接收却持续等待确认的问题：识别当前回复的原生失败图标及明确错误状态，遇到额度或平台失败停止本批后续投递并保留草稿；最多保留 6 个投递页面，等待回执和确认期间保持原会话，不再每 30 秒刷新。草稿选中状态丢失时按原生 ID 重新定位，停止后的已接收任务不再自动恢复。空白流式回复仍保留待核对状态，不推断成功或失败，也不自动重发。
 
@@ -22,7 +22,7 @@ Windows / macOS 桌面应用，支持本机浏览器入口，使用 Electron、J
 
 | 系统 | 安装包 | 安装方式 |
 | --- | --- | --- |
-| Windows x64 | `DoubaoWorkshop-1.5.16-Setup.exe` | 双击安装，通过桌面「豆包工坊」或「豆包工坊 网页版」启动 |
+| Windows x64 | `DoubaoWorkshop-1.5.17-Setup.exe` | 双击安装，通过桌面「豆包工坊」或「豆包工坊 网页版」启动 |
 | macOS 13+，Apple 芯片 | 最新 Release 中已验收的 `mac-arm64.dmg` | 打开镜像，将应用拖入 Applications |
 | macOS 13+，Intel | 最新 Release 中已验收的 `mac-x64.dmg` | 打开镜像，将应用拖入 Applications |
 
@@ -35,7 +35,7 @@ Mac 包使用临时签名，**尚未经过 Apple Developer ID 签名和公证**�
 发行附件中的 `SHA256SUMS.txt` 用于校验下载文件。在 PowerShell 中运行：
 
 ```powershell
-Get-FileHash .\DoubaoWorkshop-1.5.16-Setup.exe -Algorithm SHA256
+Get-FileHash .\DoubaoWorkshop-1.5.17-Setup.exe -Algorithm SHA256
 ```
 
 新安装默认使用 `%LOCALAPPDATA%\Programs\豆包工坊`。升级已有版本会沿用原安装位置和用户数据目录，保留账号、会话、任务、素材和设置。

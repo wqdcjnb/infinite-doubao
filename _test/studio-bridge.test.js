@@ -100,7 +100,7 @@ test('native adapter creates persistent real draft binding then submits same dra
   assert.equal(imported.receipt.nativeBinding.nativeId,'real-native-1');
   assert.equal(calls.filter(c=>c.method==='saveNativeDraft').length,1);
   const sent=await adapter.execute({...nativeOperation('send'),id:'send1',payload:{account:{id:'account1',name:'测试账号'},tasks:[nativeOperation().payload.task]}});
-  assert.equal(sent.receipt.tasks[0].status,'submitted');assert.equal(sent.receipt.tasks[0].taskId,'task1');assert.equal(sent.receipt.tasks[0].confirmed,true);
+  assert.equal(sent.receipt.tasks[0].status,'submitted');assert.equal(sent.receipt.tasks[0].taskId,'task1');assert.equal(sent.receipt.tasks[0].confirmed,false);
   const local=queue.getTask(sent.receipt.tasks[0].localTaskId);assert.equal(local.studioTaskId,'task1');assert.equal(local.conversationUrl,'https://www.doubao.com/chat/real1');
   const recovered=await adapter.recover({...nativeOperation('send'),payload:{account:{id:'account1',name:'测试账号'},tasks:[nativeOperation().payload.task]}});
   assert.equal(recovered.receipt.tasks[0].localTaskId,local.id);assert.equal(calls.filter(c=>c.method==='sendNativeDraft').length,1);
