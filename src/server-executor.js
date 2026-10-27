@@ -33,8 +33,10 @@ class NativeAdapter {
   }
   observationWindow(accountId) {
     const page=this.importPages.get(accountId);
-    if(!page||page.window.isDestroyed?.())return;
-    try {page.check();return page;} catch {return;}
+    if(page&&!page.window.isDestroyed?.()){try {page.check();return page;}catch {return;}}
+    const retained=this.deliveryPages.retained.get(accountId);
+    if(!retained||retained.driver.window.isDestroyed?.()||retained.executorSessionId!==this.sessionId||retained.environmentVersion!==retained.instance.studioEnvironment?.version)return;
+    return {instance:retained.instance,window:retained.driver.window,interactive:true,check:()=>{if(retained.driver.window.isDestroyed?.())throw Error('retained human page closed');}};
   }
   account(op) {
     if(op.payload?.account?.id!==op.accountId)throw new Error('account identity mismatch');
@@ -370,7 +372,7 @@ async function start() {
       pages.add(win);const close=()=>{if(!win.isDestroyed())win.destroy();};
       win.on('closed',()=>{pages.delete(win);signal?.removeEventListener('abort',close);});signal?.addEventListener('abort',close,{once:true});
       win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
-      try {await win.loadURL('about:blank');await environment.prepareStudioWindow(win,inst);await win.loadURL(store.DEFAULT_URL);const instanceDriver=await driver.open(inst,{webContents:win.webContents});instanceDriver.window=win;instanceDriver.close=close;return instanceDriver;} catch(error){close();throw error;}
+      try {await win.loadURL('about:blank');await environment.prepareStudioWindow(win,inst);await win.loadURL(store.DEFAULT_URL);const instanceDriver=await driver.open(inst,{webContents:win.webContents});instanceDriver.window=win;instanceDriver.close=close;instanceDriver.preserve=()=>signal?.removeEventListener('abort',close);instanceDriver.resumeAutoClose=()=>{if(signal?.aborted)return false;signal?.addEventListener('abort',close,{once:true});return true;};return instanceDriver;} catch(error){close();throw error;}
     },findWebContents:inst=>accounts.find(inst)});
   queue.recoverTemplateTasks();queue.pause('');
   const journal=new Journal(path.join(cfg.stateDir,'studio-journal.json')),client=new StudioClient(cfg);

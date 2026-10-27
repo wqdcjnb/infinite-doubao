@@ -4,6 +4,7 @@ const {Driver}=require('./driver');
 const LOGIN_URL='https://www.doubao.com/chat/';
 const KEY_CODES={Enter:13,Tab:9,Backspace:8,Escape:27,Delete:46,ArrowLeft:37,ArrowRight:39,ArrowUp:38,ArrowDown:40,Home:36,End:35,PageUp:33,PageDown:34};
 const MODIFIERS={Alt:1,Control:2,Meta:4,Shift:8};
+const BUTTONS={left:1,right:2,middle:4,none:0};
 
 // Inspect the visible official dialog before clicking: reloading would discard a QR/OTP challenge.
 const LOGIN_SCRIPT=`(() => {
@@ -19,7 +20,7 @@ const LOGIN_SCRIPT=`(() => {
 class StudioControl {
   constructor({client,adapter,accounts=adapter.accounts,decryptInput,onError=()=>{}}) {
     this.client=client;this.adapter=adapter;this.accounts=accounts;this.decryptInput=decryptInput;this.onError=onError;
-    this.session=null;this.closedSessions=new Set();this.framePublishing=false;this.ackPublishing=false;
+    this.session=null;this.closedSessions=new Set();this.framePublishing=false;this.ackPublishing=false;this.inputReleases=new WeakMap();
   }
   async run(signal) {
     if(this.controller)throw Error('control runner already started');
@@ -87,13 +88,13 @@ class StudioControl {
       this.closeSession(ctx);
       ctx={id:descriptor.id,accountId:descriptor.accountId,version:descriptor.account.environment.version,expiresAt:descriptor.expiresAt,
         target:target?{kind:'delivery',operationId:target.operationId,batchId:target.batchId}:null,targetKey,
-        abort:new AbortController(),queue:[],seen:new Map(),acknowledgements:[],connected:true,loginState:'unknown',buttons:0,keys:new Set(),lastProbe:0,captureFailures:0};
+        abort:new AbortController(),queue:[],seen:new Map(),acknowledgements:[],connected:true,loginState:'unknown',buttons:0,keys:new Set(),keyEvents:new Map(),lastProbe:0,captureFailures:0};
       this.session=ctx;
       if(ctx.target) {
         ctx.ready=Promise.resolve().then(()=>{this.check(ctx);this.capture(ctx);return ctx.win;}).catch(()=>{if(this.session===ctx)this.reportError(ctx,'当前没有可用的原发送页，请核对发送状态');return null;});
       } else {
         try {ctx.inst=this.adapter.account({kind:'account',accountId:ctx.accountId,payload:{account:descriptor.account}});} catch(error) {this.closeSession(ctx);throw error;}
-        ctx.ready=Promise.resolve().then(()=>{this.check(ctx);return this.accounts.open(ctx.inst.id);}).then(win=>{
+        ctx.ready=Promise.resolve().then(()=>{this.check(ctx);const retained=this.adapter.observationWindow?.(ctx.accountId);if(retained?.interactive){if(retained.instance.id!==ctx.inst.id)throw Error('human page account mismatch');retained.check?.();return retained.window;}return this.accounts.open(ctx.inst.id);}).then(win=>{
           this.check(ctx);ctx.accountWin=win;ctx.win=win;ctx.closed=()=>this.closeSession(ctx);win.on('closed',ctx.closed);
           this.capture(ctx);return win;
         }).catch(()=>{if(this.session===ctx)this.reportError(ctx,'账号页面打开失败，请检查账号环境后重新连接');return null;});
@@ -107,7 +108,7 @@ class StudioControl {
       // Mark delivery before awaiting any browser work; no retry path replays an input.
       ctx.seen.set(command.id,command.expiresAt);
       if(command.expiresAt<=Date.now()) {if(!ctx.target||this.matchesDeliveryBinding(ctx,command))this.resetHeld(ctx);if(this.session!==ctx)return;this.ack(ctx,{id:command.id,ok:false,error:'操作已过期，请重新操作'});continue;}
-      if(ctx.queue.length>=32) {this.closeSession(ctx);return;}
+      if(ctx.queue.length>=128) {this.ack(ctx,{id:command.id,ok:false,error:'输入队列繁忙'});continue;}
       ctx.queue.push(command);
     }
     this.drain(ctx);
@@ -117,8 +118,8 @@ class StudioControl {
     if(ctx.target)this.bindDelivery(ctx);
     else if(ctx.accountWin) {
       const page=this.adapter.observationWindow?.(ctx.accountId);
-      if(page&&(page.instance.id!==ctx.inst.id||ctx.buttons||ctx.keys.size))throw Error('自动处理页不能接收人工输入');
-      ctx.observingImport=Boolean(page);
+      if(page&&(page.instance.id!==ctx.inst.id||!page.interactive&&(ctx.buttons||ctx.keys.size)))throw Error('自动处理页不能接收人工输入');
+      ctx.observingImport=Boolean(page&&!page.interactive);
       ctx.win=page?.window||ctx.accountWin;
     }
     if(ctx.inst?.studioEnvironment?.version!==ctx.version||ctx.win?.isDestroyed?.()||ctx.win?.webContents.isDestroyed?.())throw Error('控制会话已断开或过期，请重新连接');
@@ -145,13 +146,32 @@ class StudioControl {
     if(ctx.closed&&(ctx.accountWin||ctx.win))(ctx.accountWin||ctx.win).removeListener('closed',ctx.closed);
     if(this.session===ctx)this.session=null;
     this.resetHeld(ctx);
-    if(ctx.entry)ctx.entry.manual=false;
+    if(ctx.entry?.manual)ctx.entry.keepOpen=true;
   }
   resetHeld(ctx) {
-    const held=ctx.buttons||ctx.keys.size;ctx.buttons=0;ctx.keys.clear();ctx.heldBinding=null;
-    // Mouseup can click a captured button even offscreen. Discard the old page instead.
-    if(held&&ctx.target)ctx.entry?.cancel(Error('captcha input disconnected'));
-    else if(held&&ctx.win&&!ctx.win.isDestroyed?.())ctx.win.destroy();
+    if((ctx.buttons||ctx.keys.size)&&ctx.win&&!ctx.win.isDestroyed?.()) {
+      const win=ctx.win,buttons=ctx.buttons,pointer=ctx.pointer,keys=[...ctx.keys].map(code=>ctx.keyEvents.get(code)||{code,key:code});
+      const state=this.inputReleases.get(win)||{win,pending:[],running:false};if(ctx.entry)state.entry=ctx.entry;
+      if(buttons&&pointer)for(const [button,bit] of Object.entries(BUTTONS))if(buttons&bit)state.pending.push(['Input.dispatchMouseEvent',{...pointer,type:'mouseReleased',button,buttons:0,clickCount:0}]);
+      for(const value of keys)state.pending.push(['Input.dispatchKeyEvent',{key:value.key,code:value.code,...(Number.isFinite(value.windowsVirtualKeyCode)?{windowsVirtualKeyCode:value.windowsVirtualKeyCode}:{}),type:'keyUp',modifiers:0}]);
+      this.inputReleases.set(win,state);this.flushHeld(state);
+      if(ctx.entry){ctx.entry.manual=true;ctx.entry.keepOpen=true;}
+    }
+    ctx.buttons=0;ctx.keys.clear();ctx.keyEvents.clear();ctx.heldBinding=null;
+  }
+  flushHeld(state) {
+    if(state.running)return state.promise;
+    state.running=true;
+    state.promise=(async()=>{
+      try {while(state.pending.length&&!state.win.isDestroyed?.()&&!state.win.webContents.isDestroyed?.()){await state.win.webContents.debugger.sendCommand(...state.pending[0]);state.pending.shift();}}
+      catch {this.onError('control-input-release-failed');}
+      finally {state.running=false;if(!state.pending.length&&state.entry)state.entry.inputHeld=false;}
+    })();
+    return state.promise;
+  }
+  async releaseHeld(ctx,command) {
+    this.check(ctx,command);const state=this.inputReleases.get(ctx.win);if(!state)return;
+    await this.flushHeld(state);this.check(ctx,command);if(state.pending.length)throw Error('remote input release pending');
   }
   async drain(ctx) {
     if(ctx.draining)return;ctx.draining=true;
@@ -159,7 +179,7 @@ class StudioControl {
       await ctx.ready;
       while(this.session===ctx&&ctx.queue.length) {
         const command=ctx.queue.shift();let acknowledgement={id:command.id,ok:true};
-        try {this.check(ctx,command);await this.execute(ctx,command);this.check(ctx,command);} catch(error) {
+        try {this.check(ctx,command);await this.releaseHeld(ctx,command);await this.execute(ctx,command);this.check(ctx,command);} catch(error) {
           if(error.code!=='STALE_DELIVERY_COMMAND')this.resetHeld(ctx);
           acknowledgement={id:command.id,ok:false,error:/登录|过期|断开/.test(error.message)?error.message:'操作失败，请检查当前画面后手动重试'};
         }
@@ -169,7 +189,7 @@ class StudioControl {
   }
   matchesDeliveryBinding(ctx,command) {
     const binding=command.binding;
-    return Boolean(ctx.entry&&binding&&binding.taskId===ctx.entry.taskId&&binding.pageId===ctx.entry.pageId&&binding.captchaId===ctx.entry.captcha?.id);
+    return Boolean(ctx.entry&&binding&&binding.taskId===ctx.entry.taskId&&binding.pageId===ctx.entry.pageId);
   }
   checkHeldDelivery(ctx) {
     if(ctx.target&&(ctx.buttons||ctx.keys.size)&&ctx.heldBinding&&!this.matchesDeliveryBinding(ctx,{binding:ctx.heldBinding})) {
@@ -179,7 +199,7 @@ class StudioControl {
   async execute(ctx,command) {
     if(ctx.target) {
       this.check(ctx,command);this.checkHeldDelivery(ctx);
-      if(['captcha_takeover','observe','input'].includes(command.action)) {
+      if(['captcha_takeover','observe','input','release_input'].includes(command.action)) {
         if(!this.matchesDeliveryBinding(ctx,command)) {
           const error=Error('stale delivery command');error.code='STALE_DELIVERY_COMMAND';throw error;
         }
@@ -188,27 +208,35 @@ class StudioControl {
         if(ctx.buttons||ctx.keys.size) {this.resetHeld(ctx);throw Error('unsafe captcha input state');}
         return ctx.entry.takeover(command.binding);
       }
-      if(command.action==='observe') {const entry=ctx.entry;await entry.observe(command.binding);this.resetHeld(ctx);return;}
+      if(command.action==='observe') {this.resetHeld(ctx);await this.releaseHeld(ctx,command);return ctx.entry.observe(command.binding);}
+      if(command.action==='release_input'){if(!ctx.entry.manual)throw Error('human takeover required');this.resetHeld(ctx);return this.releaseHeld(ctx,command);}
       if(!['open','frame','input'].includes(command.action))throw Error('active delivery navigation is not allowed');
     }
+    if(command.action==='release_input'){this.resetHeld(ctx);return this.releaseHeld(ctx,command);}
     if(command.action==='input')return this.input(ctx,command,this.decryptInput(command.inputEncrypted,this.client.token));
     if(command.action==='navigate')return this.openLogin(ctx,command);
     if(!['open','frame'].includes(command.action))throw Error('unsupported control action');
   }
   async send(ctx,command,method,value) {
     this.check(ctx,command);const wc=ctx.win.webContents;
-    if(!ctx.target&&this.adapter.observationWindow?.(ctx.accountId))throw Error('自动处理页不能接收人工输入');
+    const observation=!ctx.target&&this.adapter.observationWindow?.(ctx.accountId);
+    if(observation&&!observation.interactive)throw Error('自动处理页不能接收人工输入');
+    const activeEntry=ctx.target?ctx.entry:null;if(activeEntry)activeEntry.inputInFlight++;
+    try {
     if(ctx.target) {
       const entry=ctx.entry;await entry.assertInput(command.binding,method,value);this.check(ctx,command);
       if(ctx.entry!==entry||ctx.win.webContents!==wc)throw Error('delivery page identity changed');
     }
-    if(method==='Input.dispatchMouseEvent'&&value.type==='mousePressed')ctx.buttons=1;
-    if(method==='Input.dispatchKeyEvent'&&value.type==='keyDown')ctx.keys.add(value.code);
+    if(method==='Input.dispatchMouseEvent'){ctx.pointer={x:value.x,y:value.y};if(value.type==='mousePressed')ctx.buttons|=BUTTONS[value.button]||0;}
+    if(method==='Input.dispatchKeyEvent'&&value.type==='keyDown'){ctx.keys.add(value.code);ctx.keyEvents.set(value.code,value);}
     if(ctx.target&&(ctx.buttons||ctx.keys.size))ctx.heldBinding={...command.binding};
+    if(ctx.entry)ctx.entry.inputHeld=Boolean(ctx.buttons||ctx.keys.size);
     await wc.debugger.sendCommand(method,value);
-    if(method==='Input.dispatchMouseEvent'&&value.type==='mouseReleased')ctx.buttons=0;
-    if(method==='Input.dispatchKeyEvent'&&value.type==='keyUp')ctx.keys.delete(value.code);
+    if(method==='Input.dispatchMouseEvent'&&value.type==='mouseReleased')ctx.buttons&=~(BUTTONS[value.button]||0);
+    if(method==='Input.dispatchKeyEvent'&&value.type==='keyUp'){ctx.keys.delete(value.code);ctx.keyEvents.delete(value.code);}
     if(!ctx.buttons&&!ctx.keys.size)ctx.heldBinding=null;
+    if(ctx.entry)ctx.entry.inputHeld=Boolean(ctx.buttons||ctx.keys.size);
+    } finally {if(activeEntry)activeEntry.inputInFlight--;}
   }
   coordinates(ctx,input) {
     if(![input.x,input.y].every(value=>Number.isFinite(value)&&value>=0&&value<=1))throw Error('invalid pointer coordinates');
@@ -221,15 +249,15 @@ class StudioControl {
       return this.send(ctx,command,'Input.insertText',{text:input.text});
     }
     if(input.kind==='click'||input.kind==='pointer') {
-      const point=this.coordinates(ctx,input),value={...point,button:'left',clickCount:1};
-      if(input.button&&input.button!=='left')throw Error('invalid pointer button');
+      const point=this.coordinates(ctx,input),button=input.button||'left',modifiers=input.modifiers||[],value={...point,button,clickCount:input.clickCount===2?2:1,modifiers:modifiers.reduce((bits,key)=>bits|(MODIFIERS[key]||0),0)};
+      if(!Object.hasOwn(BUTTONS,button))throw Error('invalid pointer button');
       if(input.kind==='click') {
         await this.send(ctx,command,'Input.dispatchMouseEvent',{...value,type:'mousePressed',buttons:1});
         await this.send(ctx,command,'Input.dispatchMouseEvent',{...value,type:'mouseReleased',buttons:0});return;
       }
       if(!['down','move','up'].includes(input.phase))throw Error('invalid pointer phase');
       const type={down:'mousePressed',move:'mouseMoved',up:'mouseReleased'}[input.phase];
-      return this.send(ctx,command,'Input.dispatchMouseEvent',{...value,type,buttons:input.phase==='down'?1:input.phase==='up'?0:ctx.buttons});
+      return this.send(ctx,command,'Input.dispatchMouseEvent',{...value,type,buttons:input.phase==='down'?ctx.buttons|BUTTONS[button]:input.phase==='up'?ctx.buttons&~BUTTONS[button]:ctx.buttons});
     }
     if(input.kind==='scroll') {
       if(![input.deltaX,input.deltaY].every(value=>Number.isSafeInteger(value)&&Math.abs(value)<=4000))throw Error('invalid scroll delta');
@@ -239,9 +267,11 @@ class StudioControl {
     if(input.kind==='key') {
       const modifiers=input.modifiers??[];
       if(!Array.isArray(modifiers)||modifiers.length>4||new Set(modifiers).size!==modifiers.length||modifiers.some(value=>!Object.hasOwn(MODIFIERS,value)))throw Error('invalid key modifiers');
-      const letter=typeof input.key==='string'&&/^[a-z]$/i.test(input.key),keyCode=Object.hasOwn(KEY_CODES,input.key)?KEY_CODES[input.key]:(letter&&modifiers.length?input.key.toUpperCase().charCodeAt(0):0);
+      const physical=['down','up'].includes(input.phase)&&typeof input.code==='string'&&/^[A-Za-z0-9]{1,40}$/.test(input.code)&&Number.isInteger(input.keyCode)&&input.keyCode>=0&&input.keyCode<=255;
+      const letter=typeof input.key==='string'&&/^[a-z]$/i.test(input.key),keyCode=physical?input.keyCode:Object.hasOwn(KEY_CODES,input.key)?KEY_CODES[input.key]:(letter&&modifiers.length?input.key.toUpperCase().charCodeAt(0):0);
       if(!keyCode)throw Error('unsupported control key');
-      const value={key:input.key,code:letter?'Key'+input.key.toUpperCase():input.key,windowsVirtualKeyCode:keyCode,modifiers:modifiers.reduce((bits,value)=>bits|MODIFIERS[value],0)};
+      const value={key:input.key,code:physical?input.code:letter?'Key'+input.key.toUpperCase():input.key,windowsVirtualKeyCode:keyCode,modifiers:modifiers.reduce((bits,value)=>bits|MODIFIERS[value],0)};
+      if(physical)return this.send(ctx,command,'Input.dispatchKeyEvent',{...value,type:input.phase==='down'?'keyDown':'keyUp',...(input.phase==='down'&&input.key==='Enter'&&!modifiers.length?{text:'\r',unmodifiedText:'\r'}:{})});
       await this.send(ctx,command,'Input.dispatchKeyEvent',{...value,type:'keyDown',...(input.key==='Enter'&&!modifiers.length?{text:'\r',unmodifiedText:'\r'}:{})});
       await this.send(ctx,command,'Input.dispatchKeyEvent',{...value,type:'keyUp'});return;
     }
@@ -299,7 +329,7 @@ class StudioControl {
     }
   }
   ack(ctx,value) {
-    if(ctx.acknowledgements.length>=64) {this.closeSession(ctx);return;}
+    if(ctx.acknowledgements.length>=128) {this.reportError(ctx,'操作回执积压');return;}
     ctx.acknowledgements.push(value);this.flushAcknowledgements();
   }
   reportError(ctx,error) {if(this.session===ctx) {ctx.error=error;this.flushAcknowledgements();}}

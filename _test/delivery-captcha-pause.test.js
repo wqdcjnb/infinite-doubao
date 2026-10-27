@@ -10,7 +10,7 @@ async function fixture(t,receipt) {
     let current='',closed=false;
     const close=()=>{if(closed)return;closed=true;events.push({type:'close',id:current});signal?.removeEventListener('abort',close);};
     signal?.addEventListener('abort',close,{once:true});
-    const d={window:{isDestroyed:()=>closed},webContents:{isDestroyed:()=>closed},close,isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),setText:async()=>({ok:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),
+    const d={window:{isDestroyed:()=>closed},webContents:{isDestroyed:()=>closed},close,preserve:()=>signal?.removeEventListener('abort',close),isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),setText:async()=>({ok:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),
       call:async(method,value={})=>{
         if(method==='readNativeDrafts')return {ok:true,source:'indexeddb',accountScope:'scope',items:[...catalog.values()]};
         if(method==='saveNativeDraft') {const b={id:value.id,nativeId:'native-'+value.id,accountScope:'scope',prompt:value.prompt,executionMode:'work',index:catalog.size,titles:[...catalog.keys(),value.id]};catalog.set(value.id,b);return {ok:true,bindings:[b]};}
@@ -35,6 +35,29 @@ test('sender exposes and releases its exact page before advancing, while accepta
   assert.deepEqual(registered.map(p=>p.id),f.ids);assert.equal(new Set(registered.map(p=>p.driver)).size,3);assert.deepEqual(released,f.ids);
   for(const id of f.ids)assert.ok(f.events.findIndex(e=>e.type==='release'&&e.id===id)<f.events.findIndex(e=>e.type==='close'&&e.id===id));
   assert.deepEqual(f.sent,f.ids);assert.ok(store.get().tasks.every(task=>task.receiptUserMessageId&&!task.generationObservedAt));
+});
+
+test('manual takeover holds the received page and prevents the next send until explicit resume',async t=>{
+  const f=await fixture(t);let release,entered=false;const hold=new Promise(resolve=>{release=resolve;});
+  const sending=queue.submitDrafts(f.ids,{...f.options,onDeliveryPage:({draft})=>({captchaSeen:false,setStage:()=>{},close:()=>{},waitForResume:async()=>{if(draft.id===f.ids[0]){entered=true;await hold;}}})});
+  try{for(let i=0;i<100&&!entered;i++)await new Promise(resolve=>setImmediate(resolve));assert.equal(entered,true);assert.deepEqual(f.sent,[f.ids[0]]);assert.ok(!f.events.some(e=>e.type==='close'));}
+  finally{release();await sending;}assert.deepEqual(f.sent,f.ids);
+});
+
+test('human takeover before preparation does not spend the automatic preparation timeout',async t=>{
+  const f=await fixture(t);let release,entered=false;
+  const hold=new Promise(resolve=>{release=resolve;}),active=new Set(),set=global.setTimeout,clear=global.clearTimeout;
+  global.setTimeout=(run,ms,...args)=>{const timer=set(run,ms,...args);if(ms===120000)active.add(timer);return timer;};
+  global.clearTimeout=timer=>{active.delete(timer);return clear(timer);};
+  const sending=queue.submitDrafts(f.ids,{...f.options,onDeliveryPage:({draft})=>({setStage:()=>{},close:()=>{},runAutomation:async run=>{if(draft.id===f.ids[0]&&!entered){entered=true;await hold;}return run();}})});
+  try{for(let i=0;i<100&&!entered;i++)await new Promise(resolve=>setImmediate(resolve));assert.equal(entered,true);assert.equal(active.size,0,'manual wait must sit outside the 120 second automatic timer');assert.equal(f.sent.length,0);}
+  finally{release();await sending;global.setTimeout=set;global.clearTimeout=clear;}
+});
+
+test('an interrupted human page is retained while the unknown intent and unstarted drafts remain preserved',async t=>{
+  const f=await fixture(t,async()=>{throw Error('human input interrupted');});
+  await assert.rejects(queue.submitDrafts(f.ids,{...f.options,onDeliveryPage:()=>({captchaSeen:true,keepOpen:true,setStage:()=>{},close:()=>{}})}));
+  assert.deepEqual(f.sent,[f.ids[0]]);assert.equal(f.events.filter(e=>e.type==='close').length,0);assert.ok(drafts.list()[0].submissionRecord.task.submissionUncertain);
 });
 test('captcha receipt timeout preserves its send intent and halts every later draft without sending or refunding it',async t=>{
   const f=await fixture(t,async()=>{throw Error('captcha receipt timeout');}),pauses=[];

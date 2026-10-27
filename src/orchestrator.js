@@ -802,10 +802,10 @@ async function submitDrafts(ids, options = {}) {
         children.add(child);
         let driver, record, activity, issued = false, received = false, trackingReceipt = false;
         const checkDraft = () => { check(); child.controller.signal.throwIfAborted(); };
-        const cleanup = () => { activity?.close?.(); children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); };
+        const cleanup = () => { const keepOpen=activity?.keepOpen===true;if(keepOpen)driver?.preserve?.();activity?.close?.();children.delete(child);child.controller.abort(new Error("本条草稿核对已结束"));if(!keepOpen)driver?.close(); };
         const recordFailure = error => {
-          if (!received && (activity?.captchaSeen || error.code === "CAPTCHA_HANDOFF_INTERRUPTED")) deliveryPause = {
-            reason: error.code === "CAPTCHA_HANDOFF_INTERRUPTED" ? "manual_interrupted" : "captcha_wait_ended",
+          if ((!received && activity?.captchaSeen) || activity?.keepOpen || error.code === "CAPTCHA_HANDOFF_INTERRUPTED") deliveryPause = {
+            reason: activity?.keepOpen || error.code === "CAPTCHA_HANDOFF_INTERRUPTED" ? "manual_interrupted" : "captcha_wait_ended",
             taskId: draft.template.studioTaskId, draftId: draft.id,
             notStartedDraftIds: pending.slice(issued ? index + 1 : index).map(item => item.id)
           };
@@ -818,7 +818,7 @@ async function submitDrafts(ids, options = {}) {
         progress(`正在准备第 ${index + 1} 条`);
         try {
           checkDispatch();
-          const prepared = await draftStep(child, `第 ${index + 1} 条草稿准备`, async () => {
+          await draftStep(child, `第 ${index + 1} 条草稿页面`, async () => {
             driver = await deps.resolveDraftDriver(inst, { signal: child.controller.signal });
             if (child.controller.signal.aborted) driver.close();
             checkDraft();
@@ -828,6 +828,8 @@ async function submitDrafts(ids, options = {}) {
             if (login?.loggedIn !== true) throw new Error(login?.by === "login-button"
               ? `账号 ${inst.name} 的草稿页面仍显示登录入口，请在该账号页面确认登录后重试`
               : `账号 ${inst.name} 的草稿页面登录状态尚未加载完成，请等待页面加载或检查网络后重试`);
+          }, 120000);
+          const prepare = () => draftStep(child, `第 ${index + 1} 条草稿准备`, async () => {
             requirePage(await driver.call("restoreNativeDrafts", bindings.filter((b) => b.id === draft.id), catalog ? { catalog } : undefined));
             const pageOptions = { id: draft.id, prompt: draft.nativePrompt, executionMode: draft.executionMode };
             checkDispatch();
@@ -842,17 +844,20 @@ async function submitDrafts(ids, options = {}) {
             checkDraft();
             return { pageOptions, opened, record };
           }, 120000);
+          const prepared = await (activity?.runAutomation ? activity.runAutomation(prepare) : prepare());
           const { pageOptions, opened } = prepared;
           record = prepared.record;
-          checkDispatch();
-          record.task.submittedAt = new Date().toISOString();
-          drafts.updateMany({ [draft.id]: { nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
-          activity?.setStage?.("waiting_receipt");
-          // The durable intent precedes the click. Do not await this promise here.
-          const sent = driver.call("sendNativeDraft", pageOptions);
-          issued = true; launched++; trackingReceipt = true;
-          log.info("draft-dispatch-started", { draftBatchId, draftId: draft.id, instanceId: inst.id, index: index + 1, total: pending.length, preparationMs: Date.now() - preparingAt });
-          progress("已发起发送，后台核对回执");
+          let sent;
+          const dispatch = async () => {
+            checkDispatch();record.task.submittedAt = new Date().toISOString();
+            drafts.updateMany({ [draft.id]: { nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
+            activity?.setStage?.("waiting_receipt");
+            sent = driver.call("sendNativeDraft", pageOptions);issued = true;launched++;
+            log.info("draft-dispatch-started", { draftBatchId, draftId: draft.id, instanceId: inst.id, index: index + 1, total: pending.length, preparationMs: Date.now() - preparingAt });
+            progress("已发起发送，后台核对回执");return sent;
+          };
+          if(activity?.runAutomation)await activity.runAutomation(dispatch);else await dispatch();
+          trackingReceipt = true;
           await draftStep(child, "豆包接收回执", async () => {
             const clicked = await sent;
             if (!clicked?.ok) { issued = false; drafts.updateMany({ [draft.id]: { submissionRecord: null } }); requirePage(clicked); }
@@ -872,7 +877,7 @@ async function submitDrafts(ids, options = {}) {
             // other drafts or its generation reminder.
             commitTemplates([record], [draft.id], false);
             progress("后台已确认接收");
-          }, 15 * 60 * 1000).catch(recordFailure).finally(cleanup);
+          }, 15 * 60 * 1000).then(()=>activity?.waitForResume?.({receiptAccepted:true})).catch(recordFailure).finally(cleanup);
         } catch (error) { recordFailure(error); }
         finally { if (!trackingReceipt) cleanup(); }
       }
