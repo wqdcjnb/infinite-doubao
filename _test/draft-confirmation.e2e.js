@@ -53,7 +53,7 @@ app.whenReady().then(async () => {
   await call("setText", "");
   await evaluate(`window.reminder(${JSON.stringify(question)})`);
   const reminder = await call("peekGenerationConfirmation", expected);
-  assert.equal(reminder.ok, true); assert.equal(reminder.text, "按要求生成"); assert.equal(reminder.kind, "text");
+  assert.equal(reminder.ok, true); assert.equal(reminder.text, "按要求生成"); assert.equal(reminder.kind, "text"); assert.equal(reminder.nativeOnly, true);
   assert.equal((await call("setText", reminder.text)).ok, true);
   assert.equal((await call("peekGenerationConfirmation", expected)).key, reminder.key);
   // A missing/disabled send button must never fall through to the panel option.
@@ -68,6 +68,19 @@ app.whenReady().then(async () => {
   assert.equal(finalEvents.filter(e => e.type === "option-click").length, 0);
   report.checks.push("real contenteditable reply uses send button; zero confirmation-panel option clicks");
   report.checks.push("user input ignored; reminder identity stable; disabled/missing send button rejected");
+  for (const requestedReply of ["按方案生成", "开始生成"]) {
+    await evaluate("window.reset()");
+    const eventCount = (await evaluate("window.events")).length;
+    await call("beginTask", { taskId: "fixed-reply-" + requestedReply });
+    const followup = `方案已准备好，等待你确认。回来后回复 "${requestedReply}"，我就用 Seedance 2.5、30 秒、16:9 生成视频。`;
+    await evaluate(`(()=>{const node=document.createElement('div');node.dataset.messageRole='assistant';node.dataset.messageId='followup';node.textContent=${JSON.stringify(followup)};document.querySelector('#messages').append(node);})()`);
+    const candidate = await call("peekGenerationConfirmation", expected);
+    assert.equal(candidate.ok, true); assert.equal(candidate.kind, "text");
+    assert.equal(candidate.text, "按要求生成"); assert.equal(candidate.nativeOnly, true);
+    assert.equal((await call("peekGenerationConfirmation", expected)).key, candidate.key);
+    assert.equal((await evaluate("window.events")).length, eventCount);
+  }
+  report.checks.push("alternate requested reply phrases normalize to the same native conversation text without clicks");
   // Real work-task reminder: heading outside the composer, duplicate composer
   // ids, and a textarea whose send button mounts only after a React input turn.
   await evaluate(`(()=>{window.reset();
@@ -82,7 +95,7 @@ app.whenReady().then(async () => {
     }, 200));})()`);
   await call("beginTask", { taskId: "custom-reminder", resume: true, baselineMessageIds: [] });
   const custom = await call("peekGenerationConfirmation", expected);
-  assert.equal(custom.ok, true); assert.equal(custom.text, "按要求生成");
+  assert.equal(custom.ok, true); assert.equal(custom.text, "按要求生成"); assert.equal(custom.nativeOnly, true);
   assert.equal((await call("setText", custom.text)).kind, "input");
   assert.equal((await call("peekGenerationConfirmation", expected)).key, custom.key);
   const Driver = require('../src/driver').Driver;
@@ -91,6 +104,20 @@ app.whenReady().then(async () => {
   const customEvents = await evaluate("window.events.filter(e => e.type === 'custom-confirmation')");
   assert.deepEqual(customEvents, [{ type: 'custom-confirmation', text: '按要求生成' }]);
   report.checks.push("work section/textarea selected over normal editor; delayed native send appears and receives exactly one reply");
+  await evaluate(`(()=>{window.reset();
+    document.querySelectorAll('section').forEach(n=>n.remove());
+    const user=document.createElement('div'); user.dataset.messageRole='user'; user.dataset.messageId='receipt'; document.body.append(user);
+    const reply=document.createElement('div'); reply.dataset.messageRole='assistant'; reply.dataset.messageId='response'; document.body.append(reply);
+    reply.__reactFiber$fixture={memoizedProps:{message:{message_id:'response',status:4,final_status:{}}}};
+  })()`);
+  await call("beginTask", { taskId: "native-failure", resume: true, baselineMessageIds: ["receipt"] });
+  assert.equal((await call("readProgress")).state, "unknown");
+  await evaluate(`document.querySelector('[data-message-id="response"]').__reactFiber$fixture.memoizedProps.message.final_status.message='Timeout'`);
+  assert.equal((await call("readProgress")).errorCode, "platform_rejected");
+  await evaluate(`(()=>{const reply=document.querySelector('[data-message-id="response"]');reply.__reactFiber$fixture.memoizedProps.message.final_status={};reply.innerHTML='<span data-testid="message_box_failed_icon" style="display:inline-block;width:20px;height:20px">!</span>';})()`);
+  assert.equal((await call("readProgress")).errorCode, "platform_rejected");
+  assert.equal((await call("peekGenerationConfirmation", expected)).kind, undefined);
+  report.checks.push("empty streaming reply remains pending; current terminal timeout and native failure icon stop confirmation");
   report.passed = true;
 }).catch(error => { report.error = error.stack; }).finally(() => {
   if (win && !win.isDestroyed()) win.destroy();

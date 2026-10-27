@@ -52,3 +52,18 @@ test("云电脑标签先出现、富文本编辑器后挂载时，不能把过�
   const result = await api.prepareNativeDraft({ executionMode: "work" });
   assert.equal(result.ok, true, result.reason); assert.equal(current(), rich); assert.equal(now, 1500);
 });
+
+test("工作模式在打开选择器期间已切为云电脑时，不再等待不存在的菜单选项", async () => {
+  let now=0,started=false,selected=false;
+  const node=text=>({innerText:text,isConnected:true,getBoundingClientRect:()=>({width:600,height:100}),getAttribute:()=>null,dispatchEvent(){}});
+  const input={...node(''),value:''},mode=node('对话');
+  mode.click=()=>{selected=true;mode.innerText='云电脑';};
+  const entry={...node('新工作任务'),click(){started=true;mode.innerText='本机电脑';}};
+  const root={...node(''),querySelectorAll(selector){if(selector.includes('chat_input_action_mode'))return [mode];if(selector.includes('textarea'))return [input];return [];}};
+  const document={querySelectorAll(selector){if(selector==='#input-engine-container')return [root];if(selector.includes('menuitem'))return [];if(selector.includes('role="button"'))return [entry];return [];}};
+  class Clock extends Date{static now(){return now;}}
+  const context=vm.createContext({window:{auto:{}},CFG:{autoKey:'auto'},document,location:{pathname:'/chat/',href:'https://www.doubao.com/chat/'},Date:Clock,getComputedStyle:()=>({display:'block',visibility:'visible'}),MouseEvent:class{},PointerEvent:class{},setTimeout(fn,ms){now+=ms;queueMicrotask(fn);}});
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/page/generation-options.js'),'utf8'),context);
+  const result=await context.window.auto.prepareWorkTask();
+  assert.equal(result.ok,true,result.reason);assert.equal(started,true);assert.equal(selected,true);assert.ok(now<20000);
+});

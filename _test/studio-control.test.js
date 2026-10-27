@@ -63,6 +63,52 @@ function setup(t,options={}) {
   return {...browser,runner,client,adapter,waits,publishes,configured,abort,running,deliver,acks};
 }
 
+test('remote browser disconnect automatically lifts a held pointer and reconnect allows the next drag',async t=>{
+  const h=setup(t);await h.deliver(descriptor());
+  await h.deliver(descriptor(),[inputCommand('drag-down',{kind:'pointer',phase:'down',x:.2,y:.3})]);
+  await h.deliver(null);await flush();
+  assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased']);assert.equal(h.win.isDestroyed(),false);
+  await h.deliver(descriptor('session-2'),[inputCommand('next-down',{kind:'pointer',phase:'down',x:.3,y:.4}),inputCommand('next-up',{kind:'pointer',phase:'up',x:.6,y:.4})]);
+  assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased','mousePressed','mouseReleased']);
+  assert.equal(h.acks().find(a=>a.id==='next-up')?.ok,true);
+});
+
+test('remote browser forwards right double click and physical key down/up without making an extra key press',async t=>{
+  const h=setup(t);await h.deliver(descriptor(),[
+    inputCommand('right-down',{kind:'pointer',phase:'down',button:'right',clickCount:2,x:.2,y:.3}),
+    inputCommand('right-up',{kind:'pointer',phase:'up',button:'right',clickCount:2,x:.2,y:.3}),
+    inputCommand('f5-down',{kind:'key',phase:'down',key:'F5',code:'F5',keyCode:116,modifiers:[]}),
+    inputCommand('f5-up',{kind:'key',phase:'up',key:'F5',code:'F5',keyCode:116,modifiers:[]})]);
+  assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased','keyDown','keyUp']);assert.equal(h.events[0].value.button,'right');assert.equal(h.events[0].value.clickCount,2);
+});
+
+test('a failed automatic release is retried before any new press reaches the same remote window',async t=>{
+  const h=setup(t);let failures=2;
+  h.wc.debugger.sendCommand=async(method,value)=>{h.events.push({method,value});if(value.type==='mouseReleased'&&failures-->0)throw Error('temporary CDP failure');};
+  await h.deliver(descriptor(),[inputCommand('held',{kind:'pointer',phase:'down',x:.2,y:.3})]);await h.deliver(null);await flush();
+  await h.deliver(descriptor('reconnected'),[inputCommand('too-early',{kind:'click',x:.4,y:.5})]);
+  assert.equal(h.events.filter(e=>e.value.type==='mousePressed').length,1);
+  await h.deliver(descriptor('reconnected'),[inputCommand('after-release',{kind:'click',x:.4,y:.5})]);
+  assert.equal(h.acks().find(a=>a.id==='after-release')?.ok,true);assert.equal(h.events.filter(e=>e.value.type==='mousePressed').length,2);
+});
+
+test('two accepted 32-event batches survive a slow first input without closing the remote browser',async t=>{
+  const h=setup(t),blocked=deferred();let first=true;
+  h.wc.debugger.sendCommand=async(method,value)=>{h.events.push({method,value});if(first){first=false;await blocked.promise;}};
+  await h.deliver(descriptor(),Array.from({length:32},(_,i)=>inputCommand('batch-one-'+i,{kind:'text',text:'one-'+i})));
+  await h.deliver(descriptor(),Array.from({length:32},(_,i)=>inputCommand('batch-two-'+i,{kind:'text',text:'two-'+i})));
+  try{assert.ok(h.runner.session,'accepted event bursts must not close control');}finally{blocked.resolve();}
+  await until(()=>h.acks().length===64);assert.equal(h.events.length,64);assert.equal(h.events[32].value.text,'two-0');assert.equal(h.win.isDestroyed(),false);
+});
+
+test('slow acknowledgement upload does not close control while accepted input bursts finish',async t=>{
+  const held=deferred(),h=setup(t,{publish:body=>body.acknowledgements?.length?held.promise:Response.json({ok:true})});
+  try{
+    for(let batch=0;batch<3;batch++)await h.deliver(descriptor(),Array.from({length:32},(_,i)=>inputCommand('burst-'+batch+'-'+i,{kind:'text',text:'burst'})));
+    assert.ok(h.runner.session,'ack upload latency must not terminate remote input');assert.equal(h.events.length,96);
+  }finally{held.resolve(Response.json({ok:true}));await flush();}
+});
+
 test('continuous frames use the fixed control contract without repeatedly configuring the account',async t=>{
   const h=setup(t);await flush();assert.equal(h.configured.length,0);assert.equal(h.captures.length,0);
   await h.deliver(descriptor());await until(()=>h.captures.length>=3);
@@ -73,6 +119,38 @@ test('continuous frames use the fixed control contract without repeatedly config
   assert.ok(frames.length>=2);assert.equal(frames[0].contentType,'image/jpeg');assert.equal(frames[0].width,1000);assert.equal(frames[0].height,800);
   assert.equal(typeof frames[0].capturedAt,'number');assert.equal(frames[0].imageBase64,Buffer.from('jpeg-1').toString('base64'));
   await h.deliver(descriptor());assert.equal(h.configured.length,1);
+});
+
+test('account observation follows the real import page and returns to the account page without reopening or clicking',async t=>{
+  const processing=page(),h=setup(t);
+  let current={instance:{id:'local-account-1'},window:processing.win};
+  h.adapter.observationWindow=()=>current;
+  await h.deliver(descriptor());
+  await until(()=>processing.captures.length>=2);
+  assert.ok(h.publishes.filter(body=>body.frame).every(body=>body.frame.busy===true));
+  assert.equal(h.captures.length,0);assert.deepEqual(processing.events,[]);assert.deepEqual(processing.loads,[]);assert.deepEqual(processing.scripts,[]);
+  await h.deliver(descriptor(),[inputCommand('during-import',{kind:'text',text:'must not reach the importer'})]);
+  assert.equal(h.acks().find(a=>a.id==='during-import')?.ok,false);assert.deepEqual(processing.events,[]);
+  current=undefined;
+  await until(()=>h.captures.length>=1);
+  await until(()=>h.publishes.some(body=>body.frame&&body.frame.busy===false));
+  assert.equal(processing.win.isDestroyed(),false);
+  await h.deliver(null);assert.equal(h.win.isDestroyed(),false);assert.equal(h.win.listenerCount('closed'),0);
+});
+
+test('disconnecting an import observer detaches its account listener and leaves both existing windows alive',async t=>{
+  const processing=page(),h=setup(t);
+  h.adapter.observationWindow=()=>({instance:{id:'local-account-1'},window:processing.win});
+  await h.deliver(descriptor());await until(()=>processing.captures.length>0);
+  await h.deliver(null);
+  assert.equal(h.win.listenerCount('closed'),0);
+  assert.equal(h.win.isDestroyed(),false);assert.equal(processing.win.isDestroyed(),false);
+  assert.deepEqual(processing.events,[]);
+});
+test('a retained human page remains fully interactive after reopening the account view',async t=>{
+  const retained=page(),h=setup(t,{open:async()=>{throw Error('auxiliary main page unavailable');}});h.adapter.observationWindow=()=>({instance:{id:'local-account-1'},window:retained.win,interactive:true});
+  await h.deliver(descriptor());await h.deliver(descriptor(),[inputCommand('click-retained',{kind:'click',x:.2,y:.3}),inputCommand('key-retained',{kind:'key',key:'Tab'})]);
+  assert.deepEqual(retained.events.map(e=>e.value.type),['mousePressed','mouseReleased','keyDown','keyUp']);assert.equal(retained.win.isDestroyed(),false);assert.equal(h.events.length,0);
 });
 
 test('first compositor capture failure recovers on the next tick without publishing a fatal error',async t=>{
@@ -173,59 +251,59 @@ test('a session switch fences each step of an in-flight click before it can reac
   await h.deliver(descriptor(),[inputCommand('old-click',{kind:'click',x:0.25,y:0.5})]);
   assert.equal(h.events.length,1);await h.deliver(descriptor('session-2','account-2'));
   blocked.resolve();await flush();assert.equal(h.configured.length,2);
-  assert.equal(h.win.isDestroyed(),true);assert.equal(h.events.length,1);
+  assert.equal(h.win.isDestroyed(),false);assert.equal(h.events.length,2);
   await h.deliver(descriptor('session-1'),[inputCommand('late-old',{kind:'text',text:'stale'})]);
-  assert.equal(h.events.length,1);assert.equal(h.configured.length,2);
+  assert.equal(h.events.length,2);assert.equal(h.events[1].value.type,'mouseReleased');assert.equal(h.configured.length,2);
 });
 
-test('closing a held drag destroys only its old window without synthesizing a release or click',async t=>{
+test('closing a held drag preserves only its old window and automatically lifts the old pointer without replaying a click',async t=>{
   const h=setup(t);await h.deliver(descriptor(),[inputCommand('drag-down',{kind:'pointer',phase:'down',x:0.2,y:0.3})]);
   await h.deliver(null);await flush();
-  assert.equal(h.win.isDestroyed(),true);assert.equal(h.events.length,1);assert.equal(h.win.listenerCount('closed'),0);
+  assert.equal(h.win.isDestroyed(),false);assert.equal(h.events.length,2);assert.equal(h.events[1].value.type,'mouseReleased');assert.equal(h.win.listenerCount('closed'),0);
 });
 
 test('a new session opens a fresh window after a held drag while old input cannot reach it',async t=>{
   const old=page(),fresh=page();let opened=0;const h=setup(t,{browser:old,open:async()=>++opened===1?old.win:fresh.win});
   await h.deliver(descriptor(),[inputCommand('drag-down',{kind:'pointer',phase:'down',x:0.2,y:0.3})]);
   await h.deliver(descriptor('session-2'),[inputCommand('new-click',{kind:'click',x:0.4,y:0.5})]);
-  assert.equal(old.win.isDestroyed(),true);assert.equal(fresh.win.isDestroyed(),false);assert.equal(old.events.length,1);
+  assert.equal(old.win.isDestroyed(),false);assert.equal(fresh.win.isDestroyed(),false);assert.equal(old.events.length,2);assert.equal(old.events[1].value.type,'mouseReleased');
   assert.deepEqual(fresh.events.map(item=>[item.value.type,item.value.x,item.value.y]),[['mousePressed',400,400],['mouseReleased',400,400]]);
   assert.equal(h.acks().find(ack=>ack.id==='new-click')?.ok,true);
 });
 
-test('a click expiring after mouse down destroys the old window without completing the target click',async t=>{
+test('a click expiring after mouse down preserves the old window and automatically lifts the expired pointer',async t=>{
   t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:1000000});
   const down=deferred(),h=setup(t);h.wc.debugger.sendCommand=async(method,value)=>{h.events.push({method,value});if(value.type==='mousePressed')await down.promise;};
   await h.deliver(descriptor(),[inputCommand('expired-click',{kind:'click',x:0.2,y:0.3},Date.now()+1000)]);
   t.mock.timers.tick(1500);down.resolve();await flush();
-  assert.equal(h.win.isDestroyed(),true);assert.equal(h.events.length,1);assert.equal(h.runner.session,null);
+  assert.equal(h.win.isDestroyed(),false);assert.equal(h.events.length,2);assert.equal(h.events[1].value.clickCount,0);assert.ok(h.runner.session);
 });
 
-test('an already expired pointer up destroys the held window instead of leaving it for reuse',async t=>{
+test('an already expired pointer up preserves the held window instead of leaving it for reuse',async t=>{
   const h=setup(t);await h.deliver(descriptor(),[inputCommand('drag-down',{kind:'pointer',phase:'down',x:0.2,y:0.3})]);
   await h.deliver(descriptor(),[inputCommand('expired-up',{kind:'pointer',phase:'up',x:0.2,y:0.3},Date.now()-1)]);await flush();
-  assert.equal(h.win.isDestroyed(),true);assert.equal(h.events.length,1);
+  assert.equal(h.win.isDestroyed(),false);assert.equal(h.events.length,2);assert.equal(h.events[1].value.clickCount,0);
 });
 
-test('a rejected normal mouse up destroys uncertain held state without retrying that release',async t=>{
+test('a rejected normal mouse up preserves uncertain held state and automatically clears the held button',async t=>{
   const h=setup(t);h.wc.debugger.sendCommand=async(method,value)=>{h.events.push({method,value});if(value.type==='mouseReleased'&&value.clickCount===1)throw Error('release failed');};
   await h.deliver(descriptor(),[inputCommand('failed-click',{kind:'click',x:0.2,y:0.3})]);await flush();
-  assert.equal(h.win.isDestroyed(),true);assert.equal(h.events.length,2);
+  assert.equal(h.win.isDestroyed(),false);assert.equal(h.events.length,3);assert.equal(h.events[2].value.clickCount,0);
 });
 
-test('lost key down response on session close destroys the old window without replaying any key',async t=>{
+test('lost key down response on session close preserves the old window without replaying any key',async t=>{
   const down=deferred(),h=setup(t);h.wc.debugger.sendCommand=async(method,value)=>{h.events.push({method,value});if(value.type==='keyDown')await down.promise;};
   await h.deliver(descriptor(),[inputCommand('old-key',{kind:'key',key:'ArrowLeft',modifiers:['Shift']})]);
   await h.deliver(null);await flush();down.resolve();await flush();
-  assert.equal(h.win.isDestroyed(),true);assert.deepEqual(h.events.map(item=>[item.value.type,item.value.key,item.value.modifiers]),[['keyDown','ArrowLeft',8]]);
+  assert.equal(h.win.isDestroyed(),false);assert.deepEqual(h.events.map(item=>[item.value.type,item.value.key,item.value.modifiers]),[['keyDown','ArrowLeft',8],['keyUp','ArrowLeft',0]]);
 });
 
-test('a key expiring between down and up destroys the old window without replaying key down',async t=>{
+test('a key expiring between down and up preserves the old window without replaying key down',async t=>{
   t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:1000000});
   const down=deferred(),h=setup(t);h.wc.debugger.sendCommand=async(method,value)=>{h.events.push({method,value});if(value.type==='keyDown')await down.promise;};
   await h.deliver(descriptor(),[inputCommand('expired-key',{kind:'key',key:'a',modifiers:['Control']},Date.now()+1000)]);
   t.mock.timers.tick(1500);down.resolve();await flush();
-  assert.equal(h.win.isDestroyed(),true);assert.deepEqual(h.events.map(item=>[item.value.type,item.value.key,item.value.modifiers]),[['keyDown','a',2]]);
+  assert.equal(h.win.isDestroyed(),false);assert.deepEqual(h.events.map(item=>[item.value.type,item.value.key,item.value.modifiers]),[['keyDown','a',2],['keyUp','a',0]]);
 });
 
 test('completed mouse and key pairs leave the existing window and login dialog open on session close',async t=>{
@@ -233,9 +311,9 @@ test('completed mouse and key pairs leave the existing window and login dialog o
   await h.deliver(null);assert.equal(h.win.isDestroyed(),false);assert.equal(h.events.length,4);
 });
 
-test('runner disposal closes an interrupted held window without synthesizing mouse up',async t=>{
+test('runner disposal preserves an interrupted held window and automatically lifts its pointer',async t=>{
   const h=setup(t);await h.deliver(descriptor(),[inputCommand('dispose-drag',{kind:'pointer',phase:'down',x:0.2,y:0.3})]);
-  h.abort.abort();await h.running;assert.equal(h.win.isDestroyed(),true);assert.equal(h.events.length,1);
+  h.abort.abort();await h.running;assert.equal(h.win.isDestroyed(),false);assert.equal(h.events.length,2);assert.equal(h.events[1].value.type,'mouseReleased');
 });
 
 test('cleanup never sends input to a destroyed old browser window',async t=>{
@@ -417,29 +495,39 @@ test('active delivery is readonly until explicit captcha takeover and never perm
   await h.deliver(h.session,[deliveryCommand(h,'human-click','input',{kind:'click',x:.2,y:.25})]);assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased']);
   await h.deliver(h.session,[command('no-navigation','navigate')]);assert.equal(h.loads.length,0);assert.equal(h.acks().find(a=>a.id==='no-navigation')?.ok,false);
 });
-test('captcha disappearance after mouseDown blocks mouseUp and uses sender cancellation, never another site click',async t=>{
+test('captcha disappearance keeps the same page gesture intact',async t=>{
   const h=deliverySetup(t);await h.deliver(h.session);await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);
   const send=h.wc.debugger.sendCommand;h.wc.debugger.sendCommand=async(method,value)=>{await send(method,value);if(value.type==='mousePressed'){delete h.state.captcha;h.state.captchaDetected=false;}};
   await h.deliver(h.session,[deliveryCommand(h,'race-click','input',{kind:'click',x:.2,y:.25})]);await flush();
-  assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed']);assert.equal(h.cancelled(),1);assert.equal(h.pages.pages.size,0);
+  assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased']);assert.equal(h.cancelled(),0);assert.equal(h.pages.pages.size,1);assert.equal(h.win.isDestroyed(),false);
 });
-test('each key event rechecks iframe focus, keyUp is not replayed after focus escapes',async t=>{
+test('human page key pairs complete even when iframe focus changes',async t=>{
   const h=deliverySetup(t);await h.deliver(h.session);await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);
   const send=h.wc.debugger.sendCommand;h.wc.debugger.sendCommand=async(method,value)=>{await send(method,value);if(value.type==='keyDown')h.state.captcha.focused=false;};
   await h.deliver(h.session,[deliveryCommand(h,'race-key','input',{kind:'key',key:'Enter'})]);await flush();
-  assert.deepEqual(h.events.map(e=>e.value.type),['keyDown']);assert.equal(h.cancelled(),1);
+  assert.deepEqual(h.events.map(e=>e.value.type),['keyDown','keyUp']);assert.equal(h.cancelled(),0);
 });
-test('disconnect while holding a captcha pointer cancels that sender and does not synthesize release',async t=>{
+test('disconnect while holding a human pointer preserves the exact sender page and pauses it without replaying input',async t=>{
   const h=deliverySetup(t);await h.deliver(h.session);await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);
   await h.deliver(h.session,[deliveryCommand(h,'drag-down','input',{kind:'pointer',phase:'down',x:.2,y:.25,button:'left'})]);await h.deliver(null);
-  assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed']);assert.equal(h.cancelled(),1);
+  assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased']);assert.equal(h.cancelled(),0);assert.equal(h.win.isDestroyed(),false);assert.equal(h.entry.manual,true);assert.equal(h.entry.keepOpen,true);
 });
-for(const change of ['replaced','gone'])test(`a held captcha pointer cancels its sender when the challenge is ${change} before release`,async t=>{
+test('automatic held cleanup permits immediate reconnect input while explicit resume alone releases automation',async t=>{
+  const h=deliverySetup(t);await h.deliver(h.session);await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);
+  await h.deliver(h.session,[deliveryCommand(h,'down','input',{kind:'pointer',phase:'down',x:.2,y:.25,button:'left'})]);await h.deliver(null);
+  const reconnect={...h.session,id:'reconnected'};await h.deliver(reconnect);
+  assert.equal(h.win.isDestroyed(),false);assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased']);assert.equal(h.entry.manual,true);
+  await h.deliver(reconnect,[deliveryCommand(h,'next-click','input',{kind:'click',x:.3,y:.4})]);assert.equal(h.acks().find(a=>a.id==='next-click')?.ok,true);
+  await h.deliver(reconnect,[deliveryCommand(h,'resume','observe')]);assert.equal(h.entry.manual,false);assert.equal(h.entry.keepOpen,true,'visible captcha keeps its original page');assert.equal(h.cancelled(),0);
+});
+
+for(const change of ['replaced','gone'])test(`a held pointer preserves its sender when the challenge is ${change} before release`,async t=>{
   const h=deliverySetup(t);await h.deliver(h.session);await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);
   await h.deliver(h.session,[deliveryCommand(h,'drag-down','input',{kind:'pointer',phase:'down',x:.2,y:.25,button:'left'})]);
   if(change==='replaced')h.state.captcha.id='captcha-2';else {delete h.state.captcha;h.state.captchaDetected=false;}
   await h.runner.capture(h.runner.session);await flush();
-  assert.equal(h.cancelled(),1);assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed']);
+  await h.deliver(h.session,[deliveryCommand(h,'drag-up','input',{kind:'pointer',phase:'up',x:.4,y:.5,button:'left'})]);
+  assert.equal(h.cancelled(),0);assert.equal(h.win.isDestroyed(),false);assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased']);
 });
 test('a changed operation descriptor cannot reuse the same account Room or trigger a replacement account page',async t=>{
   const h=deliverySetup(t);await h.deliver(h.session);await h.deliver({...h.session,target:{...h.session.target,operationId:'other'}});

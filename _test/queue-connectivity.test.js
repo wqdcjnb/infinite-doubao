@@ -66,7 +66,7 @@ test("提交先入队，新增账号唤醒；未打开账号也自动解析驱�
   assert.equal(fs.existsSync(task.result.files[0]), true);
   assert.equal(interceptor.list({ taskId: id }).length, 1);
   assert.deepEqual(attempts, [inst.id]);
-  assert.equal(confirms, 1);
+  assert.equal(confirms, 0, "旧驱动不能再通过按钮确认生成");
 });
 test("空视频结果不能报成功，且手动重试只查询不重复生成", async () => {
   account(); driver.readProgress = async () => ({ state: "done", mediaUrls: [] });

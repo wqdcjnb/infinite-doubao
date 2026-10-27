@@ -49,15 +49,27 @@ function page({ collapsed = false, duplicate = false, missingBody = false, wrong
   const context = vm.createContext({ window: { auto: {} }, document, indexedDB, localStorage: { getItem: key => key === "flow_tea_user_id" ? currentScope : null }, CFG: { autoKey: "auto" }, Date: TestDate, clearTimeout,
     setTimeout: (fn, delay) => delay > 100 ? setTimeout(fn, delay) : (now += 100, queueMicrotask(fn)) });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/page/native-drafts.js"), "utf8"), context);
-  return { api: context.window.auto, items, rows, index, elapsed: () => now - 1000, reads: () => reads, sends: () => sends, visible: () => visible().length,
+  return { api: context.window.auto, items, rows, index, editor, elapsed: () => now - 1000, reads: () => reads, sends: () => sends, visible: () => visible().length,
     bindings: items.map(d => ({ id: "app-" + d.id, draftNumber: d.draftNumber, prompt: d.prompt, title: "旧标题", executionMode: "work" })) };
 }
 
-test("Skill在首行时仍从完整正文识别第二行编号，不发送或按标题猜测", async () => {
-  const p = page({ noSidebar: true, skillPrefix: "[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)\n" });
-  const result = await p.api.restoreNativeDrafts([p.bindings[49]]);
-  assert.equal(result.ok, true, result.reason); assert.equal(result.bindings[0].nativeId, "local-49");
-  assert.equal(p.sends(), 0);
+test("只读缺失证明检查未进入侧栏索引的原始输入记录和当前输入区",async()=>{
+  const absent={prompt:'【草稿编号：DB-FFFFFFFFFFFFFFFFFFFFFFFF】',accountScope:'account-a'};
+  const fresh=page();assert.equal(typeof fresh.api.verifyNativeDraftMissing,'function');
+  const proof=await fresh.api.verifyNativeDraftMissing(absent);assert.equal(proof.ok,true,proof.reason);assert.equal(proof.readOnly,true);assert.equal(proof.absent,true);
+  const orphan=page();orphan.index.splice(0,1);
+  const retained=await orphan.api.verifyNativeDraftMissing({...absent,prompt:orphan.items[0].prompt});
+  assert.equal(retained.ok,false);assert.match(retained.reason,/输入记录/);
+  const active=page();active.editor.value=absent.prompt;assert.equal((await active.api.verifyNativeDraftMissing(absent)).ok,false);
+  assert.equal(fresh.sends()+orphan.sends()+active.sends(),0);
+});
+
+test("技能链接在首行时仍按第二行的完整编号核对、打开和发送原草稿", async () => {
+  const p = page({ skillPrefix: "[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)\n" });
+  const binding = p.bindings[49];
+  assert.equal((await p.api.restoreNativeDrafts([binding])).ok, true);
+  assert.equal((await p.api.openNativeDraft(binding)).ok, true);
+  assert.equal((await p.api.sendNativeDraft(binding)).ok, true); assert.equal(p.sends(), 1);
 });
 
 test("严格只读草稿核对返回账号范围，缺少账号身份时不展开侧栏", async () => {
@@ -90,13 +102,39 @@ test("新投递页面先读到完整数据、侧栏延迟挂载时等待原生 I
   assert.equal(result.ok, true, result.reason); assert.ok(p.elapsed() >= 1800);
   assert.equal((await p.api.sendNativeDraft(binding)).ok, true); assert.equal(p.sends(), 1);
 });
+test("慢页超过20秒才挂载侧栏时仍只准备原生草稿，不提前发送", async () => {
+  const p = page({ sidebarDelayMs: 30000 }), binding = p.bindings[49];
+  assert.equal((await p.api.restoreNativeDrafts([binding])).ok, true);
+  const result = await p.api.openNativeDraft(binding);
+  assert.equal(result.ok, true, result.reason); assert.ok(p.elapsed() >= 30000); assert.equal(p.sends(), 0);
+});
+
+test("投递页面复用本批完整数据，不重复打开数据库；仍核对当前账号和完整正文", async () => {
+  const original = page(), catalog = await original.api.readNativeDrafts();
+  const sender = page({ empty: true });
+  assert.equal((await sender.api.restoreNativeDrafts([original.bindings[0]], { catalog })).ok, true);
+  assert.equal(sender.reads(), 0);
+  assert.equal((await sender.api.openNativeDraft(original.bindings[0])).ok, true);
+  const wrong = page({ currentScope: "account-b" });
+  assert.equal((await wrong.api.restoreNativeDrafts([original.bindings[0]], { catalog })).ok, false);
+  assert.equal((await sender.api.restoreNativeDrafts([{ ...original.bindings[0], prompt: "changed" }], { catalog })).ok, false);
+});
+
+test("其他投递页改变侧栏使原行重新挂载时，按原生 ID 继续核对，不能误报未就绪", async () => {
+  const p = page(), binding = p.bindings[0], old = p.rows[0];
+  await p.api.restoreNativeDrafts([binding]);
+  const click = old.click;
+  old.click = () => { click(); old.isConnected = false; p.rows[0] = { ...old, isConnected: true }; };
+  assert.equal((await p.api.openNativeDraft(binding)).ok, true);
+  assert.equal((await p.api.sendNativeDraft(binding)).ok, true); assert.equal(p.sends(), 1);
+});
 
 test("核对后侧栏始终不出现时明确超时，不点击发送或按标题猜测", async () => {
   const p = page({ noSidebar: true }); const binding = p.bindings[0];
   assert.equal((await p.api.restoreNativeDrafts([binding])).ok, true);
   const result = await p.api.openNativeDraft(binding);
   assert.equal(result.ok, false); assert.match(result.reason, /尚未显示对应条目/);
-  assert.equal(p.sends(), 0); assert.equal(p.elapsed(), 20000);
+  assert.equal(p.sends(), 0); assert.equal(p.elapsed(), 60000);
 });
 
 test("侧栏与输入框均未挂载时，直接核对 50 条完整草稿并返回全部绑定", async () => {
@@ -173,32 +211,4 @@ test("原生条目移除后，空列表恢复不能重新写回缓存中的旧�
   p.rows.shift();
   const result = await p.api.restoreNativeDrafts([]);
   assert.equal(result.ok, true); assert.equal(result.bindings.length, 0);
-});
-
-test("技能链接在首行时仍按第二行的完整编号核对、打开和发送原草稿", async () => {
-  const p = page({ skillPrefix: "[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)\n" });
-  const binding = p.bindings[49];
-  assert.equal((await p.api.restoreNativeDrafts([binding])).ok, true);
-  assert.equal((await p.api.openNativeDraft(binding)).ok, true);
-  assert.equal((await p.api.sendNativeDraft(binding)).ok, true); assert.equal(p.sends(), 1);
-});
-
-test("投递页面复用本批完整数据，不重复打开数据库；仍核对当前账号和完整正文", async () => {
-  const original = page(), catalog = await original.api.readNativeDrafts();
-  const sender = page({ empty: true });
-  assert.equal((await sender.api.restoreNativeDrafts([original.bindings[0]], { catalog })).ok, true);
-  assert.equal(sender.reads(), 0);
-  assert.equal((await sender.api.openNativeDraft(original.bindings[0])).ok, true);
-  const wrong = page({ currentScope: "account-b" });
-  assert.equal((await wrong.api.restoreNativeDrafts([original.bindings[0]], { catalog })).ok, false);
-  assert.equal((await sender.api.restoreNativeDrafts([{ ...original.bindings[0], prompt: "changed" }], { catalog })).ok, false);
-});
-
-test("其他投递页改变侧栏使原行重新挂载时，按原生 ID 继续核对，不能误报未就绪", async () => {
-  const p = page(), binding = p.bindings[0], old = p.rows[0];
-  await p.api.restoreNativeDrafts([binding]);
-  const click = old.click;
-  old.click = () => { click(); old.isConnected = false; p.rows[0] = { ...old, isConnected: true }; };
-  assert.equal((await p.api.openNativeDraft(binding)).ok, true);
-  assert.equal((await p.api.sendNativeDraft(binding)).ok, true); assert.equal(p.sends(), 1);
 });

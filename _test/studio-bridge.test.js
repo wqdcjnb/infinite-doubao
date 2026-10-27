@@ -9,7 +9,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-bridge-'));
 after(() => fs.rmSync(root, {recursive:true, force:true}));
 let n=0;
 function journal() { return new Journal(path.join(root, String(++n), 'journal.json')); }
-function operation(kind='send', id='op1') { return {id, kind, accountId:'account1',leaseToken:'lease-private',leaseUntil:new Date(Date.now()+60000).toISOString(),payload:{account:{id:'account1', name:'测试账号'}, tasks:[{id:'task1'}]}}; }
+function operation(kind='send', id='op1') { return {id, kind, accountId:'account1',batchId:'batch1',leaseToken:'lease-private',leaseUntil:new Date(Date.now()+60000).toISOString(),payload:{account:{id:'account1', name:'测试账号'}, tasks:[{id:'task1'}]}}; }
 function transport() { const reports=[]; return { reports, heartbeat: async()=>({}), report:async(op,result)=>{reports.push({op,result});}, claim:async()=>({operation:null}) }; }
 
 test('operation intent survives reload before send; duplicate receipt never sends twice', async()=>{
@@ -85,13 +85,49 @@ try {executorModule=require('../src/server-executor');} catch(e) {if(e.code!=='M
 const P=require('../src/paths'), store=require('../src/store'), queue=require('../src/orchestrator');
 function setupNative() {
   P.init({home:path.join(root,`native-${++n}`)});store.load();queue.pause('');
+  const instance=store.add({id:'studio-account-'+crypto.createHash('sha256').update('account1').digest('hex').slice(0,24),name:'测试账号',url:store.DEFAULT_URL});instance.studioEnvironment={version:'fixture-environment'};
   const calls=[];
-  const driver={isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),pasteFiles:async()=>({ok:true}),setText:async()=>({ok:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),navigate:async()=>{},url:async()=> 'https://www.doubao.com/chat/real1',readProgress:async()=>({state:'running',generationStarted:true}),close:()=>{},
-    call:async(method,opts)=>{calls.push({method,opts}); if(method==='restoreNativeDrafts')return {ok:true,bindings:[]};if(method==='saveNativeDraft')return {ok:true,bindings:[{id:opts.id,nativeId:'real-native-1',accountScope:'scope-a'}]};if(method==='openNativeDraft')return {ok:true,conversationIds:[]};if(method==='waitNativeDraftAccepted')return {ok:true,conversationUrl:'https://www.doubao.com/chat/real1',userMessageId:'message-'+opts.id};if(method==='peekGenerationConfirmation')return {ok:true};if(method==='readProgress')return {state:'running',generationStarted:true};return {ok:true};}};
+  const driver={window:{isDestroyed:()=>false,getContentSize:()=>[1280,800]},isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),pasteFiles:async()=>({ok:true}),setText:async()=>({ok:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),navigate:async()=>{},url:async()=> 'https://www.doubao.com/chat/real1',readProgress:async()=>({state:'running',generationStarted:true}),close:()=>{},
+    call:async(method,opts)=>{calls.push({method,opts}); if(method==='restoreNativeDrafts')return {ok:true,bindings:[]};if(method==='saveNativeDraft')return {ok:true,bindings:[{id:opts.id,nativeId:'real-native-1',accountScope:'scope-a',titles:[opts.prompt],index:0}]};if(method==='openNativeDraft')return {ok:true,conversationIds:[]};if(method==='sendNativeDraft')return {ok:true,clickedAt:new Date().toISOString(),attachmentProof:{version:1,names:(opts.attachmentNames||[]).slice(),fileKeys:(opts.attachmentNames||[]).map((name,index)=>'fixture-key-'+index+'-'+name)}};if(method==='waitNativeDraftAccepted')return {ok:true,conversationUrl:'https://www.doubao.com/chat/real1',userMessageId:'message-'+opts.id,attachmentConsumptionProof:{version:1,names:(opts.attachmentNames||[]).slice(),userMessageId:'message-'+opts.id,checkedAt:new Date().toISOString()}};if(method==='readNativeDeliveryState')return {captchaDetected:false};if(method==='peekGenerationConfirmation')return {ok:true};if(method==='readProgress')return {state:'running',generationStarted:true};return {ok:true};}};
   queue.init({resolveDriver:async()=>driver,resolveDraftDriver:async()=>driver});
   return {calls,driver};
 }
 function nativeOperation(kind='import') {return {...operation(kind),payload:{account:{id:'account1',name:'测试账号'},task:{id:'task1',prompt:'原始内容',parameters:{model:'seedance_v2.0_mini',duration:5,ratio:'9:16'},references:[]}}};}
+
+for(const unsafe of ['none','written','catalog','scope','prompt','parameters','attachments','mode','number','new-page-scope'])test(`unwritten import continuation proves the original body absent before any write (${unsafe})`,async()=>{
+  const {driver}=setupNative(),j=journal(),op=nativeOperation();op.payload.sendOnly=true;j.begin(op);
+  const call=driver.call;driver.call=async(method,...args)=>{if(method==='prepareNativeDraft')throw Error('synthetic preparation failed');return call(method,...args);};
+  const adapter=new executorModule.NativeAdapter({journal:j,client:{},accounts:{open:async()=>({webContents:{}})},driverFactory:async()=>driver});
+  await assert.rejects(adapter.execute(op));j.finish(op.id,{outcome:'uncertain',receipt:{error:'preparation interrupted'}});j.reported(op.id);
+  const original=JSON.stringify(j.get(op.id)),draft=store.get().taskDrafts[0];let writes=0;
+  if(unsafe==='written')draft.nativePrompt='already written';
+  if(unsafe==='prompt')draft.template.prompt='another body';
+  if(unsafe==='parameters')draft.template.duration=30;
+  if(unsafe==='attachments')draft.template.attachments=[{path:'must-not-upload.png'}];
+  if(unsafe==='mode')draft.executionMode='chat';
+  if(unsafe==='number')draft.draftNumber='another-number';
+  driver.call=async(method,...args)=>method==='verifyNativeDraftMissing'?{ok:unsafe!=='catalog',readOnly:true,absent:unsafe!=='catalog',accountScope:unsafe==='scope'?'another':'scope-a'}:method==='prepareNativeDraft'?{ok:true,accountScope:unsafe==='new-page-scope'?'another':'scope-a'}:call(method,...args);
+  driver.setText=async()=>{writes++;return {ok:true};};
+  const resume={...op,id:'resume-one',kind:'account',payload:{...op.payload,action:'resume_unwritten_import',originalOperationId:op.id,accountScope:'scope-a'}};
+  if(unsafe==='none'){const result=await adapter.execute(resume);assert.equal(result.receipt.status,'draft_import_resumed');assert.equal(writes,1);assert.equal(result.receipt.unwrittenProof.taskContentWritten,false);}
+  else {await assert.rejects(adapter.execute(resume));assert.equal(writes,0);}
+  assert.equal(JSON.stringify(j.get(op.id)),original);queue.stopAll();
+});
+
+for(const fail of [false,true])test(`import observation exposes only the owned live window and clears it after completion (${fail})`,async()=>{
+  const {driver}=setupNative(),j=journal(),adapter=new executorModule.NativeAdapter({journal:j,client:transport(),accounts:{}});
+  const window={isDestroyed:()=>false};driver.window=window;
+  let release,entered=false;const hold=new Promise(resolve=>{release=resolve;});
+  driver.setText=async()=>{entered=true;await hold;if(fail)throw Error('synthetic import failure');return {ok:true};};
+  const running=adapter.execute(nativeOperation());
+  try {
+    for(let i=0;i<100&&!entered;i++)await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(entered,true);
+    assert.equal(adapter.observationWindow?.('account1')?.window,window);
+    assert.equal(adapter.observationWindow?.('another-account'),undefined);
+  } finally {release();if(fail)await assert.rejects(running,/native draft binding missing/);else await running;queue.stopAll();}
+  assert.equal(adapter.observationWindow?.('account1'),undefined);
+});
 
 for (const alreadyIncluded of [false, true]) test(`native import puts the built-in Seedance skill on the first line once (${alreadyIncluded})`,async()=>{
   const {calls}=setupNative(), j=journal(), api=transport();
@@ -456,7 +492,7 @@ test('account scrolling is bounded and screenshots include capture time',async()
   assert.equal(commands.length,1);queue.stopAll();
 });
 test('probe returns version and executor generation even when browser proxy navigation fails',async()=>{
-  setupNative();const adapter=new executorModule.NativeAdapter({journal:journal(),sessionId:'session-fixture',client:{token:'private-token'},environment:{configure(inst){inst.studioEnvironment={version:'version-fixture'};}},accounts:{open:async()=>{throw Error('synthetic secret');}}});
+  setupNative();const adapter=new executorModule.NativeAdapter({journal:journal(),sessionId:'session-fixture',client:{token:'private-token'},environment:{configure(inst){inst.studioEnvironment={version:'version-fixture'};}},accounts:{close:()=>{},open:async()=>{throw Error('synthetic secret');}}});
   const result=await adapter.execute({...operation('account'),payload:{account:{id:'account1'},action:'probe'}});
   assert.equal(result.receipt.environmentVersion,'version-fixture');assert.equal(result.receipt.executorSessionId,'session-fixture');
   assert.equal(result.receipt.environmentCheck.proxy.ok,false);assert.equal(JSON.stringify(result).includes('synthetic secret'),false);queue.stopAll();
