@@ -125,10 +125,10 @@
         if (unavailable(mode)) throw new Error("工作任务模式不可用");
         activate(mode);
         var cloud = await waitFor(function () {
-          return nodes('[role="menuitem"], [role="option"], [role="menuitemradio"]').find(function (el) { return /^云电脑(?:\s|$)/.test(text(el)); });
+          return cloudMode() || nodes('[role="menuitem"], [role="option"], [role="menuitemradio"]').find(function (el) { return /^云电脑(?:\s|$)/.test(text(el)); });
         }, "当前账号没有可选择的云电脑模式", LOAD_TIMEOUT);
         if (unavailable(cloud)) throw new Error("当前账号的云电脑模式不可用");
-        activate(cloud);
+        if (!cloudMode()) activate(cloud);
       }
       await waitFor(cloudMode, "豆包未切换到工作任务 · 云电脑，任务尚未发送", LOAD_TIMEOUT);
       return { ok: true, mode: "work", verified: "cloud-computer-control" };

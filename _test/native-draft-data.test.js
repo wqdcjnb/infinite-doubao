@@ -49,9 +49,20 @@ function page({ collapsed = false, duplicate = false, missingBody = false, wrong
   const context = vm.createContext({ window: { auto: {} }, document, indexedDB, localStorage: { getItem: key => key === "flow_tea_user_id" ? currentScope : null }, CFG: { autoKey: "auto" }, Date: TestDate, clearTimeout,
     setTimeout: (fn, delay) => delay > 100 ? setTimeout(fn, delay) : (now += 100, queueMicrotask(fn)) });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/page/native-drafts.js"), "utf8"), context);
-  return { api: context.window.auto, items, rows, index, elapsed: () => now - 1000, reads: () => reads, sends: () => sends, visible: () => visible().length,
+  return { api: context.window.auto, items, rows, index, editor, elapsed: () => now - 1000, reads: () => reads, sends: () => sends, visible: () => visible().length,
     bindings: items.map(d => ({ id: "app-" + d.id, draftNumber: d.draftNumber, prompt: d.prompt, title: "旧标题", executionMode: "work" })) };
 }
+
+test("只读缺失证明检查未进入侧栏索引的原始输入记录和当前输入区",async()=>{
+  const absent={prompt:'【草稿编号：DB-FFFFFFFFFFFFFFFFFFFFFFFF】',accountScope:'account-a'};
+  const fresh=page();assert.equal(typeof fresh.api.verifyNativeDraftMissing,'function');
+  const proof=await fresh.api.verifyNativeDraftMissing(absent);assert.equal(proof.ok,true,proof.reason);assert.equal(proof.readOnly,true);assert.equal(proof.absent,true);
+  const orphan=page();orphan.index.splice(0,1);
+  const retained=await orphan.api.verifyNativeDraftMissing({...absent,prompt:orphan.items[0].prompt});
+  assert.equal(retained.ok,false);assert.match(retained.reason,/输入记录/);
+  const active=page();active.editor.value=absent.prompt;assert.equal((await active.api.verifyNativeDraftMissing(absent)).ok,false);
+  assert.equal(fresh.sends()+orphan.sends()+active.sends(),0);
+});
 
 test("技能链接在首行时仍按第二行的完整编号核对、打开和发送原草稿", async () => {
   const p = page({ skillPrefix: "[Seedance 2.5](skill://seedance-25?type=2&id=353376777986)\n" });

@@ -93,6 +93,26 @@ function setupNative() {
 }
 function nativeOperation(kind='import') {return {...operation(kind),payload:{account:{id:'account1',name:'测试账号'},task:{id:'task1',prompt:'原始内容',parameters:{model:'seedance_v2.0_mini',duration:5,ratio:'9:16'},references:[]}}};}
 
+for(const unsafe of ['none','written','catalog','scope','prompt','parameters','attachments','mode','number','new-page-scope'])test(`unwritten import continuation proves the original body absent before any write (${unsafe})`,async()=>{
+  const {driver}=setupNative(),j=journal(),op=nativeOperation();op.payload.sendOnly=true;j.begin(op);
+  const call=driver.call;driver.call=async(method,...args)=>{if(method==='prepareNativeDraft')throw Error('synthetic preparation failed');return call(method,...args);};
+  const adapter=new executorModule.NativeAdapter({journal:j,client:{},accounts:{open:async()=>({webContents:{}})},driverFactory:async()=>driver});
+  await assert.rejects(adapter.execute(op));j.finish(op.id,{outcome:'uncertain',receipt:{error:'preparation interrupted'}});j.reported(op.id);
+  const original=JSON.stringify(j.get(op.id)),draft=store.get().taskDrafts[0];let writes=0;
+  if(unsafe==='written')draft.nativePrompt='already written';
+  if(unsafe==='prompt')draft.template.prompt='another body';
+  if(unsafe==='parameters')draft.template.duration=30;
+  if(unsafe==='attachments')draft.template.attachments=[{path:'must-not-upload.png'}];
+  if(unsafe==='mode')draft.executionMode='chat';
+  if(unsafe==='number')draft.draftNumber='another-number';
+  driver.call=async(method,...args)=>method==='verifyNativeDraftMissing'?{ok:unsafe!=='catalog',readOnly:true,absent:unsafe!=='catalog',accountScope:unsafe==='scope'?'another':'scope-a'}:method==='prepareNativeDraft'?{ok:true,accountScope:unsafe==='new-page-scope'?'another':'scope-a'}:call(method,...args);
+  driver.setText=async()=>{writes++;return {ok:true};};
+  const resume={...op,id:'resume-one',kind:'account',payload:{...op.payload,action:'resume_unwritten_import',originalOperationId:op.id,accountScope:'scope-a'}};
+  if(unsafe==='none'){const result=await adapter.execute(resume);assert.equal(result.receipt.status,'draft_import_resumed');assert.equal(writes,1);assert.equal(result.receipt.unwrittenProof.taskContentWritten,false);}
+  else {await assert.rejects(adapter.execute(resume));assert.equal(writes,0);}
+  assert.equal(JSON.stringify(j.get(op.id)),original);queue.stopAll();
+});
+
 for(const fail of [false,true])test(`import observation exposes only the owned live window and clears it after completion (${fail})`,async()=>{
   const {driver}=setupNative(),j=journal(),adapter=new executorModule.NativeAdapter({journal:j,client:transport(),accounts:{}});
   const window={isDestroyed:()=>false};driver.window=window;

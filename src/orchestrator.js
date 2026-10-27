@@ -687,7 +687,7 @@ async function saveDrafts(ids, options = {}) {
         const draftNumber = draft.nativePrompt ? draft.draftNumber : draft.draftNumber || drafts.numberFor(draft.id);
         record.task.prompt = draft.nativePrompt || withSeedanceSkill(`【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`);
         const attachmentNames = record.task.refs.map(file => path.basename(file));
-        importOptions = { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode, attachmentNames, nativeId: draft.nativeBinding?.nativeId, accountScope: draft.nativeBinding?.accountScope, recreateDeleted: options.recreateDeleted === true, isolated: !!deps.resolveDraftDriver };
+        importOptions = { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode, attachmentNames, nativeId: draft.nativeBinding?.nativeId, accountScope: draft.nativeBinding?.accountScope || options.expectedAccountScope, recreateDeleted: options.recreateDeleted === true, isolated: !!deps.resolveDraftDriver };
         let prepare = draft.nativeState !== "saved" && draft.nativeState !== "saving", uploadRefs = record.task.refs;
         const bindings = nativeBindings(inst.id).filter(b => b.id === draft.id);
         if (draft.nativeState === "saving" && draft.nativeBinding) bindings.push({ ...draft.nativeBinding, draftNumber, prompt: record.task.prompt, executionMode: draft.executionMode });

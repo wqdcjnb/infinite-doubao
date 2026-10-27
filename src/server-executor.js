@@ -95,7 +95,7 @@ class NativeAdapter {
       store.get().taskDrafts.push(draft);durableSave();
     }
     const check=this.leaseGuard(op,context);
-    await queue.saveDrafts([draft.id],{instanceId:inst.id,checkLease:check,onImportPage:({driver})=>{
+    await queue.saveDrafts([draft.id],{instanceId:inst.id,checkLease:check,expectedAccountScope:op.payload.action==='resume_unwritten_import'?op.payload.accountScope:undefined,onImportPage:({driver})=>{
       if(!driver.window)return;
       const page={instance:inst,window:driver.window,check};this.importPages.set(op.accountId,page);
       return ()=>{if(this.importPages.get(op.accountId)===page)this.importPages.delete(op.accountId);};
@@ -204,6 +204,23 @@ class NativeAdapter {
     }
     return {version:1,readOnly:true,accountId,executorSessionId:this.sessionId,inspectedAt:Date.now(),entries};
   }
+  async resumeUnwrittenImport(op,context={}) {
+    const snapshot=requireTask(op),original=this.journal.get(op.payload.originalOperationId),binding=this.journal.task(snapshot.id);
+    const hash=value=>crypto.createHash('sha256').update(JSON.stringify(value,(key,item)=>key==='downloadUrl'?undefined:item)).digest('hex');
+    const check=this.leaseGuard(op,context);check();
+    const draft=drafts.list().find(d=>d.id===binding?.draftId);
+    if(op.payload.sendOnly!==true||snapshot.references?.length||!original?.reported||original.operation.kind!=='import'||original.operation.accountId!==op.accountId||original.result?.outcome!=='uncertain'||hash(original.operation.payload.task)!==hash(snapshot)||binding?.accountId!==op.accountId||binding.snapshotHash!==hash(snapshot)||!draft||!draft.draftNumber||draft.nativeState||draft.nativePrompt||draft.nativeBinding||draft.submissionRecord)throw Error('original import is not proved unwritten');
+    const template=draft.template,id=stableId('',`${op.accountId}/${snapshot.id}`),templateId=stableId('studio-template-',snapshot.id);
+    if(draft.id!==id||draft.draftNumber!==drafts.numberFor(id)||draft.executionMode!=='work'||draft.studioSendOnly!==true||template?.id!==templateId||binding.templateId!==templateId||template.studioTaskId!==snapshot.id||template.prompt!==snapshot.prompt||template.model!==snapshot.parameters.model||template.duration!==snapshot.parameters.duration||template.ratio!==snapshot.parameters.ratio||!Array.isArray(template.attachments)||template.attachments.length)throw Error('original import template changed');
+    const inst=this.account(op),win=await this.accounts.open(inst.id),driver=await this.driverFactory(inst,win.webContents);
+    if((await driver.isLoggedIn())?.loggedIn!==true)throw Error('original account login required');
+    const missing=await driver.call('verifyNativeDraftMissing',{prompt:`【草稿编号：${draft.draftNumber}】`,accountScope:op.payload.accountScope});check();
+    if(missing?.ok!==true||missing.readOnly!==true||missing.absent!==true||!op.payload.accountScope||missing.accountScope!==op.payload.accountScope)throw Error('complete original input records cannot prove the task body absent');
+    const unwrittenProof={readOnly:true,taskContentWritten:false,catalogComplete:true,accountScope:missing.accountScope};
+    check();const imported=await this.import(op,false,context);check();
+    if(imported?.outcome!=='success')throw Error('resumed import requires original receipt inspection');
+    return {outcome:'success',receipt:{...imported.receipt,status:'draft_import_resumed',originalOperationId:op.payload.originalOperationId,taskId:snapshot.id,snapshotHash:hash(snapshot),environmentVersion:inst.studioEnvironment?.version,executorSessionId:this.sessionId,verifiedAt:Date.now(),unwrittenProof}};
+  }
   async reconcileImport(op,context={}) {
     const intent=op.payload.reconciliation,snapshot=intent?.task;
     const hash=value=>crypto.createHash('sha256').update(JSON.stringify(value,(key,item)=>key==='downloadUrl'?undefined:item)).digest('hex');
@@ -279,7 +296,7 @@ class NativeAdapter {
     if(op.kind==='import')return this.import(op,false,context);
     if(op.kind==='send')return this.send(op,false,context);
     if(op.kind==='track')return this.track(op,context);
-    if(op.kind==='account')return op.payload.action==='reconcile_import'?this.reconcileImport(op,context):this.login(op,context);
+    if(op.kind==='account')return op.payload.action==='reconcile_import'?this.reconcileImport(op,context):op.payload.action==='resume_unwritten_import'?this.resumeUnwrittenImport(op,context):this.login(op,context);
     throw new Error('unsupported operation');
   }
   async recover(op,context={}) {

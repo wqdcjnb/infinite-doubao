@@ -411,6 +411,10 @@
     if (!editor() || importText() || importCards().length) throw new Error("请先打开空白工作任务输入区，再恢复中断草稿；未覆盖当前内容");
     return { ok: true, restart: true, accountScope: data.accountScope };
   }
+  api.verifyNativeDraftMissing = result(async function (options) {
+    var missing = await confirmInterruptedImportMissing(options);
+    return { ok: true, readOnly: true, absent: true, accountScope: missing.accountScope };
+  });
   api.resumeNativeDraftImport = result(async function (options) {
     var epoch = importEpoch, expected = options.attachmentNames || [], verified = await savedDraft(options);
     checkImport(epoch);
