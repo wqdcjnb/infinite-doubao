@@ -5,6 +5,26 @@
   var preparedAt = 0, inputScope = "";
   var storedBindings = new Map();
   var importEpoch = 0;
+  var captchaFrames = new WeakMap(), captchaEpoch = 0, captchaDocumentId = "";
+  api.readNativeDeliveryState = function (point) {
+    var frames = Array.from(document.querySelectorAll('iframe[src*="/verifycenter/captcha"]')).filter(visible);
+    if (!frames.length) return { captchaDetected: false };
+    if (frames.length !== 1) return { captchaDetected: true };
+    var frame = frames[0], rect = frame.getBoundingClientRect(), style = getComputedStyle(frame);
+    var width = window.innerWidth || document.documentElement.clientWidth, height = window.innerHeight || document.documentElement.clientHeight;
+    if (style.opacity === "0" || rect.width <= 0 || rect.height <= 0 || rect.left < 0 || rect.top < 0 || rect.right > width || rect.bottom > height) return { captchaDetected: true };
+    var inset = Math.min(3, rect.width / 4, rect.height / 4);
+    var points = [[rect.left + inset, rect.top + inset], [rect.right - inset, rect.top + inset], [rect.left + inset, rect.bottom - inset], [rect.right - inset, rect.bottom - inset], [rect.left + rect.width / 2, rect.top + rect.height / 2]];
+    if (points.some(function (point) { return document.elementFromPoint(point[0], point[1]) !== frame; })) return { captchaDetected: true };
+    if (point && (![point.x, point.y].every(Number.isFinite) || point.x < rect.left || point.y < rect.top || point.x >= rect.right || point.y >= rect.bottom || document.elementFromPoint(point.x, point.y) !== frame)) return { captchaDetected: true };
+    var src = frame.getAttribute("src") || "", known = captchaFrames.get(frame);
+    if (!known || known.src !== src) {
+      if (!window.crypto || typeof window.crypto.randomUUID !== "function") return { captchaDetected: true };
+      if (!captchaDocumentId) captchaDocumentId = window.crypto.randomUUID();
+      known = { src: src, id: "captcha-" + captchaDocumentId + "-" + (++captchaEpoch) }; captchaFrames.set(frame, known);
+    }
+    return { captchaDetected: true, captcha: { id: known.id, rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height }, focused: document.activeElement === frame } };
+  };
   function text(el) { return String(el && (/^(TEXTAREA|INPUT)$/.test(el.tagName) ? el.value : el.innerText || el.textContent) || "").replace(/\s+/g, " ").trim(); }
   function editor() { return document.querySelector('#input-engine-container .tiptap[contenteditable="true"], #input-engine-container textarea, .tiptap.ProseMirror[contenteditable="true"]'); }
   function title(row) { return text(row.querySelector(":scope > span > span")); }
