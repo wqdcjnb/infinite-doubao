@@ -29,6 +29,12 @@ class NativeAdapter {
     this.environment=environment;this.sessionId=sessionId;
     this.maxDraftPages=Math.max(1,Math.min(8,maxDraftPages));
     this.deliveryPages=new ActiveDeliveryPages();
+    this.importPages=new Map();
+  }
+  observationWindow(accountId) {
+    const page=this.importPages.get(accountId);
+    if(!page||page.window.isDestroyed?.())return;
+    try {page.check();return page;} catch {return;}
   }
   account(op) {
     if(op.payload?.account?.id!==op.accountId)throw new Error('account identity mismatch');
@@ -88,7 +94,12 @@ class NativeAdapter {
       draft={id,draftNumber:drafts.numberFor(id),template,executionMode:'work',createdAt:new Date().toISOString(),...(op.payload.sendOnly===true?{studioSendOnly:true}:{})};
       store.get().taskDrafts.push(draft);durableSave();
     }
-    await queue.saveDrafts([draft.id],{instanceId:inst.id,checkLease:this.leaseGuard(op,context)});
+    const check=this.leaseGuard(op,context);
+    await queue.saveDrafts([draft.id],{instanceId:inst.id,checkLease:check,onImportPage:({driver})=>{
+      if(!driver.window)return;
+      const page={instance:inst,window:driver.window,check};this.importPages.set(op.accountId,page);
+      return ()=>{if(this.importPages.get(op.accountId)===page)this.importPages.delete(op.accountId);};
+    }});
     draft=drafts.list().find(d=>d.id===draft.id);
     if(draft?.nativeState!=='saved' || !draft.nativeBinding)throw new Error('native draft binding missing');
     this.journal.bindTask(snapshot.id,{nativeBinding:draft.nativeBinding});

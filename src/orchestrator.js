@@ -657,7 +657,7 @@ async function saveDrafts(ids, options = {}) {
       const child = { controller: new AbortController() };
       const abort = () => child.controller.abort(operation.controller.signal.reason);
       operation.controller.signal.addEventListener("abort", abort, { once: true });
-      let driver, importOptions;
+      let driver, importOptions, releaseObservation;
       const position = `${index + 1}/${selected.length}`;
       const step = async (label, run, timeoutMs) => {
         emit("draft", { message: label + "…", instanceId: inst.id });
@@ -677,6 +677,7 @@ async function saveDrafts(ids, options = {}) {
           if (child.controller.signal.aborted) { opened.close?.(); child.controller.signal.throwIfAborted(); }
           return opened;
         }) : accountDriver;
+        releaseObservation = options.onImportPage?.({ draft, driver });
         if (driver !== accountDriver && driver.prepareDraftImport) await step(`正在激活草稿输入区 ${position}`, () => driver.prepareDraftImport());
         await step(`正在检查草稿账号 ${position}`, async () => {
           const state = driver.waitForLogin ? await driver.waitForLogin({ timeoutMs: 30000, check: () => { checkAction(); child.controller.signal.throwIfAborted(); } }) : await driver.isLoggedIn();
@@ -743,6 +744,7 @@ async function saveDrafts(ids, options = {}) {
         errors.push({ id: draft.id, draftNumber: draft.draftNumber || drafts.numberFor(draft.id), name: draft.template.name, message });
         emit("draft", { message: `草稿 ${draft.draftNumber || drafts.numberFor(draft.id)} 导入失败：${message}；已跳过，继续下一条（${position}）`, instanceId: inst.id });
       } finally {
+        releaseObservation?.();
         operation.controller.signal.removeEventListener("abort", abort);
         // The signal closes a dedicated page, including any late upload callbacks.
         child.controller.abort(new Error("本条草稿导入已结束"));

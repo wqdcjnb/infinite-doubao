@@ -93,6 +93,21 @@ function setupNative() {
 }
 function nativeOperation(kind='import') {return {...operation(kind),payload:{account:{id:'account1',name:'测试账号'},task:{id:'task1',prompt:'原始内容',parameters:{model:'seedance_v2.0_mini',duration:5,ratio:'9:16'},references:[]}}};}
 
+for(const fail of [false,true])test(`import observation exposes only the owned live window and clears it after completion (${fail})`,async()=>{
+  const {driver}=setupNative(),j=journal(),adapter=new executorModule.NativeAdapter({journal:j,client:transport(),accounts:{}});
+  const window={isDestroyed:()=>false};driver.window=window;
+  let release,entered=false;const hold=new Promise(resolve=>{release=resolve;});
+  driver.setText=async()=>{entered=true;await hold;if(fail)throw Error('synthetic import failure');return {ok:true};};
+  const running=adapter.execute(nativeOperation());
+  try {
+    for(let i=0;i<100&&!entered;i++)await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(entered,true);
+    assert.equal(adapter.observationWindow?.('account1')?.window,window);
+    assert.equal(adapter.observationWindow?.('another-account'),undefined);
+  } finally {release();if(fail)await assert.rejects(running,/native draft binding missing/);else await running;queue.stopAll();}
+  assert.equal(adapter.observationWindow?.('account1'),undefined);
+});
+
 for (const alreadyIncluded of [false, true]) test(`native import puts the built-in Seedance skill on the first line once (${alreadyIncluded})`,async()=>{
   const {calls}=setupNative(), j=journal(), api=transport();
   const adapter=new executorModule.NativeAdapter({journal:j,client:api,accounts:{}}), op=nativeOperation();

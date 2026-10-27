@@ -75,6 +75,33 @@ test('continuous frames use the fixed control contract without repeatedly config
   await h.deliver(descriptor());assert.equal(h.configured.length,1);
 });
 
+test('account observation follows the real import page and returns to the account page without reopening or clicking',async t=>{
+  const processing=page(),h=setup(t);
+  let current={instance:{id:'local-account-1'},window:processing.win};
+  h.adapter.observationWindow=()=>current;
+  await h.deliver(descriptor());
+  await until(()=>processing.captures.length>=2);
+  assert.ok(h.publishes.filter(body=>body.frame).every(body=>body.frame.busy===true));
+  assert.equal(h.captures.length,0);assert.deepEqual(processing.events,[]);assert.deepEqual(processing.loads,[]);assert.deepEqual(processing.scripts,[]);
+  await h.deliver(descriptor(),[inputCommand('during-import',{kind:'text',text:'must not reach the importer'})]);
+  assert.equal(h.acks().find(a=>a.id==='during-import')?.ok,false);assert.deepEqual(processing.events,[]);
+  current=undefined;
+  await until(()=>h.captures.length>=1);
+  await until(()=>h.publishes.some(body=>body.frame&&body.frame.busy===false));
+  assert.equal(processing.win.isDestroyed(),false);
+  await h.deliver(null);assert.equal(h.win.isDestroyed(),false);assert.equal(h.win.listenerCount('closed'),0);
+});
+
+test('disconnecting an import observer detaches its account listener and leaves both existing windows alive',async t=>{
+  const processing=page(),h=setup(t);
+  h.adapter.observationWindow=()=>({instance:{id:'local-account-1'},window:processing.win});
+  await h.deliver(descriptor());await until(()=>processing.captures.length>0);
+  await h.deliver(null);
+  assert.equal(h.win.listenerCount('closed'),0);
+  assert.equal(h.win.isDestroyed(),false);assert.equal(processing.win.isDestroyed(),false);
+  assert.deepEqual(processing.events,[]);
+});
+
 test('first compositor capture failure recovers on the next tick without publishing a fatal error',async t=>{
   t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:1000000});
   const h=setup(t),capture=h.wc.capturePage;let attempts=0;
