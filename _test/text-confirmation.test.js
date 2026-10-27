@@ -33,6 +33,57 @@ const request = "我将为你生成短视频，请先确认参数：视频生成
 const planRequest = "以上方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 5段分镜 / 仅环境音无配乐）是否按此开始生成？视频生成为高消耗生成。";
 const livePlanRequest = "是否按以上完整方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 6段分镜 / 仅环境音无对白）开始生成视频？视频生成为高消耗生成。";
 
+test("方案完成文字不能冒充成片，当前确认仍须等待按要求生成", () => {
+  for (const text of ["方案已完成。", "分镜已生成。", "提示词生成完成。", "视频已生成。"]) {
+    const p = page(); p.api.beginTask({ taskId: "planning-complete" });
+    const node = p.message("plan", text + livePlanRequest, "assistant"); p.add(node);
+    assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.5", duration: 30, ratio: "16:9" }).ok, true);
+    let progress = p.api.readProgress();
+    assert.equal(progress.state, "waiting_confirmation", text);
+    assert.equal(progress.generationStarted, false); assert.equal(progress.percent, 0); assert.equal(progress.mediaUrls.length, 0);
+    node.innerText = text;
+    progress = p.api.readProgress();
+    assert.equal(progress.state, "unknown", text);
+    assert.equal(progress.generationStarted, false); assert.equal(progress.percent, 0);
+  }
+});
+
+test("真实进度需区分视频已开始与本次成片地址", () => {
+  const p = page(); p.api.beginTask({ taskId: "video-progress" });
+  const node = p.message("new", "视频正在生成 12%", "assistant"); p.add(node);
+  let progress = p.api.readProgress();
+  assert.equal(progress.state, "running"); assert.equal(progress.generationStarted, true); assert.equal(progress.percent, 12);
+  const url = "https://fixture.invalid/current-video.mp4";
+  node.innerText = "生成完成";
+  node.querySelectorAll = selector => selector === "video" ? [{ currentSrc: url, closest: () => null }] : [];
+  progress = p.api.readProgress();
+  assert.equal(progress.state, "done"); assert.equal(progress.percent, 100); assert.deepEqual(Array.from(progress.mediaUrls), [url]);
+});
+
+test("原对话确认不能因方案已完成跳过唯一一次按要求生成", async () => {
+  const p = page(), sent = [];
+  p.add(p.message("receipt", "原草稿请求", "user"));
+  const reply = p.message("plan", "方案已完成。" + livePlanRequest, "assistant"); p.add(reply);
+  const task = { id: "planning-receipt", studioTaskId: "original-task", instanceId: "fixture", status: "submitted",
+    receiptUserMessageId: "receipt", conversationUrl: "https://fixture.invalid/chat/1", baselineMessageIds: ["receipt"], baselineUrls: [],
+    model: "seedance_v2.5", duration: 30, ratio: "16:9", storyboardId: "board", shotId: "shot", log: [] };
+  store.get().tasks.push(task); store.get().storyboards.push({ id: "board", shots: [{ id: "shot" }] }); store.save();
+  let text = "";
+  const driver = {
+    navigate: async () => {}, isLoggedIn: async () => ({ loggedIn: true }),
+    beginTask: async options => p.api.beginTask(options), readProgress: async () => p.api.readProgress(),
+    call: async (method, options) => p.api[method](options),
+    setText: async value => { text = value; return { ok: true }; },
+    send: async options => { sent.push({ text, options }); reply.innerText = "视频正在生成 1%"; return { ok: true }; }
+  };
+  orchestrator.init({ resolveDraftDriver: async () => driver });
+  await orchestrator.confirmSubmittedTaskOnce(task.id, { checkLease() {} });
+  assert.deepEqual(sent, [{ text: "按要求生成", options: { nativeOnly: true } }]);
+  assert.ok(task.generationObservedAt); assert.equal(task.status, "queued");
+  await orchestrator.confirmSubmittedTaskOnce(task.id, { checkLease() {} });
+  assert.equal(sent.length, 1, "已开始生成的原对话不能再次确认");
+});
+
 test("按钮形式的方案改为统一文字确认前仍核对模型时长和比例",()=>{
   const p=page();p.api.beginTask({taskId:"button-parameters"});
   const node=p.message("new","模型：Seedance 2.5 时长：30秒 比例16:9，确认生成。","assistant");

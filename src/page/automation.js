@@ -324,7 +324,7 @@
     var rejected = failedReply(roots);
     if (quotaFailure || rejected || /(生成失败|视频生成未能(?:提交)?成功|视频没能生成出来|审核不通过|未通过审核|违规内容)/.test(tail)) state = "failed";
     else if (/(生成中|排队中|正在生成|处理中)/.test(tail)) state = "running";
-    else if (urls.length || /(生成完成|已完成|已生成)/.test(tail)) state = "done";
+    else if (urls.length) state = "done";
     else if (findConfirmation(null, roots).kind) state = "waiting_confirmation";
     var generationStarted = state === "running" && /(?:视频.{0,10}(?:正在生成|生成中|排队中)|正在(?:为你)?生成视频)/.test(tail);
     return { state: state, errorCode: quotaFailure ? "quota" : rejected ? "platform_rejected" : "", generationStarted: generationStarted, percent: state === "done" ? 100 : percent, videos: urls.length, mediaUrls: urls, snippet: rejected && !tail.trim() ? "豆包已接收请求，但助手回复显示失败标记且没有返回内容；平台未提供具体原因，请查看原对话，不会自动重发" : tail.slice(-400) };
