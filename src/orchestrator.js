@@ -758,6 +758,7 @@ async function saveDrafts(ids, options = {}) {
   });
 }
 async function submitDrafts(ids, options = {}) {
+  if (options.dispatchOnly === true && options.sendOnly !== true) throw new Error("仅允许只发送验收记录投递动作，不得启动生成");
   const requested = selectedDrafts(ids), unresolved = [];
   const selected = requested.filter(d => {
     if (!d.submissionRecord?.task.submissionUncertain) return true;
@@ -862,10 +863,20 @@ async function submitDrafts(ids, options = {}) {
             const clicked = await sent;
             if (!clicked?.ok) { issued = false; drafts.updateMany({ [draft.id]: { submissionRecord: null } }); requirePage(clicked); }
             record.task.sentAt = clicked.clickedAt || record.task.submittedAt;
-            const receipt = requirePage(await driver.call("waitNativeDraftAccepted", { ...pageOptions, conversationIds: opened.conversationIds, baselineMessageIds: record.task.baselineMessageIds }));
+            if (options.dispatchOnly) {
+              record.task.dispatchReceipt = { taskId: draft.template.studioTaskId, draftId: draft.id, nativeId: draft.nativeBinding.nativeId, clickedAt: record.task.sentAt, outcome: "pending" };
+              drafts.updateMany({ [draft.id]: { submissionRecord: JSON.parse(JSON.stringify(record)), dispatchReceipt: record.task.dispatchReceipt } });
+            }
+            const receipt = requirePage(await driver.call("waitNativeDraftAccepted", { ...pageOptions, conversationIds: opened.conversationIds, baselineMessageIds: record.task.baselineMessageIds, dispatchOnly: options.dispatchOnly === true }));
             checkDraft();
+            if (options.dispatchOnly && receipt.quotaLimited === true && /^https:\/\/www\.doubao\.com\/chat\/[^/?#]+$/.test(receipt.conversationUrl || "")) {
+              Object.assign(record.task.dispatchReceipt, { outcome: "quota_limited", conversationUrl: receipt.conversationUrl, providerMessage: receipt.providerMessage });
+              drafts.updateMany({ [draft.id]: { submissionRecord: JSON.parse(JSON.stringify(record)), dispatchReceipt: record.task.dispatchReceipt, nativeError: "已点击发送，豆包返回免费额度限制；未生成" } });
+              progress("本条已投递，豆包返回限额；继续下一条");return "quota_limited";
+            }
             if (!receipt.userMessageId) throw new Error("回执缺少本次用户消息标识，请核对原对话；不会自动重发");
             Object.assign(record.task, { conversationUrl: receipt.conversationUrl, conversationLocked: true, submissionUncertain: false, receiptUserMessageId: receipt.userMessageId, baselineMessageIds: [receipt.userMessageId] });
+            if (record.task.dispatchReceipt) Object.assign(record.task.dispatchReceipt, { outcome: "message_accepted", conversationUrl: receipt.conversationUrl });
             if (options.sendOnly) {
               Object.assign(record.task, { status: "submitted", stage: "submitted", waitReason: "已发送到豆包；生成确认暂不处理" });
               record.sb.shots[0].status = "submitted";
@@ -877,7 +888,7 @@ async function submitDrafts(ids, options = {}) {
             // other drafts or its generation reminder.
             commitTemplates([record], [draft.id], false);
             progress("后台已确认接收");
-          }, 15 * 60 * 1000).then(()=>activity?.waitForResume?.({receiptAccepted:true})).catch(recordFailure).finally(cleanup);
+          }, 15 * 60 * 1000).then(outcome=>activity?.waitForResume?.({receiptAccepted:outcome!=="quota_limited",providerResponded:outcome==="quota_limited"})).catch(recordFailure).finally(cleanup);
         } catch (error) { recordFailure(error); }
         finally { if (!trackingReceipt) cleanup(); }
       }

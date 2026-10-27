@@ -29,6 +29,17 @@ async function fixture(t,receipt) {
   t.after(()=>{queue.stopAll();assert.equal(path.dirname(home),os.tmpdir());assert.match(path.basename(home),/^doubao-captcha-send-/);fs.rmSync(home,{recursive:true,force:true});});
   return {ids,events,sent,options:{instanceId:account.id,sendOnly:true,startQueue:false,checkLease:()=>{}}};
 }
+
+test('dispatch-only acceptance records explicit quota responses and continues without confirming generation',async t=>{
+  const f=await fixture(t,async value=>({ok:true,quotaLimited:true,conversationUrl:'https://www.doubao.com/chat/'+value.id,providerMessage:'近7天免费额度已用完'}));
+  await queue.submitDrafts(f.ids,{...f.options,dispatchOnly:true});
+  assert.deepEqual(f.sent,f.ids);assert.equal(store.get().tasks.length,0);
+  for(const draft of drafts.list()){assert.equal(draft.dispatchReceipt.outcome,'quota_limited');assert.ok(draft.dispatchReceipt.clickedAt);assert.equal(draft.submissionRecord.task.submissionUncertain,true);}
+});
+
+test('quota-tolerant dispatch cannot enable generation mode',async t=>{
+  const f=await fixture(t);await assert.rejects(queue.submitDrafts(f.ids,{...f.options,sendOnly:false,dispatchOnly:true}),/不得启动生成/);assert.deepEqual(f.sent,[]);
+});
 test('sender exposes and releases its exact page before advancing, while acceptance still requires the original message',async t=>{
   const f=await fixture(t);const registered=[],released=[];
   await queue.submitDrafts(f.ids,{...f.options,onDeliveryPage:({draft,driver})=>{registered.push({id:draft.id,driver});return {captchaSeen:false,setStage:()=>{},close:()=>{released.push(draft.id);f.events.push({type:'release',id:draft.id});}};}});

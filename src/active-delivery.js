@@ -40,7 +40,7 @@ class ActiveDeliveryPages {
         if(this.driver.resumeAutoClose?.()===false)throw Error('自动任务已停止，原页面保留供人工核对');
         this.manual=false;this.keepOpen=false;return true;
       },
-      async waitForResume({receiptAccepted=false}={}) {while(this.manual||this.pauseRequested){this.check();if(receiptAccepted&&await this.observe({taskId:this.taskId,pageId:this.pageId},{automatic:true}))break;await new Promise(resolve=>setTimeout(resolve,100));}this.check();},
+      async waitForResume({receiptAccepted=false,providerResponded=false}={}) {while(this.manual||this.pauseRequested){this.check();if((receiptAccepted||providerResponded)&&await this.observe({taskId:this.taskId,pageId:this.pageId},{automatic:true}))break;await new Promise(resolve=>setTimeout(resolve,100));}this.check();},
       async runAutomation(run) {while(this.manual||this.pauseRequested)await this.waitForResume();this.check();this.activeSteps++;try{return await run();}finally{this.activeSteps--;}},
       async assertInput(binding,method,value) {
         this.binding(binding);if(!this.manual)throw Error('captcha observe mode');

@@ -115,7 +115,34 @@ class NativeAdapter {
       } catch {}
       return {taskId:snapshot.id,status:'uncertain',error:'inspect original native draft and conversation'};
     });
-    return {outcome:items.every(t=>t.status==='submitted')?'success':'uncertain',receipt:{tasks:items}};
+    const dispatches=op.payload.sendOnly===true?this.dispatchEvidence(op,tasks):[];
+    return {outcome:items.every(t=>t.status==='submitted')?'success':'uncertain',receipt:{tasks:items,...(op.payload.sendOnly===true?{dispatchOnly:true,dispatches}:{})}};
+  }
+  dispatchEvidence(op,tasks=op.payload.tasks||[]) {
+    const rows=[];
+    for(const snapshot of tasks){
+      const binding=this.journal.task(snapshot.id);if(binding?.accountId!==op.accountId)continue;
+      const draft=drafts.list().find(d=>d.id===binding.draftId);let local;
+      try{local=this.local(snapshot.id,op.accountId);}catch{}
+      const raw=local?.dispatchReceipt||draft?.dispatchReceipt;
+      if(raw&&['quota_limited','message_accepted','pending'].includes(raw.outcome))rows.push({...raw,...(raw.outcome==='pending'?{outcome:'attempted_unconfirmed'}:{})});
+      else if(local?.receiptUserMessageId&&local.sentAt)rows.push({taskId:snapshot.id,draftId:binding.draftId,nativeId:binding.nativeBinding?.nativeId,clickedAt:local.sentAt,outcome:'message_accepted',conversationUrl:local.conversationUrl});
+    }
+    return rows;
+  }
+  continuationReceipt(op) {
+    const dispatches=this.dispatchEvidence(op),complete=dispatches.length===op.payload.tasks.length;
+    return {outcome:complete?'success':'uncertain',receipt:{status:complete?'draft_dispatch_complete':'draft_dispatch_partial',dispatchOnly:true,originalOperationId:op.payload.originalOperationId,dispatches}};
+  }
+  async continueUnstartedDrafts(op,recover=false,context={}) {
+    const original=this.journal.get(op.payload.originalOperationId),tasks=op.payload.tasks,pause=original?.result?.receipt?.deliveryPause;
+    if(op.payload.sendOnly!==true||op.payload.dispatchOnly!==true||!original?.reported||original.state!=='done'||original.operation.kind!=='send'||original.operation.accountId!==op.accountId||original.operation.batchId!==op.batchId||original.operation.payload.sendOnly!==true||original.result.outcome!=='uncertain'||!Array.isArray(tasks)||!tasks.length)throw Error('original unstarted dispatch evidence missing');
+    const index=original.operation.payload.tasks.findIndex(t=>t.id===pause?.taskId&&t.draftId===pause?.draftId),suffix=original.operation.payload.tasks.slice(index+1);
+    if(index<0||JSON.stringify(suffix)!==JSON.stringify(tasks)||JSON.stringify(tasks.map(t=>t.draftId))!==JSON.stringify(pause.notStartedDraftIds))throw Error('unstarted dispatch suffix changed');
+    if(recover)return this.continuationReceipt(op);
+    if(original.operation.payload.account.environment?.version!==op.payload.account.environment?.version)throw Error('original account environment changed');
+    for(const task of tasks){const binding=this.journal.task(task.id),draft=drafts.list().find(d=>d.id===task.draftId),template=draft?.template;if(task.references?.length||binding?.accountId!==op.accountId||binding.draftId!==task.draftId||!draft||draft.nativeState!=='saved'||draft.submissionRecord||draft.nativeBinding?.nativeId!==task.nativeBinding?.nativeId||draft.executionMode!=='work'||template?.studioTaskId!==task.id||template.prompt!==task.prompt||['model','duration','ratio'].some(key=>template[key]!==task.parameters?.[key])||template.attachments?.length)throw Error('draft already dispatched or changed');}
+    await this.send(op,false,context);return this.continuationReceipt(op);
   }
   async send(op,recover=false,context={}) {
     const inst=this.account(op),tasks=op.payload.tasks;
@@ -139,12 +166,13 @@ class NativeAdapter {
       },
       onDeliveryPause:info=>{deliveryPause=info;}
     }:{};
-    try {await queue.submitDrafts(ids,{instanceId:inst.id,maxPages:this.maxDraftPages,startQueue:false,sendOnly:true,checkLease:this.leaseGuard(op,context),...visibility});} catch { /* Each durable native receipt decides its own status. */ }
+    try {await queue.submitDrafts(ids,{instanceId:inst.id,maxPages:this.maxDraftPages,startQueue:false,sendOnly:true,dispatchOnly:op.payload.sendOnly===true,checkLease:this.leaseGuard(op,context),...visibility});} catch { /* Each durable native receipt decides its own status. */ }
     const result=this.sendReceipt(op,tasks);
     if(deliveryPause)result.receipt.deliveryPause=deliveryPause;
     return result;
   }
   progress(op) {
+    if(op.kind==='account'&&op.payload.action==='continue_unstarted_drafts')return {outcome:'progress',receipt:this.continuationReceipt(op).receipt};
     if(op.kind!=='send')return null;
     const tasks=[];
     for(const snapshot of op.payload.tasks||[]) {
@@ -298,10 +326,11 @@ class NativeAdapter {
     if(op.kind==='import')return this.import(op,false,context);
     if(op.kind==='send')return this.send(op,false,context);
     if(op.kind==='track')return this.track(op,context);
-    if(op.kind==='account')return op.payload.action==='reconcile_import'?this.reconcileImport(op,context):op.payload.action==='resume_unwritten_import'?this.resumeUnwrittenImport(op,context):this.login(op,context);
+    if(op.kind==='account')return op.payload.action==='continue_unstarted_drafts'?this.continueUnstartedDrafts(op,false,context):op.payload.action==='reconcile_import'?this.reconcileImport(op,context):op.payload.action==='resume_unwritten_import'?this.resumeUnwrittenImport(op,context):this.login(op,context);
     throw new Error('unsupported operation');
   }
   async recover(op,context={}) {
+    if(op.kind==='account'&&op.payload.action==='continue_unstarted_drafts')return this.continueUnstartedDrafts(op,true,context);
     if(op.kind==='import')return this.import(op,true,context);
     if(op.kind==='send')return this.send(op,true,context);
     if(op.kind==='track')return this.track(op,context);

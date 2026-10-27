@@ -720,11 +720,21 @@
     });
     return accepted.size === 1 ? { ok: true, conversationUrl: location.href, userMessageId: Array.from(accepted)[0], bindings: snapshot() } : { ok: false };
   };
+  api.readNativeQuotaResponse = function (options) {
+    var match = location.pathname.match(/^\/chat\/([^/]+)$/);
+    if (!match || (options.conversationIds || []).includes(match[1]) || api.readNativeDeliveryState().captchaDetected) return null;
+    var node = Array.from(document.querySelectorAll('p, [data-message-id]')).find(function (item) {
+      var body = normalize(text(item));
+      return visible(item) && !item.closest('nav, aside, #input-engine-container, [contenteditable="true"]') && /^近\s*7\s*天免费额度已用完[，,]/.test(body) && !normalize(options.prompt).includes(body);
+    });
+    return node ? { ok: true, quotaLimited: true, conversationUrl: location.href, providerMessage: normalize(text(node)).slice(0, 300) } : null;
+  };
   api.waitNativeDraftAccepted = result(async function (options) {
     var deadline = Date.now() + 120000;
     while (Date.now() < deadline) {
       var receipt = api.readNativeDraftReceipt(options);
       if (receipt.ok) return receipt;
+      if (options.dispatchOnly === true) { var quota = api.readNativeQuotaResponse(options); if (quota) return quota; }
       if (Array.from(document.querySelectorAll('iframe[src*="/verifycenter/captcha"]')).some(visible)) deadline = Date.now() + 120000;
       await new Promise(function (resolve) { setTimeout(resolve, 250); });
     }
