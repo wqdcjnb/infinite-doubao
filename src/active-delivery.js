@@ -19,7 +19,10 @@ class ActiveDeliveryPages {
         this.check();let state;
         try {state=await this.driver.call('readNativeDeliveryState',point);} catch {state=null;}
         this.check();const value=state?.captcha,r=value?.rect,detected=state?.captchaDetected===true||Boolean(value);
-        if(detected)this.captchaSeen=true;
+        if(detected){this.captchaSeen=true;this.keepOpen=true;this.driver.preserve?.();}
+        if(detected&&context.solveCaptcha&&!this.solverAttempted&&!this.manual&&!this.pauseRequested){
+          this.solverAttempted=true;this.solverPromise=Promise.resolve().then(()=>context.solveCaptcha(this)).catch(()=>({solved:false,manualRequired:true,reason:'solver_failed'}));
+        }
         if(value&&typeof value.id==='string'&&value.id.length<=100&&r&&[r.x,r.y,r.width,r.height].every(Number.isFinite)&&r.x>=0&&r.y>=0&&r.width>0&&r.height>0&&r.x+r.width<=4096&&r.y+r.height<=4096) {
           this.captcha={id:value.id,rect:{x:r.x,y:r.y,width:r.width,height:r.height},focused:value.focused===true};this.captchaSeen=true;
         } else {this.captcha=null;}
@@ -30,17 +33,17 @@ class ActiveDeliveryPages {
         this.check();if(!value||value.taskId!==this.taskId||value.pageId!==this.pageId)throw Error('delivery binding mismatch');
       },
       async takeover(binding) {
-        this.binding(binding);this.pauseRequested=true;this.keepOpen=true;this.driver.preserve?.();
+        this.binding(binding);this.humanTouched=true;this.pauseRequested=true;this.keepOpen=true;this.driver.preserve?.();this.solverAbort?.abort();
         while(this.activeSteps){this.check();await new Promise(resolve=>setTimeout(resolve,25));}
         this.check();this.manual=true;this.pauseRequested=false;await this.snapshot();
       },
       async observe(binding,{automatic=false}={}) {
         this.binding(binding);const frame=await this.snapshot();
-        if(automatic&&(!frame.captchaStateKnown||frame.captchaDetected||this.inputHeld||this.inputInFlight))return false;
+        if(automatic&&(!frame.captchaStateKnown||frame.captchaDetected||this.inputHeld||this.inputInFlight||this.activeSteps))return false;
         if(this.driver.resumeAutoClose?.()===false)throw Error('自动任务已停止，原页面保留供人工核对');
         this.manual=false;this.keepOpen=false;return true;
       },
-      async waitForResume({receiptAccepted=false,providerResponded=false}={}) {while(this.manual||this.pauseRequested){this.check();if((receiptAccepted||providerResponded)&&await this.observe({taskId:this.taskId,pageId:this.pageId},{automatic:true}))break;await new Promise(resolve=>setTimeout(resolve,100));}this.check();},
+      async waitForResume({receiptAccepted=false,providerResponded=false}={}) {while(this.manual||this.pauseRequested||this.keepOpen&&this.captchaSeen){this.check();if((receiptAccepted||providerResponded)&&await this.observe({taskId:this.taskId,pageId:this.pageId},{automatic:true}))break;await new Promise(resolve=>setTimeout(resolve,100));}this.check();},
       async runAutomation(run) {while(this.manual||this.pauseRequested)await this.waitForResume();this.check();this.activeSteps++;try{return await run();}finally{this.activeSteps--;}},
       async assertInput(binding,method,value) {
         this.binding(binding);if(!this.manual)throw Error('captcha observe mode');
@@ -59,7 +62,7 @@ class ActiveDeliveryPages {
         const reason=error instanceof Error?error:Error('captcha handoff interrupted');reason.code='CAPTCHA_HANDOFF_INTERRUPTED';context.cancel(reason);
       },
       close() {
-        if(this.closed)return;this.closed=true;this.manual=false;clearInterval(this.timer);
+        if(this.closed)return;this.closed=true;this.manual=false;this.solverAbort?.abort();clearInterval(this.timer);
         if(this.keepOpen&&!this.driver.window.isDestroyed?.())registry.retained.set(this.accountId,this);
         this.driver.window.removeListener?.('closed',this.onClosed);
         if(registry.pages.get(this.accountId)===this)registry.pages.delete(this.accountId);

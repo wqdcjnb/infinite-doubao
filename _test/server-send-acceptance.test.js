@@ -34,7 +34,7 @@ test('ordinary-account quota rejection cannot stall serial draft delivery or its
   console.log(JSON.stringify({durableAcceptedTasks:result.receipt.tasks.length,receiptStatuses:result.receipt.tasks.map(t=>t.status)}));
  }finally{queue.stopAll();if(sending)await sending.catch(()=>{});fs.rmSync(runtime,{recursive:true,force:true});}
 });
-test('Adapter binds visibility to the signed send operation and retains compact captcha interruption diagnostics',async()=>{
+for(const sendOnly of [true,false])test('Adapter binds visibility to the signed send operation and retains compact captcha interruption diagnostics (sendOnly='+sendOnly+')',async()=>{
  const runtime=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'studio-send-page-'));P.init({home:runtime});store.load();queue.pause('');
  const j=new Journal(path.join(runtime,'journal.json')),adapter=new NativeAdapter({journal:j,client:{},accounts:{},sessionId:'session',environment:{configure(inst){inst.studioEnvironment={version:'env'};}}});
  const task={id:'task',prompt:'Only a receipt',parameters:{model:'seedance_v2.5',duration:30,ratio:'16:9'},references:[]};
@@ -50,7 +50,7 @@ test('Adapter binds visibility to the signed send operation and retains compact 
    assert.equal(adapter.deliveryPages.borrow(target).driver,driver);assert.equal((await handle.snapshot()).taskId,'task');handle.close();
    options.onDeliveryPause({reason:'captcha_wait_ended',taskId:'task',draftId:'draft',notStartedDraftIds:[]});throw Error('captcha paused');
   };
-  const result=await adapter.execute({id:'send',kind:'send',accountId:'account',batchId:'batch',leaseToken:'lease',leaseUntil:Date.now()+60000,payload:{account:{id:'account',name:'account',environment:{version:'env'}},tasks:[task],sendOnly:true}});
+  const result=await adapter.execute({id:'send',kind:'send',accountId:'account',batchId:'batch',leaseToken:'lease',leaseUntil:Date.now()+60000,payload:{account:{id:'account',name:'account',environment:{version:'env'}},tasks:[task],sendOnly}});
   assert.equal(result.outcome,'uncertain');assert.ok(result.receipt.deliveryPause,'structured captcha interruption is missing');assert.equal(result.receipt.deliveryPause.reason,'captcha_wait_ended');assert.equal(adapter.deliveryPages.pages.size,0);
  } finally {queue.submitDrafts=previous;queue.stopAll();assert.equal(path.dirname(runtime),require('node:os').tmpdir());assert.match(path.basename(runtime),/^studio-send-page-/);fs.rmSync(runtime,{recursive:true,force:true});}
 });

@@ -9,7 +9,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-bridge-'));
 after(() => fs.rmSync(root, {recursive:true, force:true}));
 let n=0;
 function journal() { return new Journal(path.join(root, String(++n), 'journal.json')); }
-function operation(kind='send', id='op1') { return {id, kind, accountId:'account1',leaseToken:'lease-private',leaseUntil:new Date(Date.now()+60000).toISOString(),payload:{account:{id:'account1', name:'测试账号'}, tasks:[{id:'task1'}]}}; }
+function operation(kind='send', id='op1') { return {id, kind, accountId:'account1',batchId:'batch1',leaseToken:'lease-private',leaseUntil:new Date(Date.now()+60000).toISOString(),payload:{account:{id:'account1', name:'测试账号'}, tasks:[{id:'task1'}]}}; }
 function transport() { const reports=[]; return { reports, heartbeat: async()=>({}), report:async(op,result)=>{reports.push({op,result});}, claim:async()=>({operation:null}) }; }
 
 test('operation intent survives reload before send; duplicate receipt never sends twice', async()=>{
@@ -85,9 +85,10 @@ try {executorModule=require('../src/server-executor');} catch(e) {if(e.code!=='M
 const P=require('../src/paths'), store=require('../src/store'), queue=require('../src/orchestrator');
 function setupNative() {
   P.init({home:path.join(root,`native-${++n}`)});store.load();queue.pause('');
+  const instance=store.add({id:'studio-account-'+crypto.createHash('sha256').update('account1').digest('hex').slice(0,24),name:'测试账号',url:store.DEFAULT_URL});instance.studioEnvironment={version:'fixture-environment'};
   const calls=[];
-  const driver={isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),pasteFiles:async()=>({ok:true}),setText:async()=>({ok:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),navigate:async()=>{},url:async()=> 'https://www.doubao.com/chat/real1',readProgress:async()=>({state:'running',generationStarted:true}),close:()=>{},
-    call:async(method,opts)=>{calls.push({method,opts}); if(method==='restoreNativeDrafts')return {ok:true,bindings:[]};if(method==='saveNativeDraft')return {ok:true,bindings:[{id:opts.id,nativeId:'real-native-1',accountScope:'scope-a'}]};if(method==='openNativeDraft')return {ok:true,conversationIds:[]};if(method==='waitNativeDraftAccepted')return {ok:true,conversationUrl:'https://www.doubao.com/chat/real1',userMessageId:'message-'+opts.id};if(method==='peekGenerationConfirmation')return {ok:true};if(method==='readProgress')return {state:'running',generationStarted:true};return {ok:true};}};
+  const driver={window:{isDestroyed:()=>false,getContentSize:()=>[1280,800]},isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),pasteFiles:async()=>({ok:true}),setText:async()=>({ok:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),navigate:async()=>{},url:async()=> 'https://www.doubao.com/chat/real1',readProgress:async()=>({state:'running',generationStarted:true}),close:()=>{},
+    call:async(method,opts)=>{calls.push({method,opts}); if(method==='restoreNativeDrafts')return {ok:true,bindings:[]};if(method==='saveNativeDraft')return {ok:true,bindings:[{id:opts.id,nativeId:'real-native-1',accountScope:'scope-a',titles:[opts.prompt],index:0}]};if(method==='openNativeDraft')return {ok:true,conversationIds:[]};if(method==='sendNativeDraft')return {ok:true,clickedAt:new Date().toISOString(),attachmentProof:{version:1,names:(opts.attachmentNames||[]).slice(),fileKeys:(opts.attachmentNames||[]).map((name,index)=>'fixture-key-'+index+'-'+name)}};if(method==='waitNativeDraftAccepted')return {ok:true,conversationUrl:'https://www.doubao.com/chat/real1',userMessageId:'message-'+opts.id,attachmentConsumptionProof:{version:1,names:(opts.attachmentNames||[]).slice(),userMessageId:'message-'+opts.id,checkedAt:new Date().toISOString()}};if(method==='readNativeDeliveryState')return {captchaDetected:false};if(method==='peekGenerationConfirmation')return {ok:true};if(method==='readProgress')return {state:'running',generationStarted:true};return {ok:true};}};
   queue.init({resolveDriver:async()=>driver,resolveDraftDriver:async()=>driver});
   return {calls,driver};
 }
@@ -491,7 +492,7 @@ test('account scrolling is bounded and screenshots include capture time',async()
   assert.equal(commands.length,1);queue.stopAll();
 });
 test('probe returns version and executor generation even when browser proxy navigation fails',async()=>{
-  setupNative();const adapter=new executorModule.NativeAdapter({journal:journal(),sessionId:'session-fixture',client:{token:'private-token'},environment:{configure(inst){inst.studioEnvironment={version:'version-fixture'};}},accounts:{open:async()=>{throw Error('synthetic secret');}}});
+  setupNative();const adapter=new executorModule.NativeAdapter({journal:journal(),sessionId:'session-fixture',client:{token:'private-token'},environment:{configure(inst){inst.studioEnvironment={version:'version-fixture'};}},accounts:{close:()=>{},open:async()=>{throw Error('synthetic secret');}}});
   const result=await adapter.execute({...operation('account'),payload:{account:{id:'account1'},action:'probe'}});
   assert.equal(result.receipt.environmentVersion,'version-fixture');assert.equal(result.receipt.executorSessionId,'session-fixture');
   assert.equal(result.receipt.environmentCheck.proxy.ok,false);assert.equal(JSON.stringify(result).includes('synthetic secret'),false);queue.stopAll();

@@ -5,6 +5,7 @@
   var preparedAt = 0, inputScope = "";
   var storedBindings = new Map();
   var importEpoch = 0;
+  var sendAttachmentProof = null;
   var captchaFrames = new WeakMap(), captchaEpoch = 0, captchaDocumentId = "";
   api.readNativeDeliveryState = function (point) {
     var frames = Array.from(document.querySelectorAll('iframe[src*="/verifycenter/captcha"]')).filter(visible);
@@ -86,7 +87,20 @@
     var buttons = visibleNodes(root, 'button[data-testid="chat_input_send_button"]'), button = buttons.length === 1 ? buttons[0] : null;
     if (!button) reasons.push("发送按钮尚未唯一加载");
     else if (!enabled(button) || button.getAttribute("data-disabled") === "" || button.getAttribute("data-loading") === "") reasons.push("发送按钮仍不可用（可能仍在上传素材）");
-    return { reasons: reasons, editor: current, button: button };
+    var attachmentSignature = null;
+    // Undefined keeps legacy text callers compatible. An explicit [] is an
+    // exact empty manifest and must reject attachments left in the composer.
+    if (options.attachmentNames !== undefined) {
+      if (!Array.isArray(options.attachmentNames)) reasons.push("预期附件清单无效，尚未确认附件就绪");
+      else {
+        var cards = importCards(), names = cards.map(function (card) { return card.name; });
+        if (!sameNames(names, options.attachmentNames)) reasons.push("附件清单不一致（预期 " + options.attachmentNames.length + " 个，当前 " + cards.length + " 个；名称和顺序必须完全一致）");
+        if (cards.some(function (card) { return card.failed; })) reasons.push("草稿附件上传失败");
+        else if (cards.some(function (card) { return !card.ready; })) reasons.push("草稿附件尚未全部上传就绪（需当前状态Normal、fileKey和正确fileName）");
+        attachmentSignature = JSON.stringify(cards.map(function (card) { return [card.name, card.fileKey]; }));
+      }
+    }
+    return { reasons: reasons, editor: current, button: button, attachmentSignature: attachmentSignature };
   }
   function numberIn(value) {
     var body = normalize(value).replace(/^\[Seedance 2\.5\]\(skill:\/\/seedance-25\?type=2&id=353376777986\)\s*/, "");
@@ -287,7 +301,7 @@
           break;
         }
       }
-      return { name: card.getAttribute("aria-label"), ready: !!(state && state.fileKey && state.status === "Normal" && state.fileName === card.getAttribute("aria-label")), failed: !!(state && /error|fail/i.test(state.status || "")) };
+      return { name: card.getAttribute("aria-label"), fileKey: state && state.fileKey || "", ready: !!(state && state.fileKey && state.status === "Normal" && state.fileName === card.getAttribute("aria-label")), failed: !!(state && /error|fail/i.test(state.status || "")) };
     });
   }
   function sameNames(actual, expected) { return JSON.stringify(actual) === JSON.stringify(expected); }
@@ -666,6 +680,7 @@
     return verified;
   });
   api.openNativeDraft = result(async function (options) {
+    sendAttachmentProof = null;
     var deadline = Date.now() + 60000;
     // IndexedDB can finish before the sidebar mounts in a fresh sender page.
     // Wait for this verified native ID, rather than treating a missing DOM row
@@ -679,10 +694,10 @@
       row.click();
       return true;
     }, "草稿数据已核对，但网页尚未显示对应条目，请检查豆包侧栏后重试；尚未发送", deadline);
-    var stableAt = 0, previousEditor = null, state, lastSelectionAt = Date.now();
+    var stableAt = 0, previousEditor = null, previousAttachments = null, state, lastSelectionAt = Date.now();
     await wait(async function () {
       state = readiness(options);
-      if (state.reasons.length || state.editor !== previousEditor) { previousEditor = state.editor; stableAt = 0; }
+      if (state.reasons.length || state.editor !== previousEditor || state.attachmentSignature !== previousAttachments) { previousEditor = state.editor; previousAttachments = state.attachmentSignature; stableAt = 0; }
       if (state.reasons.length) {
         // Sidebar synchronization may remount/collapse the selected row after
         // its first click. Re-resolve only this native ID; a detached click must
@@ -698,13 +713,18 @@
       if (!stableAt) stableAt = Date.now();
       return Date.now() - stableAt >= 600;
     }, function () { return "豆包草稿未就绪：" + (state && state.reasons.length ? state.reasons.join("；") : "输入区仍在切换") + "；尚未发送"; }, deadline);
+    if (options.attachmentNames !== undefined) sendAttachmentProof = { id: options.id, editor: state.editor, signature: state.attachmentSignature };
     return { ok: true, conversationIds: Array.from(document.querySelectorAll('a[id^="conversation_"]')).map(function (a) { return a.id.slice(13); }) };
   });
   api.sendNativeDraft = result(async function (options) {
     var state = readiness(options);
+    if (options.attachmentNames !== undefined && (state.reasons.length || !sendAttachmentProof || sendAttachmentProof.id !== options.id || sendAttachmentProof.editor !== state.editor || sendAttachmentProof.signature !== state.attachmentSignature)) {
+      sendAttachmentProof = null; state.reasons.push("草稿附件尚未稳定核对或发送前已变化，请重新打开原草稿核对");
+    }
     if (state.reasons.length) throw new Error("当前草稿未就绪：" + state.reasons.join("；") + "；尚未点击发送");
+    var attachmentProof = options.attachmentNames !== undefined ? { version: 1, names: options.attachmentNames.slice(), fileKeys: JSON.parse(state.attachmentSignature).map(function (item) { return item[1]; }) } : null;
     state.button.click();
-    return { ok: true, clickedAt: new Date().toISOString() };
+    return { ok: true, clickedAt: new Date().toISOString(), ...(attachmentProof ? { attachmentProof: attachmentProof } : {}) };
   });
   api.readNativeDraftReceipt = function (options) {
     var match = location.pathname.match(/^\/chat\/([^/]+)$/), id = match && match[1];
@@ -722,23 +742,55 @@
     return accepted.size === 1 ? { ok: true, conversationUrl: location.href, userMessageId: Array.from(accepted)[0], bindings: snapshot() } : { ok: false };
   };
   api.readNativeQuotaResponse = function (options) {
+    if (typeof location === "undefined" || !normalize(options.prompt) || !Array.isArray(options.conversationIds) || !Array.isArray(options.baselineMessageIds)) return null;
     var match = location.pathname.match(/^\/chat\/([^/]+)$/);
     if (!match || (options.conversationIds || []).includes(match[1]) || api.readNativeDeliveryState().captchaDetected) return null;
+    var baseline = new Set(options.baselineMessageIds), messages = Array.from(document.querySelectorAll('[data-message-id]'));
+    var positions = new Map(), currentUsers = new Set(), userIndex = -1, baselineIndex = -1, number = numberIn(options.prompt);
+    function role(node) {
+      var owner = node.closest && node.closest('[data-message-role], [data-role]');
+      return owner && (owner.getAttribute('data-message-role') || owner.getAttribute('data-role'));
+    }
+    messages.forEach(function (item, index) {
+      var id = String(item.getAttribute('data-message-id') || '').trim();
+      if (!id) return;
+      positions.set(id, index);
+      if (baseline.has(id)) { baselineIndex = index; return; }
+      if (visible(item) && role(item) === 'user' && (number ? String(item.textContent || text(item)).includes('【草稿编号：' + number + '】') : text(item).includes(normalize(options.prompt)))) {
+        currentUsers.add(id); userIndex = index;
+      }
+    });
+    if (currentUsers.size > 1) return null;
     var node = Array.from(document.querySelectorAll('p, [data-message-id]')).find(function (item) {
-      var body = normalize(text(item));
-      return visible(item) && !item.closest('nav, aside, #input-engine-container, [contenteditable="true"]') && /^近\s*7\s*天免费额度已用完[，,]/.test(body) && !normalize(options.prompt).includes(body);
+      var owner = item.closest && item.closest('[data-message-id]'), id = String(owner && owner.getAttribute('data-message-id') || '').trim(), body = normalize(text(item));
+      return id && positions.has(id) && !baseline.has(id) && positions.get(id) > Math.max(userIndex, baselineIndex) && role(item) === 'assistant' && visible(item) &&
+        !item.closest('nav, aside, #input-engine-container, [contenteditable="true"], blockquote, q') && (!item.querySelectorAll || !item.querySelectorAll('blockquote, q').length) &&
+        /^近\s*7\s*天免费额度已用完[，,]/.test(body) && !normalize(options.prompt).includes(body);
     });
     return node ? { ok: true, quotaLimited: true, conversationUrl: location.href, providerMessage: normalize(text(node)).slice(0, 300) } : null;
   };
   api.waitNativeDraftAccepted = result(async function (options) {
-    var deadline = Date.now() + 120000;
+    var deadline = Date.now() + 120000, pendingAttachments = false, clearedAt = null, clearedMessage = "", clearedRoot = null, clearedEditor = null;
     while (Date.now() < deadline) {
+      var quota = api.readNativeQuotaResponse(options); if (quota) return quota;
       var receipt = api.readNativeDraftReceipt(options);
-      if (receipt.ok) return receipt;
-      if (options.dispatchOnly === true) { var quota = api.readNativeQuotaResponse(options); if (quota) return quota; }
+      if (receipt.ok) {
+        if (!Array.isArray(options.attachmentNames) || !options.attachmentNames.length) return receipt;
+        pendingAttachments = true;
+        var root = document.querySelector("#input-engine-container"), current = importEditor();
+        var remaining = root && Array.from(root.querySelectorAll('[data-testid="attachment_area"] [data-kind][aria-label]'));
+        var busy = root && Array.from(root.querySelectorAll('[aria-busy="true"], [data-loading="true"], [role="progressbar"], progress')).some(visible);
+        var challenge = Array.from(document.querySelectorAll('iframe[src*="/verifycenter/captcha"]')).some(visible);
+        if (root && visible(root) && current && visible(current) && current.closest && current.closest("#input-engine-container") === root && !importText(current) && remaining.length === 0 && !busy && !challenge) {
+          var message = receipt.conversationUrl + "/" + receipt.userMessageId;
+          if (clearedAt === null || clearedMessage !== message || clearedRoot !== root || clearedEditor !== current) { clearedAt = Date.now(); clearedMessage = message; clearedRoot = root; clearedEditor = current; }
+          if (Date.now() - clearedAt >= 500) return { ...receipt, attachmentConsumptionProof: { version: 1, names: options.attachmentNames.slice(), userMessageId: receipt.userMessageId, checkedAt: new Date().toISOString() } };
+        } else { clearedAt = null; clearedMessage = ""; clearedRoot = null; clearedEditor = null; }
+      } else { clearedAt = null; clearedMessage = ""; clearedRoot = null; clearedEditor = null; }
       if (Array.from(document.querySelectorAll('iframe[src*="/verifycenter/captcha"]')).some(visible)) deadline = Date.now() + 120000;
       await new Promise(function (resolve) { setTimeout(resolve, 250); });
     }
+    if (pendingAttachments) return { ok: false, attachmentsPending: true, reason: "文字消息已出现，但未确认附件已从输入框完整提交；保留原页和发送意图，停止后续投递，不会自动重发" };
     throw new Error("尚未确认豆包接收本条草稿，请核对最近任务；不会自动重发");
   });
 })();

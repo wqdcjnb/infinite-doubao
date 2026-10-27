@@ -367,7 +367,7 @@
       if (!kind) continue;
       var key = confirmationKey(root, planRequest ? question : content, kind);
       var reason = blocked ? "确认涉及付费或升级，请手动检查" : "", pending = false;
-      if (textRequest && options && options.model) {
+      if (options && options.model) {
         var labels = { "seedance_v2.5": "Seedance 2.5", "seedance_v2.0": "Seedance 2.0", "seedance_v2.0_fast": "Seedance 2.0 Fast", "seedance_v2.0_mini": "Seedance 2.0 Mini" };
         // Short work-task reminders refer to the latest assistant plan. Never
         // borrow parameters from the user's prompt or an older reply.
@@ -406,7 +406,7 @@
           if (!ratio || ratio[1] + ":" + ratio[2] !== options.ratio) reason = "平台未确认所选画面比例，请手动检查";
         }
       }
-      return { ok: !reason, pending: pending, kind: kind, key: key, text: followupText || (planRequest ? "按要求生成" : kind === "text" ? "确认，开始生成视频。" : txt(buttons[0])), nativeOnly: !!(planRequest || followupText), reason: reason, button: buttons[0] || null, alreadyConfirmed: tracking.confirmed.indexOf(key) >= 0 };
+      return { ok: !reason, pending: pending, kind: kind, key: key, text: "按要求生成", nativeOnly: true, reason: reason, button: buttons[0] || null, alreadyConfirmed: tracking.confirmed.indexOf(key) >= 0 };
     }
     return { ok: false };
   };
