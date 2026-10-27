@@ -33,6 +33,16 @@ const request = "我将为你生成短视频，请先确认参数：视频生成
 const planRequest = "以上方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 5段分镜 / 仅环境音无配乐）是否按此开始生成？视频生成为高消耗生成。";
 const livePlanRequest = "是否按以上完整方案（Seedance 2.5 / 30秒 / 16:9 / 写实电影风 / 6段分镜 / 仅环境音无对白）开始生成视频？视频生成为高消耗生成。";
 
+test("按钮形式的方案改为统一文字确认前仍核对模型时长和比例",()=>{
+  const p=page();p.api.beginTask({taskId:"button-parameters"});
+  const node=p.message("new","模型：Seedance 2.5 时长：30秒 比例16:9，确认生成。","assistant");
+  const button={innerText:"确认生成",isConnected:true,disabled:false,getBoundingClientRect:()=>({width:100,height:30}),getAttribute:()=>null};
+  node.querySelectorAll=selector=>selector==='button, [role="button"]'?[button]:[];p.add(node);
+  const expected={model:"seedance_v2.5",duration:30,ratio:"16:9"};
+  assert.equal(p.api.peekGenerationConfirmation(expected).ok,true);
+  for(const changed of [{model:"seedance_v2.0"},{duration:15},{ratio:"9:16"}])assert.equal(p.api.peekGenerationConfirmation({...expected,...changed}).ok,false);
+});
+
 test("本次空白助手回复的原生失败图标必须结束等待，旧消息和用户图标不能误判", () => {
   const p = page();
   const icon = p.message("icon", "", "");
@@ -84,11 +94,11 @@ test("工作任务最终收尾确认识别本次既定参数，忽略耗时及�
     '共用时 1 小时 1 分 25 秒 方案已整理完毕，等待你确认。当前状态：视频生成参数和分镜表已展示在上方，你回来后直接回复 "按要求生成" 即可开始制作，或者告诉我需要调整的地方。核心参数回顾：模型：seedance 2.0（会员模型，消耗更多额度） 时长：15 秒 ｜ 比例：16:9 横版。确认后我会立即开始生成。'
   ];
   const expected = { model: "seedance_v2.0", duration: 15, ratio: "adaptive" };
-  reminders.forEach((text, i) => {
+  reminders.forEach(text => {
     const p = page(); p.api.beginTask({ taskId: "final-reminder" }); p.add(p.message("new", text, "assistant"));
     const found = p.api.peekGenerationConfirmation(expected);
     assert.equal(found.ok, true, found.reason); assert.equal(found.kind, "text"); assert.equal(found.nativeOnly, true);
-    assert.equal(found.text, ["按要求生成", "按方案生成", "开始生成", "按要求生成"][i]);
+    assert.equal(found.text, "按要求生成");
     assert.equal(p.api.readProgress().state, "waiting_confirmation");
     assert.equal(p.api.peekGenerationConfirmation({ ...expected, duration: 10 }).ok, false);
     assert.equal(p.api.peekGenerationConfirmation({ ...expected, model: "seedance_v2.0_fast" }).ok, false);
@@ -211,7 +221,7 @@ test("识别真实wrapper角色的文字确认，检查模型时长并排除用�
   p.add(p.message("user", request, "user")); assert.equal(p.api.peekGenerationConfirmation().kind, undefined);
   p.add(p.message("new", request, "assistant"));
   const candidate = p.api.peekGenerationConfirmation({ model: "seedance_v2.0_mini", duration: 5 });
-  assert.equal(candidate.ok, true); assert.equal(candidate.kind, "text"); assert.equal(candidate.text, "确认，开始生成视频。");
+  assert.equal(candidate.ok, true); assert.equal(candidate.kind, "text"); assert.equal(candidate.text, "按要求生成"); assert.equal(candidate.nativeOnly, true);
   assert.equal(p.api.readProgress().state, "waiting_confirmation");
   assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.0_mini", duration: 10 }).ok, false);
   assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.0", duration: 5 }).ok, false);
@@ -219,6 +229,21 @@ test("识别真实wrapper角色的文字确认，检查模型时长并排除用�
   assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.0_mini", duration: 5, ratio: "9:16" }).ok, false);
   p.add(p.message("paid", request + "需要购买会员升级后支付。", "assistant"));
   assert.equal(p.api.peekGenerationConfirmation({ model: "seedance_v2.0_mini", duration: 5 }).ok, false);
+});
+test("按钮型确认保留识别类型和身份，原对话回复也统一按要求生成且peek不点击", () => {
+  for (const label of ["确认生成", "继续生成", "开始生成"]) {
+    const p = page(); p.api.beginTask({ taskId: "button-reply" });
+    let clicks = 0;
+    const button = { isConnected: true, disabled: false, innerText: label,
+      getBoundingClientRect: () => ({ width: 100, height: 30 }), getAttribute: () => null, click: () => clicks++ };
+    const node = p.message("button-confirmation", "视频方案已备好，等待确认生成。", "assistant");
+    node.querySelectorAll = selector => selector === 'button, [role="button"]' ? [button] : [];
+    p.add(node);
+    const candidate = p.api.peekGenerationConfirmation();
+    assert.equal(candidate.ok, true); assert.equal(candidate.kind, "button");
+    assert.equal(candidate.text, "按要求生成"); assert.equal(candidate.nativeOnly, true);
+    assert.equal(p.api.peekGenerationConfirmation().key, candidate.key); assert.equal(clicks, 0);
+  }
 });
 async function settled(id) {
   for (let i = 0; i < 180; i++) { if (!orchestrator.state().running.length) return orchestrator.getTask(id); await new Promise((r) => setTimeout(r, 50)); }
@@ -233,10 +258,10 @@ function installDriver({ failAfterConfirmation = false } = {}) {
     beginTask: async () => ({ ok: true, baselineUrls: [], baselineMessageIds: [] }),
     setGenerationOptions: async () => ({}),
     setText: async (value) => { text = value; return { ok: true }; },
-    call: async (method) => method === "prepareVideoGeneration" ? { ok: true } : method === "peekGenerationConfirmation" ? { ok: true, kind: "text", key: "assistant-message-confirm-key", text: "确认，开始生成视频。" } : { ok: true },
+    call: async (method) => method === "prepareVideoGeneration" ? { ok: true } : method === "peekGenerationConfirmation" ? { ok: true, kind: "text", key: "assistant-message-confirm-key", text: "按要求生成", nativeOnly: true } : { ok: true },
     send: async () => {
       sends.push(text);
-      if (text === "确认，开始生成视频。") {
+      if (text === "按要求生成") {
         const saved = JSON.parse(fs.readFileSync(path.join(P.home(), "store.json"), "utf8"));
         assert.equal(saved.tasks[0].confirmationIntents["assistant-message-confirm-key"].state, "pending");
         confirmed = true;
@@ -252,7 +277,7 @@ function installDriver({ failAfterConfirmation = false } = {}) {
 function submit() { return orchestrator.submitTemplate(templates.snapshot(templates.create({ prompt: "生成一个湖面视频", model: "seedance_v2.0_mini", duration: 5 }).id)).taskId; }
 test("文字确认先持久化再发送，原始任务和确认各发送一次", async () => {
   const fixture = installDriver(); const task = await settled(submit());
-  assert.equal(task.status, "succeeded"); assert.equal(fixture.sends.length, 2); assert.equal(fixture.sends[1], "确认，开始生成视频。");
+  assert.equal(task.status, "succeeded"); assert.equal(fixture.sends.length, 2); assert.equal(fixture.sends[1], "按要求生成");
   assert.equal(task.confirmationIntents["assistant-message-confirm-key"].state, "sent");
 });
 test("确认点击后IPC丢失，重启恢复依靠pending意图不重复发确认或原任务", async () => {

@@ -34,6 +34,7 @@ beforeEach(() => {
       },
       close: () => { calls.push({ method: "close", instanceId: inst.id }); },
       setGenerationOptions: async () => ({}), setText: async value => { text = value; return { ok: true }; },
+      pasteFiles: async files => { calls.push({ method: "pasteFiles", files }); return { ok: true }; },
       beginTask: async (input) => { taskId = input.taskId; calls.push({ method: "beginTask", input, draftId }); return { ok: true, baselineUrls: [], baselineMessageIds: ["old-route"] }; },
       send: async () => { calls.push({ method: "normalSend", instanceId: inst.id, draftId, text }); return await hook("send", { text }, { draftId, taskId }) || { ok: true }; },
       readProgress: async () => { calls.push({ method: "result" }); return await hook("result", {}, { taskId }) || { state: "done", mediaUrls: [`https://fixture.invalid/${index}/${taskId}.mp4`] }; }
@@ -57,6 +58,84 @@ async function waitFor(check) {
   throw new Error("Native draft fixture timed out");
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
+
+test("五图草稿的打开、点击发送和回执核对共享原始附件清单", async () => {
+  account("five-images");const item=template("five-images");
+  fs.mkdirSync(P.dir("attachments"),{recursive:true});
+  const names=Array.from({length:5},(_,n)=>`reference-${n+1}.png`);
+  item.attachments=names.map((name,n)=>{const file=path.join(P.dir("attachments"),name);fs.writeFileSync(file,Buffer.from([137,80,78,71,n]));return {id:String(n),name,path:file,mime:"image/png",size:5};});
+  const ids=drafts.createMany([item.id]).map(d=>d.id);await queue.saveDrafts(ids);await queue.submitDrafts(ids,{sendOnly:true});
+  for(const method of ["openNativeDraft","sendNativeDraft","waitNativeDraftAccepted"]){const call=calls.find(c=>c.method===method);assert.ok(call);assert.deepEqual(call.options.attachmentNames,names,method+" omitted the immutable five-image manifest");}
+});
+
+test("真实工厂五图点击证据先持久化，回执丢失也不丢附件证明或重发", async () => {
+  account("real-image-proof");const item=template("real-image-proof");item.studioTaskId="factory-image-task";fs.mkdirSync(P.dir("attachments"),{recursive:true});
+  const names=Array.from({length:5},(_,n)=>`original-${n+1}.png`),keys=names.map((_,n)=>"wire-key-"+n);
+  item.attachments=names.map((name,n)=>{const file=path.join(P.dir("attachments"),name);fs.writeFileSync(file,Buffer.from([137,80,78,71,n]));return {id:String(n),name,path:file,mime:"image/png",size:5};});
+  const ids=drafts.createMany([item.id]).map(d=>d.id);await queue.saveDrafts(ids);let checkpoint;
+  hook=method=>{if(method==="sendNativeDraft")return {ok:true,clickedAt:"2026-10-27T00:00:00.000Z",attachmentProof:{version:1,names,fileKeys:keys}};if(method==="waitNativeDraftAccepted"){checkpoint=JSON.parse(fs.readFileSync(path.join(P.home(),"store.json"),"utf8"));throw Error("lost acknowledgement");}return null;};
+  await assert.rejects(queue.submitDrafts(ids,{sendOnly:true,onDeliveryPage({driver}){driver.webContents={getURL:()=>"https://www.doubao.com/chat/failed-original"};}}),/lost acknowledgement/);
+  const pending=checkpoint.taskDrafts.find(d=>d.id===ids[0]).submissionRecord.task;
+  assert.ok(pending.dispatchReceipt,'real factory click evidence was not saved before receipt waiting');
+  assert.equal(pending.dispatchReceipt.clickedAt,"2026-10-27T00:00:00.000Z");assert.equal(pending.dispatchReceipt.outcome,"pending");
+  assert.deepEqual(pending.attachmentSendProof,{version:1,names,referenceCount:5,fileKeySha256s:keys.map(key=>require("node:crypto").createHash("sha256").update(key).digest("hex")),clickedAt:"2026-10-27T00:00:00.000Z"});
+  assert.equal(JSON.stringify(checkpoint).includes("wire-key-"),false);assert.equal(sends().length,1);assert.equal(store.get().tasks.length,0);
+  assert.equal(drafts.list()[0].submissionRecord.task.unverifiedConversationUrl,"https://www.doubao.com/chat/failed-original");
+});
+
+test("真实五图发送缺少逐张点击证明时保留意图，不将文字回执算五图成功", async () => {
+  account("missing-image-proof");const item=template("missing-image-proof");item.studioTaskId="factory-missing-proof";fs.mkdirSync(P.dir("attachments"),{recursive:true});
+  item.attachments=Array.from({length:5},(_,n)=>{const name=`missing-${n}.png`,file=path.join(P.dir("attachments"),name);fs.writeFileSync(file,Buffer.from([137,80,78,71,n]));return {id:String(n),name,path:file,mime:"image/png",size:5};});
+  const ids=drafts.createMany([item.id]).map(d=>d.id);await queue.saveDrafts(ids);
+  await assert.rejects(queue.submitDrafts(ids,{sendOnly:true}),/附件.*证明/);
+  assert.equal(calls.some(c=>c.method==="waitNativeDraftAccepted"),false);assert.equal(sends().length,1);assert.ok(drafts.list()[0].submissionRecord);assert.equal(store.get().tasks.length,0);
+});
+
+function factoryImageBatch(count=2) {
+  account("post-send-images");fs.mkdirSync(P.dir("attachments"),{recursive:true});
+  const items=Array.from({length:count},(_,n)=>{const item=template("post-send-"+n);item.studioTaskId="factory-post-send-"+n;
+    item.attachments=Array.from({length:5},(_,i)=>{const name=`post-${i}.png`,file=path.join(P.dir("attachments"),name);fs.writeFileSync(file,Buffer.from([137,80,78,71,i]));return {id:String(i),name,path:file,mime:"image/png",size:5};});return item;});
+  return drafts.createMany(items.map(t=>t.id)).map(d=>d.id);
+}
+for(const pending of [true,false])test(pending?"文字回执到达但附件仍残留时保留原页并停止下一条":"真实五图回执缺少附件清空证明也停止，不关闭原页",async()=>{
+  const ids=factoryImageBatch();await queue.saveDrafts(ids);calls.length=0;let preserved=0;
+  hook=(method,opts)=>method==="sendNativeDraft"?{ok:true,clickedAt:new Date().toISOString(),attachmentProof:{version:1,names:opts.attachmentNames,fileKeys:opts.attachmentNames.map(n=>"key-"+n)}}:
+    method==="waitNativeDraftAccepted"?pending?{ok:false,attachmentsPending:true,reason:"文字回执已到，但附件仍在输入框"}:{ok:true,conversationUrl:"https://www.doubao.com/chat/original",userMessageId:"original-user"}:null;
+  await assert.rejects(queue.submitDrafts(ids,{sendOnly:true,onDeliveryPage({driver}){driver.preserve=()=>preserved++;return {};}}),/附件/);
+  assert.equal(sends().length,1);assert.equal(sends()[0].options.id,ids[0]);assert.equal(calls.some(c=>c.method==="close"),false);assert.ok(preserved>0);
+  assert.equal(drafts.list().find(d=>d.id===ids[0]).submissionRecord.task.submissionUncertain,true);assert.equal(drafts.list().find(d=>d.id===ids[1]).submissionRecord,undefined);assert.equal(store.get().tasks.length,0);
+});
+test("五图的原消息回执及附件清空证明一起持久化后才结束本条",async()=>{
+  const ids=factoryImageBatch(1);await queue.saveDrafts(ids);
+  hook=(method,opts)=>method==="sendNativeDraft"?{ok:true,clickedAt:new Date().toISOString(),attachmentProof:{version:1,names:opts.attachmentNames,fileKeys:opts.attachmentNames.map(n=>"key-"+n)}}:
+    method==="waitNativeDraftAccepted"?{ok:true,conversationUrl:"https://www.doubao.com/chat/original",userMessageId:"original-user",attachmentConsumptionProof:{version:1,names:opts.attachmentNames,userMessageId:"original-user",checkedAt:new Date().toISOString()}}:null;
+  const result=await queue.submitDrafts(ids,{sendOnly:true});assert.equal(result.count,1);const task=store.get().tasks[0];
+  assert.equal(task.attachmentConsumptionProof.userMessageId,task.receiptUserMessageId);assert.equal(task.attachmentConsumptionProof.names.length,5);assert.equal(task.dispatchReceipt.outcome,"message_accepted");
+});
+for(const rejected of [true,false])test(rejected?"五图消费检查调用异常时保留原页并停止后缀":"五图消费检查返回普通失败时保留原页并停止后缀",async()=>{
+  const ids=factoryImageBatch();await queue.saveDrafts(ids);calls.length=0;
+  hook=(method,opts)=>{if(method==="sendNativeDraft")return {ok:true,clickedAt:new Date().toISOString(),attachmentProof:{version:1,names:opts.attachmentNames,fileKeys:opts.attachmentNames.map(n=>"key-"+n)}};
+    if(method==="waitNativeDraftAccepted"){if(rejected)throw Error("附件消费检查调用异常");return {ok:false,reason:"附件消费检查失败"};}return null;};
+  await assert.rejects(queue.submitDrafts(ids,{sendOnly:true,onDeliveryPage(){return {};}}),/附件/);
+  assert.equal(sends().length,1);assert.equal(calls.some(c=>c.method==="close"),false);assert.equal(drafts.list().find(d=>d.id===ids[1]).submissionRecord,undefined);
+});
+test("工厂逐条继续模式保留首条附件未知并发送下一条，未知条不重发",async()=>{
+  const ids=factoryImageBatch();await queue.saveDrafts(ids);calls.length=0;const processed=[];
+  hook=(method,opts)=>{if(method==="sendNativeDraft")return {ok:true,clickedAt:new Date().toISOString(),attachmentProof:{version:1,names:opts.attachmentNames,fileKeys:opts.attachmentNames.map(n=>"key-"+n)}};
+    if(method==="waitNativeDraftAccepted")return opts.id===ids[0]?{ok:false,attachmentsPending:true,reason:"首条附件未确认"}:{ok:true,conversationUrl:"https://www.doubao.com/chat/second",userMessageId:"second-user",attachmentConsumptionProof:{version:1,names:opts.attachmentNames,userMessageId:"second-user",checkedAt:new Date().toISOString()}};return null;};
+  await assert.rejects(queue.submitDrafts(ids,{sendOnly:true,continueOnFailure:true,onDeliveryPage(){return {};},onDraftProcessed({draft,issued,received}){processed.push({id:draft.id,issued,received});}}),/首条附件/);
+  assert.deepEqual(processed,[{id:ids[0],issued:true,received:false},{id:ids[1],issued:true,received:true}]);
+  assert.deepEqual(sends().map(c=>c.options.id),ids);assert.equal(drafts.list().find(d=>d.id===ids[0]).submissionRecord.task.submissionUncertain,true);assert.equal(store.get().tasks.length,1);assert.equal(store.get().tasks[0].receiptUserMessageId,"second-user");
+  const attempts=sends().length;await assert.rejects(queue.submitDrafts([ids[0]],{sendOnly:true,continueOnFailure:true}),/不会自动重发/);assert.equal(sends().length,attempts);
+});
+test("真实五图发送遇限额时记录每条原意图并全部跳过，不确认生成",async()=>{
+  const ids=factoryImageBatch();await queue.saveDrafts(ids);calls.length=0;
+  hook=(method,opts)=>method==="sendNativeDraft"?{ok:true,clickedAt:new Date().toISOString(),attachmentProof:{version:1,names:opts.attachmentNames,fileKeys:opts.attachmentNames.map(n=>"key-"+n)}}:
+    method==="waitNativeDraftAccepted"?{ok:true,quotaLimited:true,conversationUrl:"https://www.doubao.com/chat/"+opts.id,providerMessage:"近7天额度已用完"}:null;
+  await queue.submitDrafts(ids,{sendOnly:true,dispatchOnly:false,continueOnFailure:true});
+  assert.deepEqual(sends().map(c=>c.options.id),ids);assert.equal(store.get().tasks.length,0);assert.equal(calls.some(c=>["peekGenerationConfirmation","normalSend"].includes(c.method)),false);
+  for(const d of drafts.list()){assert.equal(d.dispatchReceipt.outcome,"quota_limited");assert.equal(d.dispatchReceipt.providerMessage,"近7天额度已用完");assert.equal(d.submissionRecord.task.submissionUncertain,true);}
+});
 
 test("只发送模式提交全部 18 条，重启和唤醒队列也不自动处理生成确认", async () => {
   account("first");

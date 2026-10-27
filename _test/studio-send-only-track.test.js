@@ -4,25 +4,30 @@ const P=require('../src/paths'),store=require('../src/store'),queue=require('../
 const {NativeAdapter}=require('../src/server-executor'),{Journal}=require('../src/studio-bridge');
 function fixture(){
  const home=fs.mkdtempSync(path.join(os.tmpdir(),'studio-receipt-track-'));P.init({home});store.load();queue.pause('');
- const f={home,calls:[],texts:[],sends:0,closed:0,resumes:0,valid:true,candidate:true,progress:{state:'unknown'},catalog:new Map()};
+ const f={home,calls:[],texts:[],sends:0,closed:0,resumes:0,valid:true,candidate:true,progress:{state:'unknown'},catalog:new Map(),currentUrl:'https://www.doubao.com/'};
  f.check=()=>{if(!f.valid)throw Error('lease expired');};
- const driver={window:{isDestroyed:()=>false},webContents:{isDestroyed:()=>false},isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),navigate:async()=>{},url:async()=> 'https://www.doubao.com/chat/current',
+ const driver={window:{isDestroyed:()=>false},webContents:{isDestroyed:()=>false,getURL:()=>f.currentUrl},isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),navigate:async url=>{f.currentUrl=url;},url:async()=>f.currentUrl,
   setText:async(text,check)=>{check?.();f.texts.push(text);if(text==='按要求生成'&&f.expireOnFill)f.valid=false;if(f.holdFill)await new Promise(r=>f.releaseFill=r);return {ok:true};},
-  send:async(_options,check)=>{check?.();f.sends++;const saved=JSON.parse(fs.readFileSync(path.join(home,'store.json')));assert.equal(saved.tasks[0].confirmationIntents.confirm.state,'pending');if(f.loseClick)throw Error('lost click response');return {ok:true};},
+  send:async(options,check)=>{check?.();f.lastSendOptions=options;f.sends++;const saved=JSON.parse(fs.readFileSync(path.join(home,'store.json')));assert.equal(saved.tasks[0].confirmationIntents.confirm.state,'pending');if(f.loseClick)throw Error('lost click response');if(f.captchaOnSend)f.captcha=true;if(!f.holdGeneration)f.progress={state:'running',generationStarted:true};return {ok:true};},
   readProgress:async()=>f.progress,
   call:async(method,args,options)=>{f.calls.push({method,args,options});
+   if(method==='readNativeDeliveryState')return {captchaDetected:Boolean(f.captcha)};
    if(method==='readNativeDrafts')return {ok:true,source:'indexeddb',accountScope:'scope-a',items:[...f.catalog.values()]};
    if(method==='restoreNativeDrafts'){if(options?.catalog)assert.equal(options.catalog.accountScope,'scope-a');return {ok:true,bindings:args};}
    if(method==='saveNativeDraft'){const b={id:args.id,nativeId:'native-'+args.id,accountScope:'scope-a',prompt:args.prompt,executionMode:'work'};f.catalog.set(args.id,b);return {ok:true,bindings:[b]};}
    if(method==='openNativeDraft')return {ok:true,conversationIds:[]};
    if(method==='waitNativeDraftAccepted')return {ok:true,conversationUrl:'https://www.doubao.com/chat/'+args.id,userMessageId:'message-'+args.id};
-   if(method==='peekGenerationConfirmation')return f.candidate?{ok:true,kind:'text',key:'confirm',text:'按要求生成'}:{ok:false};
+   if(method==='peekGenerationConfirmation')return f.candidate?{ok:true,kind:f.candidateKind||'text',key:f.candidateKey||'confirm',text:f.candidateText||'按要求生成'}:{ok:false};
+   if(method==='confirmGeneration'){f.buttonConfirmations=(f.buttonConfirmations||0)+1;f.progress={state:'running',generationStarted:true};return {ok:true};}
    if(method==='readProgress')return f.progress;
    return {ok:true};}};
- queue.init({resolveDriver:async()=>driver,resolveDraftDriver:async(_inst,{signal}={})=>{let closed=false;const close=()=>{if(!closed){closed=true;f.closed++;}};signal?.addEventListener('abort',close,{once:true});return {...driver,close};}});
+ queue.init({resolveDriver:async()=>driver,resolveDraftDriver:async(_inst,{signal}={})=>{
+  let closed=false;const close=()=>{if(!closed){closed=true;f.closed++;}};signal?.addEventListener('abort',close,{once:true});
+  return {...driver,close,preserve:()=>signal?.removeEventListener('abort',close),resumeAutoClose:()=>{if(signal?.aborted)return false;signal?.addEventListener('abort',close,{once:true});return true;}};
+ }});
  const resume=queue.resume;queue.resume=()=>{f.resumes++;};
- f.driver=driver;f.journal=new Journal(path.join(home,'studio-journal.json'));f.adapter=new NativeAdapter({journal:f.journal,client:{},accounts:{},environment:{configure(inst){inst.studioEnvironment={version:'env'};}},maxDraftPages:2});
- f.op=(kind,id,payload={})=>({id,kind,accountId:'a',...(kind==='send'?{batchId:'batch'}:{}),leaseUntil:Date.now()+60000,leaseToken:'lease',payload:{account:{id:'a',name:'test',environment:{version:'env'}},...payload}});
+ f.driver=driver;f.journal=new Journal(path.join(home,'studio-journal.json'));f.adapter=new NativeAdapter({journal:f.journal,client:{},accounts:{},sessionId:'session',environment:{configure(inst){inst.studioEnvironment={version:'env'};}},maxDraftPages:2});
+ f.op=(kind,id,payload={})=>({id,kind,accountId:'a',...(['send','track'].includes(kind)?{batchId:'batch'}:{}),leaseUntil:Date.now()+60000,leaseToken:'lease',payload:{account:{id:'a',name:'test',environment:{version:'env'}},...payload}});
  f.snapshot=id=>({id,prompt:'Reply received only; do not generate '+id,parameters:{model:'seedance_v2.5',duration:30,ratio:'16:9'},references:[]});
  f.prepare=async(sendOnly=false)=>{const task=f.snapshot('001');await f.adapter.execute(f.op('import','import',{task,sendOnly}),{checkLease:f.check});const r=await f.adapter.execute(f.op('send','send',{tasks:[task],sendOnly}),{checkLease:f.check});assert.equal(r.outcome,'success');f.local=queue.getTask(r.receipt.tasks[0].localTaskId);return r;};
  f.track=()=>f.adapter.execute({...f.op('track','track',{task:f.snapshot('001')}),taskId:'001'},{checkLease:f.check});
@@ -37,6 +42,38 @@ test('test batch persists sendOnly outside the immutable template and retains th
 test('normal accepted draft confirms only under the current track lease and closes its dedicated page before returning',async()=>{
  const f=fixture();try{await f.prepare();const before=f.texts.length,closed=f.closed;const r=await f.track();assert.equal(r.receipt.confirmed,true);assert.equal(f.sends,1);assert.equal(f.texts.length,before+1);assert.equal(f.closed,closed+1);assert.equal(f.resumes,1);assert.equal(store.get().storyboards.find(s=>s.id===f.local.storyboardId).shots[0].status,'queued');f.valid=false;await new Promise(r=>setTimeout(r,30));assert.equal(f.sends,1);
  }finally{f.cleanup();}
+});
+for(const kind of ['text','button'])test('generation confirmation '+kind+' uses only the fixed native reply and never clicks a confirmation button',async()=>{
+ const f=fixture();try{await f.prepare();const before=f.texts.length;f.candidateKind=kind;f.candidateText=kind==='text'?'按方案生成':'确认生成';
+  const result=await f.track();assert.equal(result.receipt.confirmed,true);assert.deepEqual(f.texts.slice(before),['按要求生成']);assert.deepEqual(f.lastSendOptions,{nativeOnly:true});assert.equal(f.buttonConfirmations||0,0);assert.equal(f.local.confirmationIntents.confirm.kind,'text');
+ }finally{f.cleanup();}
+});
+
+test('a persisted sent confirmation resumes original result tracking after restart without another confirmation',async()=>{
+ const f=fixture();try{await f.prepare();queue.patchTask(f.local.id,{confirmationIntents:{confirm:{state:'sent',sentAt:new Date().toISOString()}},status:'submitted'},true);store.load();f.local=queue.getTask(f.local.id);
+  f.progress={state:'running',generationStarted:true};const result=await f.track();assert.equal(result.receipt.confirmed,true);assert.equal(f.sends,0);assert.equal(f.resumes,1);assert.equal(f.local.status,'queued');assert.ok(f.local.generationObservedAt);
+ }finally{f.cleanup();}
+});
+
+test('human verification beyond fifteen minutes preserves the original confirmation and resumes when clear',async t=>{
+ const f=fixture();let pending;try{await f.prepare();const op=f.op;f.op=(...args)=>({...op(...args),leaseUntil:Date.now()+3600000});f.captcha=true;t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});let finished=false;
+  pending=f.track().finally(()=>{finished=true;});pending.catch(()=>{});for(let n=0;n<100;n++)await Promise.resolve();assert.equal(finished,false);
+  t.mock.timers.tick(16*60*1000);for(let n=0;n<100;n++)await Promise.resolve();assert.equal(finished,false,'human waiting consumed the automatic deadline');assert.equal(f.sends,0);
+  f.captcha=false;f.progress={state:'running',generationStarted:true};t.mock.timers.tick(100);for(let n=0;n<100;n++)await Promise.resolve();t.mock.timers.reset();await pending;assert.equal(f.resumes,1);assert.equal(f.sends,0);
+ }finally{t.mock.timers.reset();f.valid=false;if(pending)await pending.catch(()=>{});f.cleanup();}
+});
+test('a factory draft never makes a second generation attempt when a lost text response is replaced by a new button',async()=>{
+ const f=fixture();try{await f.prepare();f.loseClick=true;await assert.rejects(f.track(),/lost click/);assert.equal(f.sends,1);assert.equal(f.local.confirmationIntents.confirm.state,'pending');
+  store.load();f.local=queue.getTask(f.local.id);f.loseClick=false;f.candidateKind='button';f.candidateKey='replacement';await f.track();assert.equal(f.sends,1);assert.equal(f.buttonConfirmations||0,0);assert.deepEqual(Object.keys(f.local.confirmationIntents),['confirm']);
+ }finally{f.cleanup();}
+});
+test('a captcha after the only generation confirmation keeps its real page until manual completion and then resumes without another click',async()=>{
+ const f=fixture();let pending;try{await f.prepare();f.captchaOnSend=true;f.holdGeneration=true;let done=false;const before=f.closed;pending=f.track().finally(()=>{done=true;});
+  for(let n=0;n<100&&!f.sends;n++)await new Promise(r=>setTimeout(r,5));await new Promise(r=>setTimeout(r,20));assert.equal(f.sends,1);assert.equal(done,false,'confirmation captcha page closed before user takeover');
+  const page=f.adapter.deliveryPages.pages.get('a');assert.ok(page);assert.equal((await page.snapshot()).captchaDetected,true);await page.takeover({taskId:'001',pageId:page.pageId});page.inputHeld=true;
+  f.captcha=false;f.progress={state:'running',generationStarted:true};await new Promise(r=>setTimeout(r,40));assert.equal(done,false);assert.equal(f.closed,before);page.inputHeld=false;
+  const result=await pending;assert.equal(result.receipt.confirmed,true);assert.equal(f.sends,1);assert.equal(f.closed,before+1);assert.equal(f.resumes,1);
+ }finally{f.captcha=false;f.progress={state:'running',generationStarted:true};const page=f.adapter.deliveryPages.pages.get('a');if(page){page.inputHeld=false;page.manual=false;page.pauseRequested=false;}if(pending)await pending.catch(()=>{});f.cleanup();}
 });
 test('ordinary account quota failure without a confirmation button is recognized without another input',async()=>{
  const f=fixture();try{await f.prepare();f.candidate=false;

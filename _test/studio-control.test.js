@@ -518,7 +518,7 @@ test('automatic held cleanup permits immediate reconnect input while explicit re
   const reconnect={...h.session,id:'reconnected'};await h.deliver(reconnect);
   assert.equal(h.win.isDestroyed(),false);assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased']);assert.equal(h.entry.manual,true);
   await h.deliver(reconnect,[deliveryCommand(h,'next-click','input',{kind:'click',x:.3,y:.4})]);assert.equal(h.acks().find(a=>a.id==='next-click')?.ok,true);
-  await h.deliver(reconnect,[deliveryCommand(h,'resume','observe')]);assert.equal(h.entry.manual,false);assert.equal(h.entry.keepOpen,false);assert.equal(h.cancelled(),0);
+  await h.deliver(reconnect,[deliveryCommand(h,'resume','observe')]);assert.equal(h.entry.manual,false);assert.equal(h.entry.keepOpen,true,'visible captcha keeps its original page');assert.equal(h.cancelled(),0);
 });
 
 for(const change of ['replaced','gone'])test(`a held pointer preserves its sender when the challenge is ${change} before release`,async t=>{

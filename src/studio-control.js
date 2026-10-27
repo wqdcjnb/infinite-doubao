@@ -159,6 +159,11 @@ class StudioControl {
     }
     ctx.buttons=0;ctx.keys.clear();ctx.keyEvents.clear();ctx.heldBinding=null;
   }
+  rememberMouseRelease(win,entry,point={x:0,y:0}) {
+    const state=this.inputReleases.get(win)||{win,pending:[],running:false};state.entry=entry;
+    state.pending.push(['Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',buttons:0,clickCount:0}]);
+    this.inputReleases.set(win,state);entry.inputHeld=true;entry.keepOpen=true;this.flushHeld(state);
+  }
   flushHeld(state) {
     if(state.running)return state.promise;
     state.running=true;
