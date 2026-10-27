@@ -657,7 +657,7 @@ async function saveDrafts(ids, options = {}) {
       const child = { controller: new AbortController() };
       const abort = () => child.controller.abort(operation.controller.signal.reason);
       operation.controller.signal.addEventListener("abort", abort, { once: true });
-      let driver, importOptions;
+      let driver, importOptions, releaseObservation;
       const position = `${index + 1}/${selected.length}`;
       const step = async (label, run, timeoutMs) => {
         emit("draft", { message: label + "…", instanceId: inst.id });
@@ -677,6 +677,7 @@ async function saveDrafts(ids, options = {}) {
           if (child.controller.signal.aborted) { opened.close?.(); child.controller.signal.throwIfAborted(); }
           return opened;
         }) : accountDriver;
+        releaseObservation = options.onImportPage?.({ draft, driver });
         if (driver !== accountDriver && driver.prepareDraftImport) await step(`正在激活草稿输入区 ${position}`, () => driver.prepareDraftImport());
         await step(`正在检查草稿账号 ${position}`, async () => {
           const state = driver.waitForLogin ? await driver.waitForLogin({ timeoutMs: 30000, check: () => { checkAction(); child.controller.signal.throwIfAborted(); } }) : await driver.isLoggedIn();
@@ -686,7 +687,7 @@ async function saveDrafts(ids, options = {}) {
         const draftNumber = draft.nativePrompt ? draft.draftNumber : draft.draftNumber || drafts.numberFor(draft.id);
         record.task.prompt = draft.nativePrompt || withSeedanceSkill(`【草稿编号：${draftNumber}】\n编号仅用于识别本次任务，请勿将编号或此说明作为画面、字幕或旁白。\n\n${record.task.prompt}`);
         const attachmentNames = record.task.refs.map(file => path.basename(file));
-        importOptions = { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode, attachmentNames, nativeId: draft.nativeBinding?.nativeId, accountScope: draft.nativeBinding?.accountScope, recreateDeleted: options.recreateDeleted === true, isolated: !!deps.resolveDraftDriver };
+        importOptions = { id: draft.id, prompt: record.task.prompt, executionMode: draft.executionMode, attachmentNames, nativeId: draft.nativeBinding?.nativeId, accountScope: draft.nativeBinding?.accountScope || options.expectedAccountScope, recreateDeleted: options.recreateDeleted === true, isolated: !!deps.resolveDraftDriver };
         let prepare = draft.nativeState !== "saved" && draft.nativeState !== "saving", uploadRefs = record.task.refs;
         const bindings = nativeBindings(inst.id).filter(b => b.id === draft.id);
         if (draft.nativeState === "saving" && draft.nativeBinding) bindings.push({ ...draft.nativeBinding, draftNumber, prompt: record.task.prompt, executionMode: draft.executionMode });
@@ -743,6 +744,7 @@ async function saveDrafts(ids, options = {}) {
         errors.push({ id: draft.id, draftNumber: draft.draftNumber || drafts.numberFor(draft.id), name: draft.template.name, message });
         emit("draft", { message: `草稿 ${draft.draftNumber || drafts.numberFor(draft.id)} 导入失败：${message}；已跳过，继续下一条（${position}）`, instanceId: inst.id });
       } finally {
+        releaseObservation?.();
         operation.controller.signal.removeEventListener("abort", abort);
         // The signal closes a dedicated page, including any late upload callbacks.
         child.controller.abort(new Error("本条草稿导入已结束"));
@@ -756,6 +758,7 @@ async function saveDrafts(ids, options = {}) {
   });
 }
 async function submitDrafts(ids, options = {}) {
+  if (options.dispatchOnly === true && options.sendOnly !== true) throw new Error("仅允许只发送验收记录投递动作，不得启动生成");
   const requested = selectedDrafts(ids), unresolved = [];
   const selected = requested.filter(d => {
     if (!d.submissionRecord?.task.submissionUncertain) return true;
@@ -800,10 +803,10 @@ async function submitDrafts(ids, options = {}) {
         children.add(child);
         let driver, record, activity, issued = false, received = false, trackingReceipt = false;
         const checkDraft = () => { check(); child.controller.signal.throwIfAborted(); };
-        const cleanup = () => { activity?.close?.(); children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); };
+        const cleanup = () => { const keepOpen=activity?.keepOpen===true;if(keepOpen)driver?.preserve?.();activity?.close?.();children.delete(child);child.controller.abort(new Error("本条草稿核对已结束"));if(!keepOpen)driver?.close(); };
         const recordFailure = error => {
-          if (!received && (activity?.captchaSeen || error.code === "CAPTCHA_HANDOFF_INTERRUPTED")) deliveryPause = {
-            reason: error.code === "CAPTCHA_HANDOFF_INTERRUPTED" ? "manual_interrupted" : "captcha_wait_ended",
+          if ((!received && activity?.captchaSeen) || activity?.keepOpen || error.code === "CAPTCHA_HANDOFF_INTERRUPTED") deliveryPause = {
+            reason: activity?.keepOpen || error.code === "CAPTCHA_HANDOFF_INTERRUPTED" ? "manual_interrupted" : "captcha_wait_ended",
             taskId: draft.template.studioTaskId, draftId: draft.id,
             notStartedDraftIds: pending.slice(issued ? index + 1 : index).map(item => item.id)
           };
@@ -816,8 +819,9 @@ async function submitDrafts(ids, options = {}) {
         progress(`正在准备第 ${index + 1} 条`);
         try {
           checkDispatch();
-          const prepared = await draftStep(child, `第 ${index + 1} 条草稿准备`, async () => {
+          await draftStep(child, `第 ${index + 1} 条草稿页面`, async () => {
             driver = await deps.resolveDraftDriver(inst, { signal: child.controller.signal });
+            log.info("draft-preparation-stage", { draftBatchId, draftId: draft.id, index: index + 1, stage: "page_ready", elapsedMs: Date.now() - preparingAt });
             if (child.controller.signal.aborted) driver.close();
             checkDraft();
             activity = options.onDeliveryPage?.({ draft, driver, cancel: error => child.controller.abort(error) });
@@ -826,10 +830,14 @@ async function submitDrafts(ids, options = {}) {
             if (login?.loggedIn !== true) throw new Error(login?.by === "login-button"
               ? `账号 ${inst.name} 的草稿页面仍显示登录入口，请在该账号页面确认登录后重试`
               : `账号 ${inst.name} 的草稿页面登录状态尚未加载完成，请等待页面加载或检查网络后重试`);
+            log.info("draft-preparation-stage", { draftBatchId, draftId: draft.id, index: index + 1, stage: "login_ready", elapsedMs: Date.now() - preparingAt });
+          }, 120000);
+          const prepare = () => draftStep(child, `第 ${index + 1} 条草稿准备`, async () => {
             requirePage(await driver.call("restoreNativeDrafts", bindings.filter((b) => b.id === draft.id), catalog ? { catalog } : undefined));
             const pageOptions = { id: draft.id, prompt: draft.nativePrompt, executionMode: draft.executionMode };
             checkDispatch();
             const opened = requirePage(await driver.call("openNativeDraft", pageOptions));
+            log.info("draft-preparation-stage", { draftBatchId, draftId: draft.id, index: index + 1, stage: "draft_ready", elapsedMs: Date.now() - preparingAt });
             const record = templateRecords(draft.template, draft.executionMode, { sendOnly: draft.studioSendOnly === true }), task = record.task;
             if (typeof draft.studioSendOnly === "boolean") task.studioSendOnly = draft.studioSendOnly;
             Object.assign(task, { prompt: draft.nativePrompt, draftNumber: draft.draftNumber, draftBatchId, instanceId: inst.id, instanceName: inst.name, preferredInstanceId: inst.id, submissionUncertain: true });
@@ -840,25 +848,38 @@ async function submitDrafts(ids, options = {}) {
             checkDraft();
             return { pageOptions, opened, record };
           }, 120000);
+          const prepared = await (activity?.runAutomation ? activity.runAutomation(prepare) : prepare());
           const { pageOptions, opened } = prepared;
           record = prepared.record;
-          checkDispatch();
-          record.task.submittedAt = new Date().toISOString();
-          drafts.updateMany({ [draft.id]: { nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
-          activity?.setStage?.("waiting_receipt");
-          // The durable intent precedes the click. Do not await this promise here.
-          const sent = driver.call("sendNativeDraft", pageOptions);
-          issued = true; launched++; trackingReceipt = true;
-          log.info("draft-dispatch-started", { draftBatchId, draftId: draft.id, instanceId: inst.id, index: index + 1, total: pending.length, preparationMs: Date.now() - preparingAt });
-          progress("已发起发送，后台核对回执");
+          let sent;
+          const dispatch = async () => {
+            checkDispatch();record.task.submittedAt = new Date().toISOString();
+            drafts.updateMany({ [draft.id]: { nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
+            activity?.setStage?.("waiting_receipt");
+            sent = driver.call("sendNativeDraft", pageOptions);issued = true;launched++;
+            log.info("draft-dispatch-started", { draftBatchId, draftId: draft.id, instanceId: inst.id, index: index + 1, total: pending.length, preparationMs: Date.now() - preparingAt });
+            progress("已发起发送，后台核对回执");return sent;
+          };
+          if(activity?.runAutomation)await activity.runAutomation(dispatch);else await dispatch();
+          trackingReceipt = true;
           await draftStep(child, "豆包接收回执", async () => {
             const clicked = await sent;
             if (!clicked?.ok) { issued = false; drafts.updateMany({ [draft.id]: { submissionRecord: null } }); requirePage(clicked); }
             record.task.sentAt = clicked.clickedAt || record.task.submittedAt;
-            const receipt = requirePage(await driver.call("waitNativeDraftAccepted", { ...pageOptions, conversationIds: opened.conversationIds, baselineMessageIds: record.task.baselineMessageIds }));
+            if (options.dispatchOnly) {
+              record.task.dispatchReceipt = { taskId: draft.template.studioTaskId, draftId: draft.id, nativeId: draft.nativeBinding.nativeId, clickedAt: record.task.sentAt, outcome: "pending" };
+              drafts.updateMany({ [draft.id]: { submissionRecord: JSON.parse(JSON.stringify(record)), dispatchReceipt: record.task.dispatchReceipt } });
+            }
+            const receipt = requirePage(await driver.call("waitNativeDraftAccepted", { ...pageOptions, conversationIds: opened.conversationIds, baselineMessageIds: record.task.baselineMessageIds, dispatchOnly: options.dispatchOnly === true }));
             checkDraft();
+            if (options.dispatchOnly && receipt.quotaLimited === true && /^https:\/\/www\.doubao\.com\/chat\/[^/?#]+$/.test(receipt.conversationUrl || "")) {
+              Object.assign(record.task.dispatchReceipt, { outcome: "quota_limited", conversationUrl: receipt.conversationUrl, providerMessage: receipt.providerMessage });
+              drafts.updateMany({ [draft.id]: { submissionRecord: JSON.parse(JSON.stringify(record)), dispatchReceipt: record.task.dispatchReceipt, nativeError: "已点击发送，豆包返回免费额度限制；未生成" } });
+              progress("本条已投递，豆包返回限额；继续下一条");return "quota_limited";
+            }
             if (!receipt.userMessageId) throw new Error("回执缺少本次用户消息标识，请核对原对话；不会自动重发");
             Object.assign(record.task, { conversationUrl: receipt.conversationUrl, conversationLocked: true, submissionUncertain: false, receiptUserMessageId: receipt.userMessageId, baselineMessageIds: [receipt.userMessageId] });
+            if (record.task.dispatchReceipt) Object.assign(record.task.dispatchReceipt, { outcome: "message_accepted", conversationUrl: receipt.conversationUrl });
             if (options.sendOnly) {
               Object.assign(record.task, { status: "submitted", stage: "submitted", waitReason: "已发送到豆包；生成确认暂不处理" });
               record.sb.shots[0].status = "submitted";
@@ -870,7 +891,7 @@ async function submitDrafts(ids, options = {}) {
             // other drafts or its generation reminder.
             commitTemplates([record], [draft.id], false);
             progress("后台已确认接收");
-          }, 15 * 60 * 1000).catch(recordFailure).finally(cleanup);
+          }, 15 * 60 * 1000).then(outcome=>activity?.waitForResume?.({receiptAccepted:outcome!=="quota_limited",providerResponded:outcome==="quota_limited"})).catch(recordFailure).finally(cleanup);
         } catch (error) { recordFailure(error); }
         finally { if (!trackingReceipt) cleanup(); }
       }

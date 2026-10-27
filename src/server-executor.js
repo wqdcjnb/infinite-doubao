@@ -29,6 +29,14 @@ class NativeAdapter {
     this.environment=environment;this.sessionId=sessionId;
     this.maxDraftPages=Math.max(1,Math.min(8,maxDraftPages));
     this.deliveryPages=new ActiveDeliveryPages();
+    this.importPages=new Map();
+  }
+  observationWindow(accountId) {
+    const page=this.importPages.get(accountId);
+    if(page&&!page.window.isDestroyed?.()){try {page.check();return page;}catch {return;}}
+    const retained=this.deliveryPages.retained.get(accountId);
+    if(!retained||retained.driver.window.isDestroyed?.()||retained.executorSessionId!==this.sessionId||retained.environmentVersion!==retained.instance.studioEnvironment?.version)return;
+    return {instance:retained.instance,window:retained.driver.window,interactive:true,check:()=>{if(retained.driver.window.isDestroyed?.())throw Error('retained human page closed');}};
   }
   account(op) {
     if(op.payload?.account?.id!==op.accountId)throw new Error('account identity mismatch');
@@ -88,7 +96,12 @@ class NativeAdapter {
       draft={id,draftNumber:drafts.numberFor(id),template,executionMode:'work',createdAt:new Date().toISOString(),...(op.payload.sendOnly===true?{studioSendOnly:true}:{})};
       store.get().taskDrafts.push(draft);durableSave();
     }
-    await queue.saveDrafts([draft.id],{instanceId:inst.id,checkLease:this.leaseGuard(op,context)});
+    const check=this.leaseGuard(op,context);
+    await queue.saveDrafts([draft.id],{instanceId:inst.id,checkLease:check,expectedAccountScope:op.payload.action==='resume_unwritten_import'?op.payload.accountScope:undefined,onImportPage:({driver})=>{
+      if(!driver.window)return;
+      const page={instance:inst,window:driver.window,check};this.importPages.set(op.accountId,page);
+      return ()=>{if(this.importPages.get(op.accountId)===page)this.importPages.delete(op.accountId);};
+    }});
     draft=drafts.list().find(d=>d.id===draft.id);
     if(draft?.nativeState!=='saved' || !draft.nativeBinding)throw new Error('native draft binding missing');
     this.journal.bindTask(snapshot.id,{nativeBinding:draft.nativeBinding});
@@ -102,7 +115,41 @@ class NativeAdapter {
       } catch {}
       return {taskId:snapshot.id,status:'uncertain',error:'inspect original native draft and conversation'};
     });
-    return {outcome:items.every(t=>t.status==='submitted')?'success':'uncertain',receipt:{tasks:items}};
+    const dispatches=op.payload.sendOnly===true?this.dispatchEvidence(op,tasks):[];
+    return {outcome:items.every(t=>t.status==='submitted')?'success':'uncertain',receipt:{tasks:items,...(op.payload.sendOnly===true?{dispatchOnly:true,dispatches}:{})}};
+  }
+  dispatchEvidence(op,tasks=op.payload.tasks||[]) {
+    const rows=[];
+    for(const snapshot of tasks){
+      const binding=this.journal.task(snapshot.id);if(binding?.accountId!==op.accountId)continue;
+      const draft=drafts.list().find(d=>d.id===binding.draftId);let local;
+      try{local=this.local(snapshot.id,op.accountId);}catch{}
+      const raw=local?.dispatchReceipt||draft?.dispatchReceipt;
+      if(raw&&['quota_limited','message_accepted','pending'].includes(raw.outcome))rows.push({...raw,...(raw.outcome==='pending'?{outcome:'attempted_unconfirmed'}:{})});
+      else if(local?.receiptUserMessageId&&local.sentAt)rows.push({taskId:snapshot.id,draftId:binding.draftId,nativeId:binding.nativeBinding?.nativeId,clickedAt:local.sentAt,outcome:'message_accepted',conversationUrl:local.conversationUrl});
+    }
+    return rows;
+  }
+  continuationReceipt(op) {
+    const dispatches=this.dispatchEvidence(op),complete=dispatches.length===op.payload.tasks.length;
+    return {outcome:complete?'success':'uncertain',receipt:{status:complete?'draft_dispatch_complete':'draft_dispatch_partial',dispatchOnly:true,originalOperationId:op.payload.originalOperationId,dispatches}};
+  }
+  async continueUnstartedDrafts(op,recover=false,context={}) {
+    const original=this.journal.get(op.payload.originalOperationId),tasks=op.payload.tasks,pause=original?.result?.receipt?.deliveryPause;
+    if(op.payload.sendOnly!==true||op.payload.dispatchOnly!==true||!original?.reported||original.state!=='done'||original.operation.kind!=='send'||original.operation.accountId!==op.accountId||original.operation.batchId!==op.batchId||original.operation.payload.sendOnly!==true||original.result.outcome!=='uncertain'||!Array.isArray(tasks)||!tasks.length)throw Error('original unstarted dispatch evidence missing');
+    const index=original.operation.payload.tasks.findIndex(t=>t.id===pause?.taskId&&t.draftId===pause?.draftId),suffix=original.operation.payload.tasks.slice(index+1);
+    if(index<0||JSON.stringify(suffix.map(t=>t.draftId))!==JSON.stringify(pause.notStartedDraftIds))throw Error('unstarted dispatch suffix changed');
+    let expected=suffix;
+    if(op.payload.previousOperationId){
+      const previous=this.journal.get(op.payload.previousOperationId),prior=previous?.operation,rows=previous?.result?.receipt?.dispatches;
+      if(!previous?.reported||previous.state!=='done'||prior.kind!=='account'||prior.payload.action!=='continue_unstarted_drafts'||prior.payload.originalOperationId!==op.payload.originalOperationId||prior.accountId!==op.accountId||prior.batchId!==op.batchId||prior.payload.sendOnly!==true||prior.payload.dispatchOnly!==true||previous.result.outcome!=='uncertain'||previous.result.receipt.dispatchOnly!==true||!Array.isArray(rows)||!Array.isArray(prior.payload.tasks)||!prior.payload.tasks.every(t=>suffix.some(s=>JSON.stringify(s)===JSON.stringify(t))))throw Error('previous dispatch evidence missing or changed');
+      const attempted=new Set(rows.map(row=>row.taskId));expected=prior.payload.tasks.filter(t=>!attempted.has(t.id));
+    }
+    if(JSON.stringify(expected)!==JSON.stringify(tasks))throw Error('unstarted dispatch suffix changed');
+    if(recover)return this.continuationReceipt(op);
+    if(original.operation.payload.account.environment?.version!==op.payload.account.environment?.version)throw Error('original account environment changed');
+    for(const task of tasks){const binding=this.journal.task(task.id),draft=drafts.list().find(d=>d.id===task.draftId),template=draft?.template;if(task.references?.length||binding?.accountId!==op.accountId||binding.draftId!==task.draftId||!draft||draft.nativeState!=='saved'||draft.submissionRecord||draft.nativeBinding?.nativeId!==task.nativeBinding?.nativeId||draft.executionMode!=='work'||template?.studioTaskId!==task.id||template.prompt!==task.prompt||['model','duration','ratio'].some(key=>template[key]!==task.parameters?.[key])||template.attachments?.length)throw Error('draft already dispatched or changed');}
+    await this.send(op,false,context);return this.continuationReceipt(op);
   }
   async send(op,recover=false,context={}) {
     const inst=this.account(op),tasks=op.payload.tasks;
@@ -126,12 +173,13 @@ class NativeAdapter {
       },
       onDeliveryPause:info=>{deliveryPause=info;}
     }:{};
-    try {await queue.submitDrafts(ids,{instanceId:inst.id,maxPages:this.maxDraftPages,startQueue:false,sendOnly:true,checkLease:this.leaseGuard(op,context),...visibility});} catch { /* Each durable native receipt decides its own status. */ }
+    try {await queue.submitDrafts(ids,{instanceId:inst.id,maxPages:this.maxDraftPages,startQueue:false,sendOnly:true,dispatchOnly:op.payload.sendOnly===true,checkLease:this.leaseGuard(op,context),...visibility});} catch { /* Each durable native receipt decides its own status. */ }
     const result=this.sendReceipt(op,tasks);
     if(deliveryPause)result.receipt.deliveryPause=deliveryPause;
     return result;
   }
   progress(op) {
+    if(op.kind==='account'&&op.payload.action==='continue_unstarted_drafts')return {outcome:'progress',receipt:this.continuationReceipt(op).receipt};
     if(op.kind!=='send')return null;
     const tasks=[];
     for(const snapshot of op.payload.tasks||[]) {
@@ -192,6 +240,23 @@ class NativeAdapter {
       } catch { /* Inspection failure preserves the original uncertain state. */ }
     }
     return {version:1,readOnly:true,accountId,executorSessionId:this.sessionId,inspectedAt:Date.now(),entries};
+  }
+  async resumeUnwrittenImport(op,context={}) {
+    const snapshot=requireTask(op),original=this.journal.get(op.payload.originalOperationId),binding=this.journal.task(snapshot.id);
+    const hash=value=>crypto.createHash('sha256').update(JSON.stringify(value,(key,item)=>key==='downloadUrl'?undefined:item)).digest('hex');
+    const check=this.leaseGuard(op,context);check();
+    const draft=drafts.list().find(d=>d.id===binding?.draftId);
+    if(op.payload.sendOnly!==true||snapshot.references?.length||!original?.reported||original.operation.kind!=='import'||original.operation.accountId!==op.accountId||original.result?.outcome!=='uncertain'||hash(original.operation.payload.task)!==hash(snapshot)||binding?.accountId!==op.accountId||binding.snapshotHash!==hash(snapshot)||!draft||!draft.draftNumber||draft.nativeState||draft.nativePrompt||draft.nativeBinding||draft.submissionRecord)throw Error('original import is not proved unwritten');
+    const template=draft.template,id=stableId('',`${op.accountId}/${snapshot.id}`),templateId=stableId('studio-template-',snapshot.id);
+    if(draft.id!==id||draft.draftNumber!==drafts.numberFor(id)||draft.executionMode!=='work'||draft.studioSendOnly!==true||template?.id!==templateId||binding.templateId!==templateId||template.studioTaskId!==snapshot.id||template.prompt!==snapshot.prompt||template.model!==snapshot.parameters.model||template.duration!==snapshot.parameters.duration||template.ratio!==snapshot.parameters.ratio||!Array.isArray(template.attachments)||template.attachments.length)throw Error('original import template changed');
+    const inst=this.account(op),win=await this.accounts.open(inst.id),driver=await this.driverFactory(inst,win.webContents);
+    if((await driver.isLoggedIn())?.loggedIn!==true)throw Error('original account login required');
+    const missing=await driver.call('verifyNativeDraftMissing',{prompt:`【草稿编号：${draft.draftNumber}】`,accountScope:op.payload.accountScope});check();
+    if(missing?.ok!==true||missing.readOnly!==true||missing.absent!==true||!op.payload.accountScope||missing.accountScope!==op.payload.accountScope)throw Error('complete original input records cannot prove the task body absent');
+    const unwrittenProof={readOnly:true,taskContentWritten:false,catalogComplete:true,accountScope:missing.accountScope};
+    check();const imported=await this.import(op,false,context);check();
+    if(imported?.outcome!=='success')throw Error('resumed import requires original receipt inspection');
+    return {outcome:'success',receipt:{...imported.receipt,status:'draft_import_resumed',originalOperationId:op.payload.originalOperationId,taskId:snapshot.id,snapshotHash:hash(snapshot),environmentVersion:inst.studioEnvironment?.version,executorSessionId:this.sessionId,verifiedAt:Date.now(),unwrittenProof}};
   }
   async reconcileImport(op,context={}) {
     const intent=op.payload.reconciliation,snapshot=intent?.task;
@@ -268,10 +333,11 @@ class NativeAdapter {
     if(op.kind==='import')return this.import(op,false,context);
     if(op.kind==='send')return this.send(op,false,context);
     if(op.kind==='track')return this.track(op,context);
-    if(op.kind==='account')return op.payload.action==='reconcile_import'?this.reconcileImport(op,context):this.login(op,context);
+    if(op.kind==='account')return op.payload.action==='continue_unstarted_drafts'?this.continueUnstartedDrafts(op,false,context):op.payload.action==='reconcile_import'?this.reconcileImport(op,context):op.payload.action==='resume_unwritten_import'?this.resumeUnwrittenImport(op,context):this.login(op,context);
     throw new Error('unsupported operation');
   }
   async recover(op,context={}) {
+    if(op.kind==='account'&&op.payload.action==='continue_unstarted_drafts')return this.continueUnstartedDrafts(op,true,context);
     if(op.kind==='import')return this.import(op,true,context);
     if(op.kind==='send')return this.send(op,true,context);
     if(op.kind==='track')return this.track(op,context);
@@ -342,7 +408,7 @@ async function start() {
       pages.add(win);const close=()=>{if(!win.isDestroyed())win.destroy();};
       win.on('closed',()=>{pages.delete(win);signal?.removeEventListener('abort',close);});signal?.addEventListener('abort',close,{once:true});
       win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
-      try {await win.loadURL('about:blank');await environment.prepareStudioWindow(win,inst);await win.loadURL(store.DEFAULT_URL);const instanceDriver=await driver.open(inst,{webContents:win.webContents});instanceDriver.window=win;instanceDriver.close=close;return instanceDriver;} catch(error){close();throw error;}
+      try {await win.loadURL('about:blank');await environment.prepareStudioWindow(win,inst);await win.loadURL(store.DEFAULT_URL);const instanceDriver=await driver.open(inst,{webContents:win.webContents});instanceDriver.window=win;instanceDriver.close=close;instanceDriver.preserve=()=>signal?.removeEventListener('abort',close);instanceDriver.resumeAutoClose=()=>{if(signal?.aborted)return false;signal?.addEventListener('abort',close,{once:true});return true;};return instanceDriver;} catch(error){close();throw error;}
     },findWebContents:inst=>accounts.find(inst)});
   queue.recoverTemplateTasks();queue.pause('');
   const journal=new Journal(path.join(cfg.stateDir,'studio-journal.json')),client=new StudioClient(cfg);

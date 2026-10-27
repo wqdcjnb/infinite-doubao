@@ -411,6 +411,10 @@
     if (!editor() || importText() || importCards().length) throw new Error("请先打开空白工作任务输入区，再恢复中断草稿；未覆盖当前内容");
     return { ok: true, restart: true, accountScope: data.accountScope };
   }
+  api.verifyNativeDraftMissing = result(async function (options) {
+    var missing = await confirmInterruptedImportMissing(options);
+    return { ok: true, readOnly: true, absent: true, accountScope: missing.accountScope };
+  });
   api.resumeNativeDraftImport = result(async function (options) {
     var epoch = importEpoch, expected = options.attachmentNames || [], verified = await savedDraft(options);
     checkImport(epoch);
@@ -662,6 +666,7 @@
     return verified;
   });
   api.openNativeDraft = result(async function (options) {
+    var deadline = Date.now() + 60000;
     // IndexedDB can finish before the sidebar mounts in a fresh sender page.
     // Wait for this verified native ID, rather than treating a missing DOM row
     // as a deleted draft or selecting a similar title.
@@ -673,7 +678,7 @@
       // resolved connected row before yielding to storage/render callbacks.
       row.click();
       return true;
-    }, "草稿数据已核对，但网页尚未显示对应条目，请检查豆包侧栏后重试；尚未发送");
+    }, "草稿数据已核对，但网页尚未显示对应条目，请检查豆包侧栏后重试；尚未发送", deadline);
     var stableAt = 0, previousEditor = null, state, lastSelectionAt = Date.now();
     await wait(async function () {
       state = readiness(options);
@@ -692,7 +697,7 @@
       }
       if (!stableAt) stableAt = Date.now();
       return Date.now() - stableAt >= 600;
-    }, function () { return "豆包草稿未就绪：" + (state && state.reasons.length ? state.reasons.join("；") : "输入区仍在切换") + "；尚未发送"; });
+    }, function () { return "豆包草稿未就绪：" + (state && state.reasons.length ? state.reasons.join("；") : "输入区仍在切换") + "；尚未发送"; }, deadline);
     return { ok: true, conversationIds: Array.from(document.querySelectorAll('a[id^="conversation_"]')).map(function (a) { return a.id.slice(13); }) };
   });
   api.sendNativeDraft = result(async function (options) {
@@ -716,11 +721,21 @@
     });
     return accepted.size === 1 ? { ok: true, conversationUrl: location.href, userMessageId: Array.from(accepted)[0], bindings: snapshot() } : { ok: false };
   };
+  api.readNativeQuotaResponse = function (options) {
+    var match = location.pathname.match(/^\/chat\/([^/]+)$/);
+    if (!match || (options.conversationIds || []).includes(match[1]) || api.readNativeDeliveryState().captchaDetected) return null;
+    var node = Array.from(document.querySelectorAll('p, [data-message-id]')).find(function (item) {
+      var body = normalize(text(item));
+      return visible(item) && !item.closest('nav, aside, #input-engine-container, [contenteditable="true"]') && /^近\s*7\s*天免费额度已用完[，,]/.test(body) && !normalize(options.prompt).includes(body);
+    });
+    return node ? { ok: true, quotaLimited: true, conversationUrl: location.href, providerMessage: normalize(text(node)).slice(0, 300) } : null;
+  };
   api.waitNativeDraftAccepted = result(async function (options) {
     var deadline = Date.now() + 120000;
     while (Date.now() < deadline) {
       var receipt = api.readNativeDraftReceipt(options);
       if (receipt.ok) return receipt;
+      if (options.dispatchOnly === true) { var quota = api.readNativeQuotaResponse(options); if (quota) return quota; }
       if (Array.from(document.querySelectorAll('iframe[src*="/verifycenter/captcha"]')).some(visible)) deadline = Date.now() + 120000;
       await new Promise(function (resolve) { setTimeout(resolve, 250); });
     }

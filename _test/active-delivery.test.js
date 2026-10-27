@@ -15,6 +15,52 @@ function setup(t) {
   const handle=pages.register({...target,taskId:'task',draftId:'draft',instance:{id:'native-account'},driver,checkLease:()=>{if(!valid)throw Error('lease expired');},cancel:()=>cancelled++});
   return {pages,handle,target,driver,state,calls:()=>calls,cancelled:()=>cancelled,expire:()=>{valid=false;},binding:()=>({taskId:'task',pageId:handle.pageId,captchaId:state.captcha.id})};
 }
+
+test('accepted original receipt resumes automatically after captcha is gone and the human pointer has lifted',async t=>{
+  const s=setup(t);await s.handle.takeover(s.binding());delete s.state.captcha;s.state.captchaDetected=false;s.handle.inputHeld=true;
+  let completed=false;const waiting=s.handle.waitForResume({receiptAccepted:true}).then(()=>{completed=true;});
+  await new Promise(resolve=>setTimeout(resolve,10));assert.equal(completed,false);
+  s.handle.inputHeld=false;
+  const outcome=await Promise.race([waiting.then(()=>true),new Promise(resolve=>setTimeout(()=>resolve(false),350))]);
+  if(!outcome){await s.handle.observe({taskId:'task',pageId:s.handle.pageId});await waiting;}
+  assert.equal(outcome,true);assert.equal(s.handle.manual,false);
+});
+
+test('automatic resume rechecks a pointer that started while captcha inspection was pending',async t=>{
+  const s=setup(t);await s.handle.takeover(s.binding());let release,entered=false,first=true,completed=false;
+  const gate=new Promise(resolve=>{release=resolve;});
+  s.driver.call=async()=>{if(first){first=false;entered=true;await gate;}return {captchaDetected:false};};
+  const waiting=s.handle.waitForResume({receiptAccepted:true}).then(()=>{completed=true;});
+  while(!entered)await new Promise(resolve=>setImmediate(resolve));s.handle.inputHeld=true;release();
+  try{await new Promise(resolve=>setTimeout(resolve,130));assert.equal(completed,false,'a new drag must keep its original page open');}
+  finally{s.handle.inputHeld=false;await waiting;}
+});
+
+test('a failed captcha read cannot authorize automatic resume after receipt acceptance',async t=>{
+  const s=setup(t);await s.handle.takeover(s.binding());let completed=false;
+  s.driver.call=async()=>{throw Error('temporary document read error');};
+  const waiting=s.handle.waitForResume({receiptAccepted:true}).then(()=>{completed=true;});
+  try{await new Promise(resolve=>setTimeout(resolve,130));assert.equal(completed,false);}
+  finally{s.driver.call=async()=>({captchaDetected:false});await waiting;}
+});
+
+test('human takeover remains on the same full page after captcha disappears until the user resumes automation',async t=>{
+  const s=setup(t);await s.handle.takeover(s.binding());
+  delete s.state.captcha;s.state.captchaDetected=false;
+  assert.equal((await s.handle.snapshot()).stage,'manual_captcha');
+  const binding={taskId:'task',pageId:s.handle.pageId,captchaId:'page'};
+  await s.handle.assertInput(binding,'Input.dispatchMouseEvent',{type:'mouseReleased',x:700,y:450,button:'left'});
+  await s.handle.observe(binding);assert.equal(s.handle.manual,false);assert.equal(s.cancelled(),0);
+});
+test('human takeover waits for the current atomic preparation step and blocks the next automation step',async t=>{
+  const s=setup(t);assert.equal(typeof s.handle.runAutomation,'function');let release,entered=false,second=false;
+  const first=s.handle.runAutomation(async()=>{entered=true;await new Promise(resolve=>{release=resolve;});});
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(entered,true);
+  const takeover=s.handle.takeover(s.binding());assert.equal(s.handle.manual,false);assert.equal(s.handle.keepOpen,true);
+  release();await first;await takeover;
+  const next=s.handle.runAutomation(async()=>{second=true;});await new Promise(resolve=>setTimeout(resolve,5));assert.equal(second,false);
+  await s.handle.observe(s.binding());await next;assert.equal(second,true);
+});
 test('borrows only the exact live owned page and fences stale task/environment/session/op references',t=>{
   const s=setup(t);assert.equal(s.pages.borrow(s.target),s.handle);assert.equal(s.handle.driver,s.driver);
   for(const [key,value] of Object.entries({accountId:'other',operationId:'other',batchId:'other',environmentVersion:'other',executorSessionId:'other',taskId:'other',pageId:'other'}))assert.throws(()=>s.pages.borrow({...s.target,[key]:value}),/mismatch|missing|closed/i);
@@ -24,19 +70,20 @@ test('default observation cannot input; explicit human captcha takeover is confi
   const s=setup(t),binding=s.binding();
   await assert.rejects(s.handle.assertInput(binding,'Input.dispatchMouseEvent',{type:'mousePressed',x:200,y:200}),/captcha|observe/i);
   await s.handle.takeover(binding);await s.handle.assertInput(binding,'Input.dispatchMouseEvent',{type:'mousePressed',x:200,y:200});
-  await assert.rejects(s.handle.assertInput(binding,'Input.dispatchMouseEvent',{type:'mouseReleased',x:700,y:200}),/captcha|range/i);
+  await s.handle.assertInput(binding,'Input.dispatchMouseEvent',{type:'mouseReleased',x:700,y:200});
+  await assert.rejects(s.handle.assertInput(binding,'Input.dispatchMouseEvent',{type:'mouseReleased',x:5000,y:200}),/page|range/i);
   await assert.rejects(s.handle.assertInput({...binding,pageId:'old'},'Input.insertText',{text:'123'}),/mismatch/i);
   assert.equal(s.handle.captchaSeen,true);assert.equal(s.cancelled(),0);
 });
-test('each input re-reads captcha/focus and never permits navigation shortcuts or events after disappearance',async t=>{
+test('human inputs retain full page access while stale page identities remain fenced',async t=>{
   const s=setup(t),binding=s.binding();await s.handle.takeover(binding);
   await s.handle.assertInput(binding,'Input.insertText',{text:'人工输入'});s.state.captcha.focused=false;
-  await assert.rejects(s.handle.assertInput(binding,'Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',modifiers:0}),/focus|captcha/i);
-  s.state.captcha.focused=true;await assert.rejects(s.handle.assertInput(binding,'Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',modifiers:0}),/key|captcha/i);
-  await assert.rejects(s.handle.assertInput(binding,'Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',modifiers:2}),/key|captcha/i);
-  delete s.state.captcha;await assert.rejects(s.handle.assertInput(binding,'Input.dispatchMouseEvent',{type:'mouseReleased',x:200,y:200}),/captcha/i);
-  assert.ok(s.calls()>=6);
+  await s.handle.assertInput(binding,'Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',modifiers:0});
+  await s.handle.assertInput(binding,'Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',modifiers:0});
+  delete s.state.captcha;await s.handle.assertInput(binding,'Input.dispatchMouseEvent',{type:'mouseReleased',x:200,y:200});
+  await s.handle.assertInput({...binding,captchaId:'page'},'Input.dispatchMouseEvent',{type:'mouseReleased',x:200,y:200});
 });
+
 test('expired leases block reads and inputs, old close cannot remove the next page, cancel reaches owner only once',async t=>{
   const s=setup(t);s.expire();const before=s.calls();assert.throws(()=>s.pages.borrow(s.target),/expired/);await assert.rejects(s.handle.snapshot(),/expired/);assert.equal(s.calls(),before);
   s.handle.close();const next=s.pages.register({...s.target,taskId:'next',draftId:'next',instance:{},driver:s.driver,checkLease:()=>{},cancel:()=>{}});
@@ -48,9 +95,10 @@ test('failed registration leaves no borrowed reference',t=>{
   assert.throws(()=>s.pages.register({...context,checkLease:()=>{throw Error('lease expired');}}),/expired/);
   const next=s.pages.register({...context,checkLease:()=>{}});assert.equal(s.pages.borrow(s.target),next);
 });
-test('replacement captcha requires a new explicit human takeover',async t=>{
+test('replacement captcha retains page takeover and the same gesture binding',async t=>{
   const s=setup(t),binding=s.binding();await s.handle.takeover(binding);s.state.captcha.id='captcha-b';await s.handle.snapshot();
-  await assert.rejects(s.handle.assertInput({...binding,captchaId:'captcha-b'},'Input.insertText',{text:'123'}),/observe|takeover|captcha/i);
+  const before=s.calls();await s.handle.assertInput(binding,'Input.insertText',{text:'123'});assert.equal(s.calls(),before,'input must not await CAPTCHA DOM inspection');
+  await s.handle.assertInput({...binding,captchaId:'captcha-b'},'Input.insertText',{text:'123'});
 });
 function detector() {
   const frame={hidden:false,isConnected:true,src:'https://rmc.bytedance.com/verifycenter/captcha/v2?private=one',getAttribute(name){return name==='src'?this.src:null;},getBoundingClientRect:()=>({x:100,y:80,left:100,top:80,right:600,bottom:480,width:500,height:400}),getClientRects:()=>[1],closest:()=>null};
@@ -71,12 +119,12 @@ test('fresh document runtimes cannot reuse a captcha identity from an earlier na
   const first=detector().api.readNativeDeliveryState(),next=detector().api.readNativeDeliveryState();
   assert.notEqual(first.captcha.id,next.captcha.id);
 });
-test('a detected but unsafe captcha still latches the timeout stop boundary without enabling input',async t=>{
+test('a captcha with no exposed rectangle still latches detection and allows explicit whole-page human takeover',async t=>{
   const s=setup(t);s.state.captchaDetected=true;delete s.state.captcha;
   assert.equal((await s.handle.snapshot()).stage,'captcha_required');assert.equal(s.handle.captchaSeen,true);
-  await assert.rejects(s.handle.takeover({taskId:'task',pageId:s.handle.pageId,captchaId:'unavailable'}),/captcha/i);
+  await s.handle.takeover({taskId:'task',pageId:s.handle.pageId,captchaId:'page'});assert.equal(s.handle.manual,true);
 });
-test('every actual pointer location must hit the captcha iframe, not an overlay between the sampled points',async t=>{
+test('explicit human page takeover can operate overlays and areas outside the captcha iframe',async t=>{
   assert.equal(typeof ActiveDeliveryPages,'function');const s=detector();
   s.document.elementFromPoint=(x,y)=>Math.abs(x-200)<10&&Math.abs(y-200)<10?{tagName:'BUTTON'}:s.frame;
   const pages=new ActiveDeliveryPages();t.after(()=>pages.closeAll());
@@ -85,6 +133,6 @@ test('every actual pointer location must hit the captcha iframe, not an overlay 
   const binding={taskId:'t',pageId:page.pageId,captchaId:state.captcha.id};
   for(const type of ['mousePressed','mouseMoved','mouseReleased','mouseWheel']) {
     await page.takeover(binding);
-    await assert.rejects(page.assertInput(binding,'Input.dispatchMouseEvent',{type,x:200,y:200,button:'left'}),/captcha|target|range|covered/i);
+    await page.assertInput(binding,'Input.dispatchMouseEvent',{type,x:200,y:200,button:'left'});
   }
 });
