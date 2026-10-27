@@ -6,7 +6,7 @@ function fixture(){
  const home=fs.mkdtempSync(path.join(os.tmpdir(),'studio-receipt-track-'));P.init({home});store.load();queue.pause('');
  const f={home,calls:[],texts:[],sends:0,closed:0,resumes:0,valid:true,candidate:true,progress:{state:'unknown'},catalog:new Map()};
  f.check=()=>{if(!f.valid)throw Error('lease expired');};
- const driver={isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),navigate:async()=>{},url:async()=> 'https://www.doubao.com/chat/current',
+ const driver={window:{isDestroyed:()=>false},webContents:{isDestroyed:()=>false},isLoggedIn:async()=>({loggedIn:true}),waitForLogin:async()=>({loggedIn:true}),setGenerationOptions:async()=>({}),beginTask:async()=>({ok:true,baselineUrls:[],baselineMessageIds:[]}),navigate:async()=>{},url:async()=> 'https://www.doubao.com/chat/current',
   setText:async(text,check)=>{check?.();f.texts.push(text);if(text==='按要求生成'&&f.expireOnFill)f.valid=false;if(f.holdFill)await new Promise(r=>f.releaseFill=r);return {ok:true};},
   send:async(_options,check)=>{check?.();f.sends++;const saved=JSON.parse(fs.readFileSync(path.join(home,'store.json')));assert.equal(saved.tasks[0].confirmationIntents.confirm.state,'pending');if(f.loseClick)throw Error('lost click response');return {ok:true};},
   readProgress:async()=>f.progress,
@@ -21,8 +21,8 @@ function fixture(){
    return {ok:true};}};
  queue.init({resolveDriver:async()=>driver,resolveDraftDriver:async(_inst,{signal}={})=>{let closed=false;const close=()=>{if(!closed){closed=true;f.closed++;}};signal?.addEventListener('abort',close,{once:true});return {...driver,close};}});
  const resume=queue.resume;queue.resume=()=>{f.resumes++;};
- f.driver=driver;f.journal=new Journal(path.join(home,'studio-journal.json'));f.adapter=new NativeAdapter({journal:f.journal,client:{},accounts:{},maxDraftPages:2});
- f.op=(kind,id,payload={})=>({id,kind,accountId:'a',leaseUntil:Date.now()+60000,leaseToken:'lease',payload:{account:{id:'a',name:'test'},...payload}});
+ f.driver=driver;f.journal=new Journal(path.join(home,'studio-journal.json'));f.adapter=new NativeAdapter({journal:f.journal,client:{},accounts:{},environment:{configure(inst){inst.studioEnvironment={version:'env'};}},maxDraftPages:2});
+ f.op=(kind,id,payload={})=>({id,kind,accountId:'a',...(kind==='send'?{batchId:'batch'}:{}),leaseUntil:Date.now()+60000,leaseToken:'lease',payload:{account:{id:'a',name:'test',environment:{version:'env'}},...payload}});
  f.snapshot=id=>({id,prompt:'Reply received only; do not generate '+id,parameters:{model:'seedance_v2.5',duration:30,ratio:'16:9'},references:[]});
  f.prepare=async(sendOnly=false)=>{const task=f.snapshot('001');await f.adapter.execute(f.op('import','import',{task,sendOnly}),{checkLease:f.check});const r=await f.adapter.execute(f.op('send','send',{tasks:[task],sendOnly}),{checkLease:f.check});assert.equal(r.outcome,'success');f.local=queue.getTask(r.receipt.tasks[0].localTaskId);return r;};
  f.track=()=>f.adapter.execute({...f.op('track','track',{task:f.snapshot('001')}),taskId:'001'},{checkLease:f.check});

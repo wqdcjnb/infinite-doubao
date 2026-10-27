@@ -78,18 +78,26 @@ class StudioControl {
     if(!descriptor) {this.closeSession(this.session);return;}
     if(this.closedSessions.has(descriptor.id))return;
     if(typeof descriptor.id!=='string'||!descriptor.id||typeof descriptor.accountId!=='string'||descriptor.account?.id!==descriptor.accountId||!descriptor.account.environment?.version||!Number.isFinite(descriptor.expiresAt)||descriptor.expiresAt<=Date.now()||!Array.isArray(result.commands)||result.commands.length>32)throw Error('invalid control session');
+    const target=descriptor.target;
+    if(target!==undefined&&(target?.kind!=='delivery'||typeof target.operationId!=='string'||!target.operationId||typeof target.batchId!=='string'||!target.batchId))throw Error('invalid delivery target');
+    const targetKey=target?JSON.stringify({kind:'delivery',operationId:target.operationId,batchId:target.batchId}):'account';
     let ctx=this.session;
-    if(ctx?.id===descriptor.id&&(ctx.accountId!==descriptor.accountId||ctx.version!==descriptor.account.environment.version)) {this.closeSession(ctx);return;}
+    if(ctx?.id===descriptor.id&&(ctx.accountId!==descriptor.accountId||ctx.version!==descriptor.account.environment.version||ctx.targetKey!==targetKey)) {this.closeSession(ctx);return;}
     if(ctx?.id!==descriptor.id) {
       this.closeSession(ctx);
       ctx={id:descriptor.id,accountId:descriptor.accountId,version:descriptor.account.environment.version,expiresAt:descriptor.expiresAt,
+        target:target?{kind:'delivery',operationId:target.operationId,batchId:target.batchId}:null,targetKey,
         abort:new AbortController(),queue:[],seen:new Map(),acknowledgements:[],connected:true,loginState:'unknown',buttons:0,keys:new Set(),lastProbe:0,captureFailures:0};
       this.session=ctx;
-      try {ctx.inst=this.adapter.account({kind:'account',accountId:ctx.accountId,payload:{account:descriptor.account}});} catch(error) {this.closeSession(ctx);throw error;}
-      ctx.ready=Promise.resolve().then(()=>{this.check(ctx);return this.accounts.open(ctx.inst.id);}).then(win=>{
-        this.check(ctx);ctx.win=win;ctx.closed=()=>this.closeSession(ctx);win.on('closed',ctx.closed);
-        this.capture(ctx);return win;
-      }).catch(()=>{if(this.session===ctx)this.reportError(ctx,'账号页面打开失败，请检查账号环境后重新连接');return null;});
+      if(ctx.target) {
+        ctx.ready=Promise.resolve().then(()=>{this.check(ctx);this.capture(ctx);return ctx.win;}).catch(()=>{if(this.session===ctx)this.reportError(ctx,'当前没有可用的原发送页，请核对发送状态');return null;});
+      } else {
+        try {ctx.inst=this.adapter.account({kind:'account',accountId:ctx.accountId,payload:{account:descriptor.account}});} catch(error) {this.closeSession(ctx);throw error;}
+        ctx.ready=Promise.resolve().then(()=>{this.check(ctx);return this.accounts.open(ctx.inst.id);}).then(win=>{
+          this.check(ctx);ctx.win=win;ctx.closed=()=>this.closeSession(ctx);win.on('closed',ctx.closed);
+          this.capture(ctx);return win;
+        }).catch(()=>{if(this.session===ctx)this.reportError(ctx,'账号页面打开失败，请检查账号环境后重新连接');return null;});
+      }
     }
     ctx.expiresAt=descriptor.expiresAt;ctx.lastContact=Date.now();ctx.connected=true;
     clearTimeout(ctx.watchdog);ctx.watchdog=setTimeout(()=>this.closeSession(ctx),Math.max(0,Math.min(5000,ctx.expiresAt-Date.now())));
@@ -98,28 +106,46 @@ class StudioControl {
       if(typeof command?.id!=='string'||!command.id||!Number.isFinite(command.expiresAt)||ctx.seen.has(command.id))continue;
       // Mark delivery before awaiting any browser work; no retry path replays an input.
       ctx.seen.set(command.id,command.expiresAt);
-      if(command.expiresAt<=Date.now()) {this.resetHeld(ctx);if(this.session!==ctx)return;this.ack(ctx,{id:command.id,ok:false,error:'操作已过期，请重新操作'});continue;}
+      if(command.expiresAt<=Date.now()) {if(!ctx.target||this.matchesDeliveryBinding(ctx,command))this.resetHeld(ctx);if(this.session!==ctx)return;this.ack(ctx,{id:command.id,ok:false,error:'操作已过期，请重新操作'});continue;}
       if(ctx.queue.length>=32) {this.closeSession(ctx);return;}
       ctx.queue.push(command);
     }
     this.drain(ctx);
   }
   check(ctx,command) {
-    if(this.controller.signal.aborted||this.session!==ctx||!ctx.connected||this.client.sessionId!==this.executorSessionId||ctx.expiresAt<=Date.now()||Date.now()-ctx.lastContact>=5000||ctx.inst?.studioEnvironment?.version!==ctx.version||ctx.win?.isDestroyed?.()||ctx.win?.webContents.isDestroyed?.())throw Error('控制会话已断开或过期，请重新连接');
+    if(this.controller.signal.aborted||this.session!==ctx||!ctx.connected||this.client.sessionId!==this.executorSessionId||ctx.expiresAt<=Date.now()||Date.now()-ctx.lastContact>=5000)throw Error('控制会话已断开或过期，请重新连接');
+    if(ctx.target)this.bindDelivery(ctx);
+    if(ctx.inst?.studioEnvironment?.version!==ctx.version||ctx.win?.isDestroyed?.()||ctx.win?.webContents.isDestroyed?.())throw Error('控制会话已断开或过期，请重新连接');
     if(command&&command.expiresAt<=Date.now())throw Error('操作已过期，请重新操作');
+  }
+  bindDelivery(ctx) {
+    const entry=this.adapter.deliveryPages.borrow({accountId:ctx.accountId,...ctx.target,environmentVersion:ctx.version,executorSessionId:this.executorSessionId});
+    if(ctx.entry===entry)return;
+    this.resetHeld(ctx);
+    if(ctx.closed&&ctx.win)ctx.win.removeListener('closed',ctx.closed);
+    for(const command of ctx.queue)this.ack(ctx,{id:command.id,ok:false,error:'原处理页已变化，旧操作未执行'});
+    ctx.queue=[];ctx.entry=entry;ctx.inst=entry.instance;ctx.win=entry.driver.window;ctx.loginState='unknown';
+    ctx.closed=()=>{
+      this.resetHeld(ctx);entry.manual=false;
+      if(ctx.win)ctx.win.removeListener('closed',ctx.closed);
+      ctx.win=null;ctx.entry=null;ctx.pendingFrame=null;
+    };
+    ctx.win.on('closed',ctx.closed);
   }
   closeSession(ctx) {
     if(!ctx)return;
     this.closedSessions.add(ctx.id);ctx.connected=false;ctx.abort.abort();clearTimeout(ctx.watchdog);
     ctx.queue.length=0;ctx.acknowledgements.length=0;ctx.pendingFrame=null;
-    if(ctx.closed)ctx.win.removeListener('closed',ctx.closed);
+    if(ctx.closed&&ctx.win)ctx.win.removeListener('closed',ctx.closed);
     if(this.session===ctx)this.session=null;
     this.resetHeld(ctx);
+    if(ctx.entry)ctx.entry.manual=false;
   }
   resetHeld(ctx) {
-    const held=ctx.buttons||ctx.keys.size;ctx.buttons=0;ctx.keys.clear();
+    const held=ctx.buttons||ctx.keys.size;ctx.buttons=0;ctx.keys.clear();ctx.heldBinding=null;
     // Mouseup can click a captured button even offscreen. Discard the old page instead.
-    if(held&&ctx.win&&!ctx.win.isDestroyed?.())ctx.win.destroy();
+    if(held&&ctx.target)ctx.entry?.cancel(Error('captcha input disconnected'));
+    else if(held&&ctx.win&&!ctx.win.isDestroyed?.())ctx.win.destroy();
   }
   async drain(ctx) {
     if(ctx.draining)return;ctx.draining=true;
@@ -128,25 +154,54 @@ class StudioControl {
       while(this.session===ctx&&ctx.queue.length) {
         const command=ctx.queue.shift();let acknowledgement={id:command.id,ok:true};
         try {this.check(ctx,command);await this.execute(ctx,command);this.check(ctx,command);} catch(error) {
-          this.resetHeld(ctx);
+          if(error.code!=='STALE_DELIVERY_COMMAND')this.resetHeld(ctx);
           acknowledgement={id:command.id,ok:false,error:/登录|过期|断开/.test(error.message)?error.message:'操作失败，请检查当前画面后手动重试'};
         }
         if(this.session===ctx) {this.ack(ctx,acknowledgement);this.capture(ctx);}
       }
     } finally {ctx.draining=false;}
   }
+  matchesDeliveryBinding(ctx,command) {
+    const binding=command.binding;
+    return Boolean(ctx.entry&&binding&&binding.taskId===ctx.entry.taskId&&binding.pageId===ctx.entry.pageId&&binding.captchaId===ctx.entry.captcha?.id);
+  }
+  checkHeldDelivery(ctx) {
+    if(ctx.target&&(ctx.buttons||ctx.keys.size)&&ctx.heldBinding&&!this.matchesDeliveryBinding(ctx,{binding:ctx.heldBinding})) {
+      this.resetHeld(ctx);throw Error('held captcha target changed');
+    }
+  }
   async execute(ctx,command) {
+    if(ctx.target) {
+      this.check(ctx,command);this.checkHeldDelivery(ctx);
+      if(['captcha_takeover','observe','input'].includes(command.action)) {
+        if(!this.matchesDeliveryBinding(ctx,command)) {
+          const error=Error('stale delivery command');error.code='STALE_DELIVERY_COMMAND';throw error;
+        }
+      }
+      if(command.action==='captcha_takeover') {
+        if(ctx.buttons||ctx.keys.size) {this.resetHeld(ctx);throw Error('unsafe captcha input state');}
+        return ctx.entry.takeover(command.binding);
+      }
+      if(command.action==='observe') {const entry=ctx.entry;await entry.observe(command.binding);this.resetHeld(ctx);return;}
+      if(!['open','frame','input'].includes(command.action))throw Error('active delivery navigation is not allowed');
+    }
     if(command.action==='input')return this.input(ctx,command,this.decryptInput(command.inputEncrypted,this.client.token));
     if(command.action==='navigate')return this.openLogin(ctx,command);
     if(!['open','frame'].includes(command.action))throw Error('unsupported control action');
   }
   async send(ctx,command,method,value) {
     this.check(ctx,command);const wc=ctx.win.webContents;
+    if(ctx.target) {
+      const entry=ctx.entry;await entry.assertInput(command.binding,method,value);this.check(ctx,command);
+      if(ctx.entry!==entry||ctx.win.webContents!==wc)throw Error('delivery page identity changed');
+    }
     if(method==='Input.dispatchMouseEvent'&&value.type==='mousePressed')ctx.buttons=1;
     if(method==='Input.dispatchKeyEvent'&&value.type==='keyDown')ctx.keys.add(value.code);
+    if(ctx.target&&(ctx.buttons||ctx.keys.size))ctx.heldBinding={...command.binding};
     await wc.debugger.sendCommand(method,value);
     if(method==='Input.dispatchMouseEvent'&&value.type==='mouseReleased')ctx.buttons=0;
     if(method==='Input.dispatchKeyEvent'&&value.type==='keyUp')ctx.keys.delete(value.code);
+    if(!ctx.buttons&&!ctx.keys.size)ctx.heldBinding=null;
   }
   coordinates(ctx,input) {
     if(![input.x,input.y].every(value=>Number.isFinite(value)&&value>=0&&value<=1))throw Error('invalid pointer coordinates');
@@ -203,10 +258,14 @@ class StudioControl {
     ctx.capturing=true;
     this.probeLogin(ctx);
     try {
+      const entry=ctx.entry,win=ctx.win,delivery=ctx.target?await entry.snapshot():undefined;
+      this.check(ctx);if(ctx.win!==win||ctx.entry!==entry)throw Error('delivery capture changed');
+      this.checkHeldDelivery(ctx);
       const image=await ctx.win.webContents.capturePage(undefined,{stayHidden:true});this.check(ctx);
+      if(ctx.win!==win||ctx.entry!==entry)throw Error('delivery capture changed');
       const jpeg=image.toJPEG(70);if(jpeg.length>1024*1024)throw Error('control frame too large');
       const [width,height]=ctx.win.getContentSize();
-      ctx.pendingFrame={imageBase64:jpeg.toString('base64'),contentType:'image/jpeg',width,height,capturedAt:Date.now(),loginState:ctx.loginState};
+      ctx.pendingFrame={imageBase64:jpeg.toString('base64'),contentType:'image/jpeg',width,height,capturedAt:Date.now(),loginState:ctx.loginState,...(delivery?{delivery}:{})};
       ctx.captureFailures=0;
       this.flushFrames();
     } catch {

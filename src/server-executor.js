@@ -4,6 +4,7 @@ const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypt
 const P=require('./paths'),store=require('./store'),drafts=require('./task-drafts'),templates=require('./task-templates'),queue=require('./orchestrator');
 const {Journal,StudioClient,StudioBridge,downloadReferences}=require('./studio-bridge');
 const {StudioControl}=require('./studio-control');
+const {ActiveDeliveryPages}=require('./active-delivery');
 function stableId(prefix,id) {return prefix+crypto.createHash('sha256').update(id).digest('hex').slice(0,24);}
 function durableSave() {if(!store.save())throw new Error('executor local state could not be persisted');}
 function requireTask(op) {const task=op.payload.task;if(!task?.id || !task.prompt || !task.parameters)throw new Error('invalid task snapshot');return task;}
@@ -27,6 +28,7 @@ class NativeAdapter {
     this.journal=journal;this.client=client;this.accounts=accounts;this.driverFactory=driverFactory||((inst,wc)=>require('./driver').open(inst,{webContents:wc}));
     this.environment=environment;this.sessionId=sessionId;
     this.maxDraftPages=Math.max(1,Math.min(8,maxDraftPages));
+    this.deliveryPages=new ActiveDeliveryPages();
   }
   account(op) {
     if(op.payload?.account?.id!==op.accountId)throw new Error('account identity mismatch');
@@ -114,8 +116,20 @@ class NativeAdapter {
       return binding.draftId;
     });
     if(recover)return this.sendReceipt(op,tasks);
-    try {await queue.submitDrafts(ids,{instanceId:inst.id,maxPages:this.maxDraftPages,startQueue:false,sendOnly:true,checkLease:this.leaseGuard(op,context)});} catch { /* Each durable native receipt decides its own status. */ }
-    return this.sendReceipt(op,tasks);
+    let deliveryPause;
+    const visibility=op.payload.sendOnly===true?{
+      onDeliveryPage:({draft,driver,cancel})=>{
+        const task=tasks.find(t=>t.id===draft.template.studioTaskId),binding=task&&this.journal.task(task.id);
+        if(!task||binding?.accountId!==op.accountId||binding.draftId!==draft.id)throw Error('delivery page task identity mismatch');
+        return this.deliveryPages.register({accountId:op.accountId,operationId:op.id,batchId:op.batchId,taskId:task.id,draftId:draft.id,
+          environmentVersion:inst.studioEnvironment?.version,executorSessionId:this.sessionId,instance:inst,driver,checkLease:this.leaseGuard(op,context),cancel});
+      },
+      onDeliveryPause:info=>{deliveryPause=info;}
+    }:{};
+    try {await queue.submitDrafts(ids,{instanceId:inst.id,maxPages:this.maxDraftPages,startQueue:false,sendOnly:true,checkLease:this.leaseGuard(op,context),...visibility});} catch { /* Each durable native receipt decides its own status. */ }
+    const result=this.sendReceipt(op,tasks);
+    if(deliveryPause)result.receipt.deliveryPause=deliveryPause;
+    return result;
   }
   progress(op) {
     if(op.kind!=='send')return null;
@@ -328,7 +342,7 @@ async function start() {
       pages.add(win);const close=()=>{if(!win.isDestroyed())win.destroy();};
       win.on('closed',()=>{pages.delete(win);signal?.removeEventListener('abort',close);});signal?.addEventListener('abort',close,{once:true});
       win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
-      try {await win.loadURL('about:blank');await environment.prepareStudioWindow(win,inst);await win.loadURL(store.DEFAULT_URL);const instanceDriver=await driver.open(inst,{webContents:win.webContents});instanceDriver.close=close;return instanceDriver;} catch(error){close();throw error;}
+      try {await win.loadURL('about:blank');await environment.prepareStudioWindow(win,inst);await win.loadURL(store.DEFAULT_URL);const instanceDriver=await driver.open(inst,{webContents:win.webContents});instanceDriver.window=win;instanceDriver.close=close;return instanceDriver;} catch(error){close();throw error;}
     },findWebContents:inst=>accounts.find(inst)});
   queue.recoverTemplateTasks();queue.pause('');
   const journal=new Journal(path.join(cfg.stateDir,'studio-journal.json')),client=new StudioClient(cfg);
