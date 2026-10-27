@@ -775,7 +775,7 @@ async function submitDrafts(ids, options = {}) {
     const accepted = selected.filter((d) => d.submissionRecord).map((d) => ({ id: d.id, record: d.submissionRecord }));
     const pending = selected.filter((d) => !d.submissionRecord), errors = unresolved.map(d => ({ phase: "receipt", message: `草稿「${d.template.name}」上次发送结果尚未确认，不会自动重发` })), children = new Set();
     const bindings = nativeBindings(inst.id), draftBatchId = `draft-batch-${crypto.randomBytes(12).toString("hex")}`;
-    let failure, launched = 0;
+    let failure, deliveryPause, launched = 0;
     const checkDispatch = () => {
       checkAction();
     };
@@ -798,10 +798,15 @@ async function submitDrafts(ids, options = {}) {
         const preparingAt = Date.now();
         const child = { controller: new AbortController() };
         children.add(child);
-        let driver, record, issued = false, received = false, trackingReceipt = false;
+        let driver, record, activity, issued = false, received = false, trackingReceipt = false;
         const checkDraft = () => { check(); child.controller.signal.throwIfAborted(); };
-        const cleanup = () => { children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); };
+        const cleanup = () => { activity?.close?.(); children.delete(child); child.controller.abort(new Error("本条草稿核对已结束")); driver?.close(); };
         const recordFailure = error => {
+          if (!received && (activity?.captchaSeen || error.code === "CAPTCHA_HANDOFF_INTERRUPTED")) deliveryPause = {
+            reason: error.code === "CAPTCHA_HANDOFF_INTERRUPTED" ? "manual_interrupted" : "captcha_wait_ended",
+            taskId: draft.template.studioTaskId, draftId: draft.id,
+            notStartedDraftIds: pending.slice(issued ? index + 1 : index).map(item => item.id)
+          };
           const message = `${received ? "草稿已接收，保存任务失败" : issued ? "已发起发送，接收结果未确认" : "尚未发送"}：${error.message}`;
           errors.push({ message, phase: received ? "commit" : issued ? "receipt" : "prepare" });
           drafts.updateMany({ [draft.id]: { nativeError: message, ...(received ? { submissionRecord: JSON.parse(JSON.stringify(record)) } : {}) } });
@@ -815,6 +820,8 @@ async function submitDrafts(ids, options = {}) {
             driver = await deps.resolveDraftDriver(inst, { signal: child.controller.signal });
             if (child.controller.signal.aborted) driver.close();
             checkDraft();
+            activity = options.onDeliveryPage?.({ draft, driver, cancel: error => child.controller.abort(error) });
+            activity?.setStage?.("preparing");
             const login = await driver.waitForLogin({ check: checkDraft });
             if (login?.loggedIn !== true) throw new Error(login?.by === "login-button"
               ? `账号 ${inst.name} 的草稿页面仍显示登录入口，请在该账号页面确认登录后重试`
@@ -838,6 +845,7 @@ async function submitDrafts(ids, options = {}) {
           checkDispatch();
           record.task.submittedAt = new Date().toISOString();
           drafts.updateMany({ [draft.id]: { nativeError: "", submissionRecord: JSON.parse(JSON.stringify(record)) } });
+          activity?.setStage?.("waiting_receipt");
           // The durable intent precedes the click. Do not await this promise here.
           const sent = driver.call("sendNativeDraft", pageOptions);
           issued = true; launched++; trackingReceipt = true;
@@ -869,6 +877,7 @@ async function submitDrafts(ids, options = {}) {
       for (let index = 0; index < pending.length; index++) {
         check();
         await dispatchDraft(pending[index], index);
+        if (deliveryPause) break;
       }
     } catch (error) { failure = error; }
     finally {
@@ -879,6 +888,7 @@ async function submitDrafts(ids, options = {}) {
     accepted.sort((a, b) => selected.findIndex((d) => d.id === a.id) - selected.findIndex((d) => d.id === b.id));
     const remaining = accepted.filter(a => !getTask(a.record.task.id));
     if (remaining.length) commitTemplates(remaining.map(a => a.record), remaining.map(a => a.id), false);
+    if (deliveryPause) options.onDeliveryPause?.(deliveryPause);
     const items = accepted.map(a => ({ taskId: a.record.task.id, status: a.record.task.status }));
     if (items.length && !operation.stopped && !options.sendOnly && options.startQueue !== false) { runtime.paused = false; wakeQueue(); }
     if (failure || errors.length) throw new Error(`已确认发送 ${accepted.length}/${requested.length} 条。未发送 ${errors.filter(e => e.phase === "prepare").length} 条，接收待核对 ${errors.filter(e => e.phase === "receipt").length} 条，任务保存异常 ${errors.filter(e => e.phase === "commit").length} 条。${failure?.message || errors[0].message}；各条失败原因已保存，其余草稿记录已保留`);

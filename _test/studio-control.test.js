@@ -331,7 +331,7 @@ test('dedicated startup runs live control beside generation and aborts both on q
   const queue={init:()=>{},recoverTemplateTasks:()=>{},pause:()=>{}};
   const modules={
     'node:fs':fakeFs,'./paths':{init:()=>{},dir:()=>config.stateDir},'./store':{load:()=>{},get:()=>data,save:()=>true},'./orchestrator':queue,'./task-drafts':{},'./task-templates':{},
-    './studio-bridge':{Journal:class{},StudioClient:class{constructor(){this.sessionId='executor-session-1';}},StudioBridge:Bridge},'./studio-control':{StudioControl:Control},
+    './studio-bridge':{Journal:class{},StudioClient:class{constructor(){this.sessionId='executor-session-1';}},StudioBridge:Bridge},'./studio-control':{StudioControl:Control},'./active-delivery':require('../src/active-delivery'),
     electron:{app,BrowserWindow:class{},session:{},net:{}},'./interceptor':{},'./driver':{},'./web-accounts':{WebAccounts:class{stop(){}}},'./studio-environment':{StudioEnvironment:class{}}
   };
   vm.runInNewContext(source,{module,require:name=>Object.hasOwn(modules,name)?modules[name]:require(name),process:{argv:[],env:{},platform:process.platform,stderr:{write:()=>{}},once:()=>{}},AbortController});
@@ -387,4 +387,83 @@ test('disposal cancels outstanding HTTP and capture work, detaches listeners, an
   assert.equal(waiting.request.signal.aborted,true);assert.equal(h.win.listenerCount('closed'),0);
   waiting.pending.resolve(Response.json({session:descriptor(),commands:[inputCommand('after-stop',{kind:'text',text:'stale'})]}));
   capture.resolve({toJPEG:()=>Buffer.from('late')});await flush();assert.equal(h.events.length,0);assert.equal(h.publishes.length,0);
+});
+
+function deliverySetup(t) {
+  const {ActiveDeliveryPages}=require('../src/active-delivery'),pages=new ActiveDeliveryPages(),browser=page();let configured=0,cancelled=0,valid=true;
+  t.after(()=>pages.closeAll());
+  const state={captchaDetected:true,captcha:{id:'captcha-1',rect:{x:100,y:100,width:400,height:300},focused:true}};
+  const target={accountId:'account-1',operationId:'send-1',batchId:'batch-1',environmentVersion:'environment-1',executorSessionId:'executor-session-1'};
+  const driver={window:browser.win,webContents:browser.wc,call:async()=>state};
+  const entry=pages.register({...target,taskId:'task-1',draftId:'draft-1',instance:{id:'native',studioEnvironment:{version:'environment-1'}},driver,checkLease:()=>{if(!valid)throw Error('lease expired');},cancel:()=>{cancelled++;browser.win.destroy();}});
+  const adapter={deliveryPages:pages,account:()=>{configured++;throw Error('live page must not configure an account');}};
+  const h=setup(t,{browser,adapter,open:async()=>{throw Error('must not open a replacement page');}});
+  const session={...descriptor(),target:{kind:'delivery',operationId:'send-1',batchId:'batch-1'}};
+  return {...h,pages,entry,state,target,session,configuredCount:()=>configured,cancelled:()=>cancelled,expire:()=>{valid=false;},binding:{taskId:'task-1',pageId:entry.pageId,captchaId:'captcha-1'}};
+}
+function deliveryCommand(h,id,action,input) {return {id,action,...(input?{inputEncrypted:encrypted(input)}:{}),binding:h.binding,expiresAt:Date.now()+3000};}
+
+test('active delivery borrows its own page before any account configuration and clean observer close leaves it alive',async t=>{
+  const h=deliverySetup(t);await h.deliver(h.session);await flush();
+  assert.equal(h.configuredCount(),0,'borrowing must not run adapter.account/configure');
+  const frame=h.publishes.find(body=>body.frame?.delivery)?.frame;assert.ok(frame,'real active-page metadata is missing');assert.equal(frame.delivery.pageId,h.entry.pageId);assert.equal(frame.delivery.taskId,'task-1');
+  await h.deliver(null);assert.equal(h.win.isDestroyed(),false);assert.equal(h.cancelled(),0);assert.equal(h.pages.borrow(h.target),h.entry);
+});
+test('active delivery is readonly until explicit captcha takeover and never permits login navigation',async t=>{
+  const h=deliverySetup(t);await h.deliver(h.session);
+  await h.deliver(h.session,[deliveryCommand(h,'observe-click','input',{kind:'click',x:.2,y:.25})]);
+  assert.equal(h.events.length,0);assert.equal(h.acks().find(a=>a.id==='observe-click')?.ok,false);
+  await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);assert.equal(h.acks().find(a=>a.id==='takeover')?.ok,true);
+  await h.deliver(h.session,[deliveryCommand(h,'human-click','input',{kind:'click',x:.2,y:.25})]);assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased']);
+  await h.deliver(h.session,[command('no-navigation','navigate')]);assert.equal(h.loads.length,0);assert.equal(h.acks().find(a=>a.id==='no-navigation')?.ok,false);
+});
+test('captcha disappearance after mouseDown blocks mouseUp and uses sender cancellation, never another site click',async t=>{
+  const h=deliverySetup(t);await h.deliver(h.session);await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);
+  const send=h.wc.debugger.sendCommand;h.wc.debugger.sendCommand=async(method,value)=>{await send(method,value);if(value.type==='mousePressed'){delete h.state.captcha;h.state.captchaDetected=false;}};
+  await h.deliver(h.session,[deliveryCommand(h,'race-click','input',{kind:'click',x:.2,y:.25})]);await flush();
+  assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed']);assert.equal(h.cancelled(),1);assert.equal(h.pages.pages.size,0);
+});
+test('each key event rechecks iframe focus, keyUp is not replayed after focus escapes',async t=>{
+  const h=deliverySetup(t);await h.deliver(h.session);await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);
+  const send=h.wc.debugger.sendCommand;h.wc.debugger.sendCommand=async(method,value)=>{await send(method,value);if(value.type==='keyDown')h.state.captcha.focused=false;};
+  await h.deliver(h.session,[deliveryCommand(h,'race-key','input',{kind:'key',key:'Enter'})]);await flush();
+  assert.deepEqual(h.events.map(e=>e.value.type),['keyDown']);assert.equal(h.cancelled(),1);
+});
+test('disconnect while holding a captcha pointer cancels that sender and does not synthesize release',async t=>{
+  const h=deliverySetup(t);await h.deliver(h.session);await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);
+  await h.deliver(h.session,[deliveryCommand(h,'drag-down','input',{kind:'pointer',phase:'down',x:.2,y:.25,button:'left'})]);await h.deliver(null);
+  assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed']);assert.equal(h.cancelled(),1);
+});
+for(const change of ['replaced','gone'])test(`a held captcha pointer cancels its sender when the challenge is ${change} before release`,async t=>{
+  const h=deliverySetup(t);await h.deliver(h.session);await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);
+  await h.deliver(h.session,[deliveryCommand(h,'drag-down','input',{kind:'pointer',phase:'down',x:.2,y:.25,button:'left'})]);
+  if(change==='replaced')h.state.captcha.id='captcha-2';else {delete h.state.captcha;h.state.captchaDetected=false;}
+  await h.runner.capture(h.runner.session);await flush();
+  assert.equal(h.cancelled(),1);assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed']);
+});
+test('a changed operation descriptor cannot reuse the same account Room or trigger a replacement account page',async t=>{
+  const h=deliverySetup(t);await h.deliver(h.session);await h.deliver({...h.session,target:{...h.session.target,operationId:'other'}});
+  assert.equal(h.configuredCount(),0);assert.equal(h.runner.session,null);assert.equal(h.win.isDestroyed(),false);
+});
+test('expired current delivery lease rejects input before any underlying event',async t=>{
+  const h=deliverySetup(t);await h.deliver(h.session);await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);assert.equal(h.acks().find(a=>a.id==='takeover')?.ok,true);h.expire();
+  await h.deliver(h.session,[deliveryCommand(h,'late','input',{kind:'click',x:.2,y:.25})]);assert.equal(h.events.length,0);
+});
+
+test('the same delivery Room follows the next owned page but late observe cannot cancel its held input',async t=>{
+  const h=deliverySetup(t);await h.deliver(h.session);h.entry.close();h.win.destroy();
+  const next=page();let cancelled=0;
+  const entry=h.pages.register({...h.target,taskId:'task-2',draftId:'draft-2',instance:{id:'native',studioEnvironment:{version:'environment-1'}},driver:{window:next.win,webContents:next.wc,call:async()=>h.state},checkLease:()=>{},cancel:()=>{cancelled++;next.win.destroy();}});
+  await h.deliver(h.session);await h.runner.capture(h.runner.session);await flush();
+  assert.equal(h.runner.session.entry,entry);assert.equal(h.configuredCount(),0);
+  const current={...h,binding:{taskId:'task-2',pageId:entry.pageId,captchaId:'captcha-1'}};
+  await h.deliver(h.session,[deliveryCommand(current,'new-takeover','captcha_takeover')]);
+  await h.deliver(h.session,[deliveryCommand(current,'new-down','input',{kind:'pointer',phase:'down',x:.2,y:.25,button:'left'})]);
+  assert.equal(entry.manual,true);assert.equal(h.runner.session.buttons,1);
+  await h.deliver(h.session,[{...deliveryCommand(h,'expired-old-observe','observe'),expiresAt:Date.now()-1}]);
+  assert.equal(entry.manual,true);assert.equal(cancelled,0);assert.equal(h.runner.session.buttons,1);
+  await h.deliver(h.session,[deliveryCommand(h,'old-observe','observe')]);
+  assert.equal(h.acks().find(a=>a.id==='old-observe')?.ok,false);assert.equal(entry.manual,true);assert.equal(cancelled,0);assert.equal(h.runner.session.buttons,1);
+  await h.deliver(h.session,[deliveryCommand(current,'new-up','input',{kind:'pointer',phase:'up',x:.2,y:.25,button:'left'})]);
+  assert.deepEqual(next.events.map(e=>e.value.type),['mousePressed','mouseReleased']);
 });
