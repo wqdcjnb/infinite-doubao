@@ -138,7 +138,14 @@ class NativeAdapter {
     const original=this.journal.get(op.payload.originalOperationId),tasks=op.payload.tasks,pause=original?.result?.receipt?.deliveryPause;
     if(op.payload.sendOnly!==true||op.payload.dispatchOnly!==true||!original?.reported||original.state!=='done'||original.operation.kind!=='send'||original.operation.accountId!==op.accountId||original.operation.batchId!==op.batchId||original.operation.payload.sendOnly!==true||original.result.outcome!=='uncertain'||!Array.isArray(tasks)||!tasks.length)throw Error('original unstarted dispatch evidence missing');
     const index=original.operation.payload.tasks.findIndex(t=>t.id===pause?.taskId&&t.draftId===pause?.draftId),suffix=original.operation.payload.tasks.slice(index+1);
-    if(index<0||JSON.stringify(suffix)!==JSON.stringify(tasks)||JSON.stringify(tasks.map(t=>t.draftId))!==JSON.stringify(pause.notStartedDraftIds))throw Error('unstarted dispatch suffix changed');
+    if(index<0||JSON.stringify(suffix.map(t=>t.draftId))!==JSON.stringify(pause.notStartedDraftIds))throw Error('unstarted dispatch suffix changed');
+    let expected=suffix;
+    if(op.payload.previousOperationId){
+      const previous=this.journal.get(op.payload.previousOperationId),prior=previous?.operation,rows=previous?.result?.receipt?.dispatches;
+      if(!previous?.reported||previous.state!=='done'||prior.kind!=='account'||prior.payload.action!=='continue_unstarted_drafts'||prior.payload.originalOperationId!==op.payload.originalOperationId||prior.accountId!==op.accountId||prior.batchId!==op.batchId||prior.payload.sendOnly!==true||prior.payload.dispatchOnly!==true||previous.result.outcome!=='uncertain'||previous.result.receipt.dispatchOnly!==true||!Array.isArray(rows)||!Array.isArray(prior.payload.tasks)||!prior.payload.tasks.every(t=>suffix.some(s=>JSON.stringify(s)===JSON.stringify(t))))throw Error('previous dispatch evidence missing or changed');
+      const attempted=new Set(rows.map(row=>row.taskId));expected=prior.payload.tasks.filter(t=>!attempted.has(t.id));
+    }
+    if(JSON.stringify(expected)!==JSON.stringify(tasks))throw Error('unstarted dispatch suffix changed');
     if(recover)return this.continuationReceipt(op);
     if(original.operation.payload.account.environment?.version!==op.payload.account.environment?.version)throw Error('original account environment changed');
     for(const task of tasks){const binding=this.journal.task(task.id),draft=drafts.list().find(d=>d.id===task.draftId),template=draft?.template;if(task.references?.length||binding?.accountId!==op.accountId||binding.draftId!==task.draftId||!draft||draft.nativeState!=='saved'||draft.submissionRecord||draft.nativeBinding?.nativeId!==task.nativeBinding?.nativeId||draft.executionMode!=='work'||template?.studioTaskId!==task.id||template.prompt!==task.prompt||['model','duration','ratio'].some(key=>template[key]!==task.parameters?.[key])||template.attachments?.length)throw Error('draft already dispatched or changed');}

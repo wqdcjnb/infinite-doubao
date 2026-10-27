@@ -102,6 +102,12 @@ test("新投递页面先读到完整数据、侧栏延迟挂载时等待原生 I
   assert.equal(result.ok, true, result.reason); assert.ok(p.elapsed() >= 1800);
   assert.equal((await p.api.sendNativeDraft(binding)).ok, true); assert.equal(p.sends(), 1);
 });
+test("慢页超过20秒才挂载侧栏时仍只准备原生草稿，不提前发送", async () => {
+  const p = page({ sidebarDelayMs: 30000 }), binding = p.bindings[49];
+  assert.equal((await p.api.restoreNativeDrafts([binding])).ok, true);
+  const result = await p.api.openNativeDraft(binding);
+  assert.equal(result.ok, true, result.reason); assert.ok(p.elapsed() >= 30000); assert.equal(p.sends(), 0);
+});
 
 test("投递页面复用本批完整数据，不重复打开数据库；仍核对当前账号和完整正文", async () => {
   const original = page(), catalog = await original.api.readNativeDrafts();
@@ -128,7 +134,7 @@ test("核对后侧栏始终不出现时明确超时，不点击发送或按标�
   assert.equal((await p.api.restoreNativeDrafts([binding])).ok, true);
   const result = await p.api.openNativeDraft(binding);
   assert.equal(result.ok, false); assert.match(result.reason, /尚未显示对应条目/);
-  assert.equal(p.sends(), 0); assert.equal(p.elapsed(), 20000);
+  assert.equal(p.sends(), 0); assert.equal(p.elapsed(), 60000);
 });
 
 test("侧栏与输入框均未挂载时，直接核对 50 条完整草稿并返回全部绑定", async () => {

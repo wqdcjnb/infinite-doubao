@@ -821,6 +821,7 @@ async function submitDrafts(ids, options = {}) {
           checkDispatch();
           await draftStep(child, `第 ${index + 1} 条草稿页面`, async () => {
             driver = await deps.resolveDraftDriver(inst, { signal: child.controller.signal });
+            log.info("draft-preparation-stage", { draftBatchId, draftId: draft.id, index: index + 1, stage: "page_ready", elapsedMs: Date.now() - preparingAt });
             if (child.controller.signal.aborted) driver.close();
             checkDraft();
             activity = options.onDeliveryPage?.({ draft, driver, cancel: error => child.controller.abort(error) });
@@ -829,12 +830,14 @@ async function submitDrafts(ids, options = {}) {
             if (login?.loggedIn !== true) throw new Error(login?.by === "login-button"
               ? `账号 ${inst.name} 的草稿页面仍显示登录入口，请在该账号页面确认登录后重试`
               : `账号 ${inst.name} 的草稿页面登录状态尚未加载完成，请等待页面加载或检查网络后重试`);
+            log.info("draft-preparation-stage", { draftBatchId, draftId: draft.id, index: index + 1, stage: "login_ready", elapsedMs: Date.now() - preparingAt });
           }, 120000);
           const prepare = () => draftStep(child, `第 ${index + 1} 条草稿准备`, async () => {
             requirePage(await driver.call("restoreNativeDrafts", bindings.filter((b) => b.id === draft.id), catalog ? { catalog } : undefined));
             const pageOptions = { id: draft.id, prompt: draft.nativePrompt, executionMode: draft.executionMode };
             checkDispatch();
             const opened = requirePage(await driver.call("openNativeDraft", pageOptions));
+            log.info("draft-preparation-stage", { draftBatchId, draftId: draft.id, index: index + 1, stage: "draft_ready", elapsedMs: Date.now() - preparingAt });
             const record = templateRecords(draft.template, draft.executionMode, { sendOnly: draft.studioSendOnly === true }), task = record.task;
             if (typeof draft.studioSendOnly === "boolean") task.studioSendOnly = draft.studioSendOnly;
             Object.assign(task, { prompt: draft.nativePrompt, draftNumber: draft.draftNumber, draftBatchId, instanceId: inst.id, instanceName: inst.name, preferredInstanceId: inst.id, submissionUncertain: true });
