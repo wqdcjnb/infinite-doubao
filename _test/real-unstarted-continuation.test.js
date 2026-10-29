@@ -9,7 +9,7 @@ const identity=(prefix,id)=>prefix+hash(id).slice(0,24);
 const snapshotHash=value=>hash(JSON.stringify(value,(key,item)=>['draftId','nativeBinding','downloadUrl'].includes(key)?undefined:item));
 const unknown=new Set([13,20,21,22]);
 
-function fixture(t,{importTransportNulls=false,total=100,initialSent=22}={}) {
+function fixture(t,{importTransportNulls=false,total=100,initialSent=22,referenceCount=5}={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'studio-real-unstarted-'));P.init({home:root});store.load();
   t.after(()=>{assert.equal(path.dirname(root),os.tmpdir());assert.match(path.basename(root),/^studio-real-unstarted-/);fs.rmSync(root,{recursive:true,force:true});});
   t.mock.method(store,'save',()=>true);
@@ -18,7 +18,7 @@ function fixture(t,{importTransportNulls=false,total=100,initialSent=22}={}) {
   const bindings={},operations={},tasks=[],calls=[];
   for(let n=1;n<=total;n++) {
     const id='task-'+String(n).padStart(3,'0'),draftId=identity('',account.id+'/'+id),templateId=identity('studio-template-',id);
-    const references=Array.from({length:5},(_,i)=>({id:'image-'+i,filename:'source-'+i+'.png',contentType:'image/png',byteSize:100+i,sha256:hash('image-'+i)}));
+    const references=Array.from({length:referenceCount},(_,i)=>({id:'image-'+i,filename:'source-'+i+'.png',contentType:'image/png',byteSize:100+i,sha256:hash('image-'+i)}));
     const task={id,userId:'user',userName:'Offline',projectId:'project',modelId:'model',prompt:'Original prompt '+id,parameters:{model:'seedance_v2.5',duration:30,ratio:'16:9'},references,draftId,nativeBinding:{id:draftId,nativeId:'native-'+id,accountScope:'account-scope'}};
     tasks.push(task);bindings[id]={accountId:account.id,draftId,templateId,snapshotHash:snapshotHash(task),nativeBinding:clone(task.nativeBinding)};
     if(importTransportNulls) {
@@ -36,11 +36,11 @@ function fixture(t,{importTransportNulls=false,total=100,initialSent=22}={}) {
     }
     if(n>initialSent||unknown.has(n))store.get().taskDrafts.push(draft);
   }
-  operations.original={state:'done',reported:true,operation:{id:'original',kind:'send',accountId:account.id,batchId:'batch',payload:{account,sendOnly:false,dispatchOnly:false,tasks:clone(tasks)}},result:{outcome:'uncertain',receipt:{tasks:tasks.map((task,i)=>i<22&&!unknown.has(i+1)?{taskId:task.id,status:'submitted',localTaskId:'local-'+task.id,conversationId:'https://www.doubao.com/chat/'+task.id,userMessageId:'message-'+task.id,confirmed:false}:{taskId:task.id,status:'uncertain'})}}};
+  operations.original={state:'done',reported:true,operation:{id:'original',kind:'send',accountId:account.id,batchId:'batch',payload:{account,sendOnly:false,dispatchOnly:false,tasks:clone(tasks)}},result:{outcome:'uncertain',receipt:{tasks:tasks.map((task,i)=>i<initialSent&&!unknown.has(i+1)?{taskId:task.id,status:'submitted',localTaskId:'local-'+task.id,conversationId:'https://www.doubao.com/chat/'+task.id,userMessageId:'message-'+task.id,confirmed:false}:{taskId:task.id,status:'uncertain'})}}};
   const journal={data:{operations,tasks:bindings},get:id=>operations[id],task:id=>bindings[id],bindTask:()=>assert.fail('read-only inspection must not rebind tasks')};
   const adapter=new NativeAdapter({journal,client:{},accounts:{open:()=>assert.fail('offline test cannot open an account')},sessionId:'executor-session'});
   const inspection={id:'inspection',kind:'account',accountId:account.id,batchId:'batch',payload:{account,action:'inspect_unstarted_drafts',originalOperationId:'original'}};
-  const continuation={id:'continuation',kind:'account',accountId:account.id,batchId:'batch',payload:{account,action:'continue_unstarted_drafts',originalOperationId:'original',inspectionOperationId:'inspection',readOnlyInspection:true,sendOnly:false,dispatchOnly:false,tasks:clone(tasks.slice(22))}};
+  const continuation={id:'continuation',kind:'account',accountId:account.id,batchId:'batch',payload:{account,action:'continue_unstarted_drafts',originalOperationId:'original',inspectionOperationId:'inspection',readOnlyInspection:true,sendOnly:false,dispatchOnly:false,tasks:clone(tasks.slice(initialSent))}};
   const f={root,account,instanceId,tasks,bindings,operations,journal,adapter,inspection,continuation,calls,
     draft:n=>store.get().taskDrafts.find(d=>d.id===tasks[n-1].draftId),local:n=>store.get().tasks.find(item=>item.studioTaskId===tasks[n-1].id),
     freeze:()=>JSON.stringify({store:store.get(),journal:journal.data}),
@@ -81,6 +81,48 @@ test('a new 50-task original retains complete snapshot and proof checks before i
   assert.equal(result.receipt.entries.length,50);assert.equal(result.receipt.entries.filter(entry=>entry.status==='not_started').length,28);assert.equal(f.freeze().includes('task-051'),false);
   f.dispatch();const sent=await f.adapter.execute(f.continuation,{checkLease:()=>{}});assert.equal(sent.outcome,'success');assert.equal(sent.receipt.tasks.length,28);
   assert.equal(JSON.stringify(f.operations.original),JSON.stringify(JSON.parse(before).journal.operations.original));
+});
+
+test('a 50-task no-reference inspection preserves nine sent anchors and proves exactly 41 never-started originals',async t=>{
+  const f=fixture(t,{total:50,initialSent:9,referenceCount:0,importTransportNulls:true}),before=f.freeze(),result=await f.inspect();
+  assert.equal(result.outcome,'success');assert.equal(result.receipt.generationIntentCount,0);
+  assert.deepEqual(result.receipt.entries.filter(row=>row.status==='submitted').map(row=>row.taskId),f.tasks.slice(0,9).map(task=>task.id));
+  assert.deepEqual(result.receipt.entries.filter(row=>row.status==='not_started').map(row=>row.taskId),f.tasks.slice(9).map(task=>task.id));
+  assert.equal(f.freeze(),before);assert.equal(f.calls.length,0);
+});
+
+test('a no-reference continuation sends only the 41 proved drafts and recovery never dispatches the nine old messages again',async t=>{
+  const f=fixture(t,{total:50,initialSent:9,referenceCount:0});await f.prove();
+  const sentBefore=JSON.stringify(store.get().tasks),originalBefore=JSON.stringify(f.operations.original);
+  f.dispatch((ids,options)=>{
+    assert.deepEqual(ids,f.tasks.slice(9).map(task=>task.draftId));assert.equal(options.startQueue,false);assert.equal(options.sendOnly,true);assert.equal(options.dispatchOnly,false);
+    for(const snapshot of f.continuation.payload.tasks)f.accept(snapshot,{proof:false});
+  });
+  const result=await f.adapter.execute(f.continuation,{checkLease:()=>{}});
+  assert.equal(result.outcome,'success');assert.equal(result.receipt.tasks.length,41);assert.equal(result.receipt.processedComplete,true);
+  assert.ok(result.receipt.tasks.every(row=>row.status==='submitted'&&row.userMessageId&&row.confirmed===false));
+  assert.equal(JSON.stringify(store.get().tasks.slice(0,9)),sentBefore);assert.equal(JSON.stringify(f.operations.original),originalBefore);
+  const after=f.freeze();assert.deepEqual(await f.adapter.recover(f.continuation,{checkLease:()=>{}}),result);
+  assert.equal(f.calls.length,1);assert.equal(f.freeze(),after);
+});
+
+test('an uncertain no-reference tenth message is excluded from the proved 40-item suffix',async t=>{
+  const f=fixture(t,{total:50,initialSent:9,referenceCount:0});f.pending(f.tasks[9]);
+  f.continuation.payload.tasks=clone(f.tasks.slice(10));const result=await f.prove();
+  assert.equal(result.receipt.entries[9].status,'uncertain');assert.equal(result.receipt.entries.filter(row=>row.status==='not_started').length,40);
+  f.dispatch(()=>{for(const snapshot of f.continuation.payload.tasks)f.accept(snapshot,{proof:false});});
+  assert.equal((await f.adapter.execute(f.continuation,{checkLease:()=>{}})).outcome,'success');
+  assert.deepEqual(f.calls[0].ids,f.tasks.slice(10).map(task=>task.draftId));
+});
+
+test('no-reference recovery rejects changed snapshots, extra attachments, stale proofs and legacy 100-task no-reference batches',async t=>{
+  for(const change of [f=>{f.operations.original.operation.payload.tasks[49].prompt+=' changed';},f=>{f.draft(50).template.attachments.push({id:'unexpected'});},f=>{f.draft(50).nativeBinding.nativeId='other';}]) {
+    const f=fixture(t,{total:50,initialSent:9,referenceCount:0});change(f);const before=f.freeze();
+    await assert.rejects(f.inspect(),/snapshot|draft|binding/);assert.equal(f.freeze(),before);assert.equal(f.calls.length,0);
+  }
+  const stale=fixture(t,{total:50,initialSent:9,referenceCount:0});await stale.prove();stale.operations.inspection.result.receipt.inspectedAt-=61000;stale.dispatch();
+  await assert.rejects(stale.adapter.execute(stale.continuation,{checkLease:()=>{}}),/expired/);assert.equal(stale.calls.length,0);
+  const legacy=fixture(t,{total:100,initialSent:9,referenceCount:0});await assert.rejects(legacy.inspect(),/snapshot/);assert.equal(legacy.calls.length,0);
 });
 
 test('current wire imports with four null transport fields retain full immutable snapshot verification',async t=>{
