@@ -34,7 +34,15 @@ class Journal {
   begin(op) {
     validateOperation(op);
     const existing=this.get(op.id), fingerprint=identity(op);
-    if(existing && existing.fingerprint!==fingerprint) throw new Error('operation identity mismatch');
+    if(existing && existing.fingerprint!==fingerprint) {
+      const session=op.payload.executorSessionId;
+      // Only the lease's executor session may change for an original track.
+      // Account, environment, task and conversation evidence stay fingerprinted.
+      const renewedTrack=op.kind==='track'&&existing.operation.leaseToken!==op.leaseToken&&typeof session==='string'&&session&&
+        identity({...op,payload:{...op.payload,executorSessionId:existing.operation.payload.executorSessionId}})===existing.fingerprint;
+      if(!renewedTrack)throw new Error('operation identity mismatch');
+      existing.fingerprint=fingerprint;existing.operation.payload.executorSessionId=session;
+    }
     if(existing) {
       // A fresh read-only lease permits another check of the original task,
       // including when the old lease's response was rejected after an outage.

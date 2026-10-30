@@ -12,6 +12,28 @@ function journal() { return new Journal(path.join(root, String(++n), 'journal.js
 function operation(kind='send', id='op1') { return {id, kind, accountId:'account1',batchId:'batch1',leaseToken:'lease-private',leaseUntil:new Date(Date.now()+60000).toISOString(),payload:{account:{id:'account1', name:'测试账号'}, tasks:[{id:'task1'}]}}; }
 function transport() { const reports=[]; return { reports, heartbeat: async()=>({}), report:async(op,result)=>{reports.push({op,result});}, claim:async()=>({operation:null}) }; }
 
+test('fresh original track lease after executor restart rechecks the same task rather than rejecting its new session',async()=>{
+  const j=journal(),op=operation('track');op.taskId='task1';op.payload.executorSessionId='old-session';
+  j.begin(op);j.finish(op.id,{outcome:'progress',receipt:{status:'running'}});j.reported(op.id);
+  const fresh={...op,leaseToken:'fresh-read-only-lease',payload:{...op.payload,executorSessionId:'current-session'}};
+  let recovered=0;const api=transport(),adapter={execute:async()=>assert.fail('existing task must recover'),recover:async value=>{recovered++;assert.equal(value.payload.executorSessionId,'current-session');return {outcome:'progress',receipt:{status:'running'}};}};
+  await new StudioBridge({journal:new Journal(j.file),api,adapter}).processOperation(fresh);
+  assert.equal(recovered,1);assert.equal(api.reports.length,1);
+  const saved=new Journal(j.file);assert.equal(saved.get(op.id).operation.payload.executorSessionId,'current-session');assert.equal(saved.get(op.id).reported,true);
+  saved.begin({...fresh,leaseToken:'next-read-only-lease'});assert.equal(saved.get(op.id).state,'started');
+});
+test('new executor session cannot change original track identity or relax send and import fingerprints',()=>{
+  for(const kind of ['track','send','import']){
+    const j=journal(),op=operation(kind);op.payload.executorSessionId='old-session';j.begin(op);
+    const fresh={...op,leaseToken:'new-lease',payload:{...op.payload,executorSessionId:'current-session'}};
+    if(kind!=='track')assert.throws(()=>j.begin(fresh),/identity/);
+    else{
+      for(const changed of [{...fresh,accountId:'other',payload:{...fresh.payload,account:{id:'other'}}},{...fresh,batchId:'other'},{...fresh,payload:{...fresh.payload,tasks:[{id:'other-task'}]}},{...fresh,payload:{...fresh.payload,account:{...fresh.payload.account,environment:{version:'other'}}}},{...fresh,leaseToken:op.leaseToken}])assert.throws(()=>j.begin(changed),/identity/);
+    }
+    assert.equal(j.get(op.id).operation.payload.executorSessionId,'old-session');
+  }
+});
+
 test('operation intent survives reload before send; duplicate receipt never sends twice', async()=>{
   assert.equal(typeof StudioBridge, 'function', 'missing bridge');
   const j=journal(), api=transport(); let sends=0;

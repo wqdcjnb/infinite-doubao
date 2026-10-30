@@ -69,8 +69,7 @@
     el.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
-  api.setText = function (text) {
-    var ed = findEditor();
+  function setEditorText(ed, text) {
     if (!ed) return { ok: false, reason: "没找到输入框" };
     try { ed.focus(); ed.click(); } catch (e) {}
     if (ed.tagName === "TEXTAREA" || ed.tagName === "INPUT") {
@@ -94,7 +93,8 @@
       return { ok: false, reason: String(e && e.message) };
     }
     return { ok: true, kind: "contenteditable", length: String(text || "").length };
-  };
+  }
+  api.setText = function (text) { return setEditorText(findEditor(), text); };
 
   function dataUrlToFile(item, index) {
     var m = /^data:([^;,]+);base64,(.*)$/.exec(String(item.dataUrl || ""));
@@ -209,7 +209,10 @@
     }).filter(function (url) { return /^https?:\/\//i.test(url); });
   }
   function messages() {
-    var exact = all("[data-message-id]");
+    // Tool notes have nested message IDs; their parent is the actual reply.
+    var exact = all("[data-message-id]").filter(function (node) {
+      return !node.parentElement || !node.parentElement.closest || !node.parentElement.closest("[data-message-id]");
+    });
     return exact.length ? exact : all('[data-testid="message-container"], [data-testid*="message-item"], [data-message-role]');
   }
   function messageId(node) { return node.getAttribute("data-message-id") || node.id || ""; }
@@ -244,29 +247,48 @@
     });
     return panels;
   }
+  function generationChoice(root) {
+    var choices = all('input[type="radio"]', root).map(function (input) { return { input: input, label: input.labels && input.labels[0] }; });
+    var first = choices[0];
+    if (!first || !visible(first.label) || !/^(?:1\s*)?按要求生成/.test(txt(first.label))) return null;
+    return choices.slice(1).some(function (choice) { return visible(choice.label) && /^(?:\d+\s*)?暂不生成/.test(txt(choice.label)); }) ? first : null;
+  }
   function panelText(root) {
     if (!root.cloneNode) return txt(root);
     var copy = root.cloneNode(true);
     all('[contenteditable], textarea, input', copy).forEach(function (node) { node.remove(); });
     return txt(copy);
   }
+  function replyText(root) {
+    if (!root.cloneNode) return txt(root);
+    var copy = root.cloneNode(true);
+    all('[data-testid="preamble-elapsed"]', copy).forEach(function (node) { node.remove(); });
+    return txt(copy);
+  }
+  function expandedPlanText(root) {
+    return all('[data-testid="preamble-elapsed"][data-message-content-collapsed="false"]', root).filter(visible).map(txt).join(" ");
+  }
   function planQuestion(content) {
-    var match = content.match(/(?:以上方案\s*[（(][^?？]{1,800}[）)]\s*是否按此开始生成|是否按(?:以上|上述)(?:完整)?方案\s*[（(][^?？]{1,800}[）)]\s*开始生成视频)[？?]/);
+    var match = content.match(/(?:以上方案\s*[（(][^?？]{1,800}[）)]\s*是否按(?:此|要求)开始生成|是否按(?:以上|上述)(?:完整)?方案\s*[（(][^?？]{1,800}[）)]\s*开始生成视频)[？?]/);
+    if (!match) match = content.match(/以上为完整[^?？。]{1,240}方案[，,]\s*是否按要求开始生成[？?]/);
     if (!match) match = content.match(/(?:请确认)?是否按(?:此|以上|上述)[^?？。]{0,240}(?:生成|调用)[^?？。]{0,100}[？?。]/);
     return match ? match[0] : "";
   }
   function quotaExhausted(content) {
     return /(?:额度|免费数量|今日次数)\s*(?:已经?|均已|全部|已全部)?\s*(?:用完|耗尽)|已用完.{0,16}(?:额度|次数)|已达上限/.test(content);
   }
+  function generationRejected(content) {
+    return /(生成失败|(?:视频)?生成未能(?:提交(?:成功)?|成功|启动)|视频没能生成出来|审核不通过|未通过审核|违规内容)/.test(content);
+  }
   function failedReply(roots) {
     var latest = roots[roots.length - 1];
-    // Work requests can be accepted but fail with an empty assistant message.
-    // The native error icon is then the only visible failure evidence. Scope
-    // it to the latest reply after this task's receipt, never sidebar/history.
+    // An accepted work request can show a temporary error before its reply
+    // arrives. Block confirmation while unresolved, but keep it pending.
+    // Scope the icon to this task's latest reply, never sidebar/history.
     if (!latest || messageRole(latest) !== "assistant") return false;
     if (all('[data-testid="message_box_failed_icon"]', latest).some(visible)) return true;
-    // The native renderer also has explicit terminal errors before its icon
-    // mounts. Match the DOM message ID; never infer failure from an empty
+    // The native renderer can expose error metadata before its icon mounts.
+    // Match the DOM message ID; never infer failure from an empty
     // response or numeric status (the current site's status 4 is Streaming).
     var key = Object.keys(latest).find(function (name) { return name.indexOf("__reactFiber$") === 0; });
     var fiber = key && latest[key], id = messageId(latest);
@@ -274,17 +296,20 @@
       var props = fiber.memoizedProps;
       var message = props && (props.message || (props.value && props.value.message));
       if (!message || !id || String(message.message_id || "") !== id) continue;
-      return !!(message.error_details && message.error_details.has_error) ||
+      var errored = !!(message.error_details && message.error_details.has_error) ||
         !!(message.final_status && /^(Error|Timeout)$/.test(message.final_status.message));
+      // Settled reply text supersedes metadata left by an earlier error render.
+      return errored && !txt(latest).trim();
     }
     return false;
   }
   function followupConfirmation(content) {
     // Work tasks can finish planning with a declarative reminder instead of a
     // question. Require both an explicit confirmation hold and a quoted reply.
-    if (!/(?:等待.{0,8}确认|等.{0,8}确认后|停在确认环节|没有回复确认)/.test(content)) return "";
-    var reply = content.match(/(?:回复(?:一句)?|说一声)\s*["“「](按(?:要求|方案)生成|开始生成)["”」]/);
-    if (!reply || !/(?:即可开始(?:制作|生成)|我就.{0,100}(?:生成|跑.{0,35}视频)|确认后.{0,15}开始生成)/.test(content)) return "";
+    if (!/(?:等待.{0,8}确认|等.{0,8}确认后|停在确认环节|没有回复确认|需要你.{0,8}确认后|未收到.{0,10}(?:选择|确认))/.test(content)) return "";
+    var reply = content.match(/(?:回复(?:一句)?|说一声)\s*[:：]?\s*["“「](按(?:要求|方案)生成|开始生成)["”」]/);
+    if (!reply) reply = content.match(/["“「](按(?:要求|方案)生成)["”」]\s*→[^。]{0,120}开始生成/);
+    if (!reply || !/(?:即可(?:开始(?:制作|生成)|启动)|(?:我就|我会|我立即).{0,100}(?:生成|开始制作|跑.{0,35}视频)|确认后.{0,15}开始生成|→[^。]{0,120}开始生成)/.test(content)) return "";
     return reply[1];
   }
   api.beginTask = function (input) {
@@ -322,12 +347,20 @@
     var state = "unknown";
     var quotaFailure = quotaExhausted(tail);
     var rejected = failedReply(roots);
-    if (quotaFailure || rejected || /(生成失败|视频生成未能(?:提交)?成功|视频没能生成出来|审核不通过|未通过审核|违规内容)/.test(tail)) state = "failed";
+    if (quotaFailure || generationRejected(tail)) state = "failed";
+    else if (rejected) state = "unknown";
     else if (/(生成中|排队中|正在生成|处理中)/.test(tail)) state = "running";
     else if (urls.length) state = "done";
     else if (findConfirmation(null, roots).kind) state = "waiting_confirmation";
     var generationStarted = state === "running" && /(?:视频.{0,10}(?:正在生成|生成中|排队中)|正在(?:为你)?生成视频)/.test(tail);
-    return { state: state, errorCode: quotaFailure ? "quota" : rejected ? "platform_rejected" : "", generationStarted: generationStarted, percent: state === "done" ? 100 : percent, videos: urls.length, mediaUrls: urls, snippet: rejected && !tail.trim() ? "豆包已接收请求，但助手回复显示失败标记且没有返回内容；平台未提供具体原因，请查看原对话，不会自动重发" : tail.slice(-400) };
+    return { state: state, errorCode: quotaFailure ? "quota" : state === "failed" ? "platform_rejected" : "", generationStarted: generationStarted, percent: state === "done" ? 100 : percent, videos: urls.length, mediaUrls: urls, snippet: rejected && !tail.trim() ? "助手暂时显示失败标记，接收与结果尚待核验；保留原会话等待后续回复，不会自动重发" : tail.slice(-400) };
+  };
+  api.expandGenerationPlan = function () {
+    var roots = taskMessages(), latest = roots[roots.length - 1];
+    if (!latest || messageRole(latest) !== "assistant") return { ok: true, expanded: false };
+    var button = all('[data-testid="preamble-elapsed"] button[aria-expanded="false"]', latest).filter(visible).find(function (node) { return /^共用时\s*\d/.test(txt(node)); });
+    if (button) button.click();
+    return { ok: true, expanded: !!button };
   };
   function confirmationKey(root, content, kind) {
     var hash = 2166136261;
@@ -339,47 +372,65 @@
     current = current || taskMessages();
     // An exhausted quota is a failed attempt, even if the same reply offers a
     // future reminder or a cheaper model. Neither is an immediate confirmation.
-    if (failedReply(current) || (current.length && quotaExhausted(txt(current[current.length - 1])))) return { ok: false };
+    if (failedReply(current) || (current.length && (quotaExhausted(txt(current[current.length - 1])) || generationRejected(txt(current[current.length - 1]))))) return { ok: false };
     // Once a new assistant response exists, the earlier confirmation request
     // is history and must not be sent again.
     var roots = current.length ? [current[current.length - 1]] : [];
+    var currentPlan = roots.length && messageRole(roots[0]) === "assistant" ? expandedPlanText(roots[0]) : "";
     var panels = confirmationPanels();
-    roots = roots.concat(panels);
+    var receipt = options && options.receiptUserMessageId;
+    var factoryReceipt = receipt && tracking.resumed && tracking.messageIds.indexOf(receipt) >= 0 && messages().some(function (node) { return messageId(node) === receipt && messageRole(node) === "user"; });
+    if (receipt && !factoryReceipt) return { ok: false };
+    if (factoryReceipt) all('section[aria-labelledby]').filter(visible).forEach(function (panel) {
+      if (!panel.closest('[data-message-id]') && messageRole(panel) !== "user" && generationChoice(panel) && panels.indexOf(panel) < 0) panels.push(panel);
+    });
+    var choicePanels = factoryReceipt ? panels.filter(function (panel) { return !panel.closest('[data-message-id]') && messageRole(panel) !== "user" && generationChoice(panel); }) : [];
+    roots = choicePanels.concat(roots, panels.filter(function (panel) { return choicePanels.indexOf(panel) < 0; }));
     for (var i = 0; i < roots.length; i += 1) {
       var root = roots[i];
-      var content = panels.indexOf(root) >= 0 ? panelText(root) : txt(root);
+      var content = panels.indexOf(root) >= 0 ? panelText(root) : replyText(root);
       if (!/生成/.test(content)) continue;
       var question = planQuestion(content);
-      var planRequest = !!question && (messageRole(root) === "assistant" || panels.indexOf(root) >= 0);
+      var choice = factoryReceipt && panels.indexOf(root) >= 0 && !root.closest('[data-message-id]') && messageRole(root) !== "user" && generationChoice(root);
+      var editor = choice && all('textarea, [contenteditable="true"], input[type="text"]', root).find(function (node) { return visible(node) && !node.disabled && !node.readOnly; });
+      var nativeOption = !!choice && !editor;
+      var planRequest = !!choice || !!question && (messageRole(root) === "assistant" || panels.indexOf(root) >= 0);
       var followupText = messageRole(root) === "assistant" ? followupConfirmation(content) : "";
+      var reminderPlan = followupText ? currentPlan : "";
       if (panels.indexOf(root) >= 0 && tracking.oldPanels.indexOf(question) >= 0) continue;
       var textRequest = planRequest || !!followupText || (messageRole(root) === "assistant" && /视频生成参数确认/.test(content) && /确认后.{0,25}(开始|生成)/.test(content));
       // Using the already selected model's quota is covered by auto-confirm;
       // purchasing or upgrading a plan is not.
-      var paymentContent = followupText ? content.replace(/付费额度/g, "额度") : content;
+      var paymentContent = content + (currentPlan ? " " + currentPlan : "");
+      if (choice && current.length && messageRole(current[current.length - 1]) === "assistant") paymentContent += " " + replyText(current[current.length - 1]);
+      if (followupText) paymentContent = paymentContent.replace(/付费额度/g, "额度");
       var blocked = /购买|支付|充值|订阅|开通会员|付费|扣费|升级/.test(paymentContent);
       var buttons = all('button, [role="button"]', root).filter(function (button) {
         if (!visible(button) || button.disabled || button.getAttribute("aria-disabled") === "true") return false;
         var label = txt(button);
         return /^(确认生成|继续生成|开始生成)$/.test(label) || ((root.getAttribute("role") === "dialog" || root.tagName === "DIALOG") && /^(确认|继续)$/.test(label));
       });
-      var kind = planRequest ? "text" : buttons.length ? "button" : textRequest ? "text" : "";
+      var kind = nativeOption ? "button" : planRequest ? "text" : buttons.length ? "button" : textRequest ? "text" : "";
       if (!kind) continue;
-      var key = confirmationKey(root, planRequest ? question : content, kind);
+      var key = confirmationKey(root, planRequest && question ? question : content, kind);
       var reason = blocked ? "确认涉及付费或升级，请手动检查" : "", pending = false;
+      if (choice && choice.input.disabled) reason = "生成确认选项尚未就绪";
       if (options && options.model) {
         var labels = { "seedance_v2.5": "Seedance 2.5", "seedance_v2.0": "Seedance 2.0", "seedance_v2.0_fast": "Seedance 2.0 Fast", "seedance_v2.0_mini": "Seedance 2.0 Mini" };
         // Short work-task reminders refer to the latest assistant plan. Never
         // borrow parameters from the user's prompt or an older reply.
         var latest = current.length && messageRole(current[current.length - 1]) === "assistant" ? txt(current[current.length - 1]) : "";
-        var modelPattern = /Seedance\s*2\.\d+(?:\s+(?:Fast|Mini))?/i;
+        // A timed-out reminder may refer to the plan in this same message's
+        // expanded processing section; never read another reply or user text.
+        var modelPattern = /Seedance[\s_]*v?(2\.\d+)(?:[\s_]+(Fast|Mini))?/i;
+        function modelValue(match) { return "seedance " + match[1] + (match[2] ? " " + match[2].toLowerCase() : ""); }
         var secondsPattern = /(?:时长\s*[:：]?\s*)(\d+)\s*秒/;
         // The settled plan precedes optional "if you want to change..." advice.
         // Elapsed planning time is not the requested clip duration.
         var parameterContent = followupText ? content.replace(/^共用时\s*(?:\d+\s*(?:小时|分钟|分|秒)\s*)+/, "").split(/(?:如果|若)(?:你|您)?想(?:调整|改|换|去掉)/)[0] : content;
         var conflicting = false;
         function parameter(pattern, value, preferred) {
-          var sources = [question, parameterContent, planRequest ? latest : ""];
+          var sources = [question, parameterContent, planRequest ? latest : reminderPlan];
           for (var s = 0; s < sources.length; s += 1) {
             // Only the separate plan fallback may contain shot timings. In a
             // reminder itself every stated duration must agree, labelled or not.
@@ -394,19 +445,19 @@
           }
           return null;
         }
-        var model = parameter(modelPattern, function (m) { return m[0].replace(/\s+/g, " ").toLowerCase(); });
+        var model = parameter(modelPattern, modelValue);
         var seconds = parameter(planRequest || followupText ? /(\d+)\s*秒/ : secondsPattern, function (m) { return Number(m[1]); }, secondsPattern);
         if (!model || !seconds) {
           pending = !blocked && !conflicting;
           if (!blocked) reason = pending ? "平台尚未给出完整的模型或时长，等待确认内容加载" : "平台确认的模型或时长相互冲突，请手动检查";
-        } else if (model[0].replace(/\s+/g, " ").toLowerCase() !== String(labels[options.model] || "").toLowerCase() || Number(seconds[1]) !== Number(options.duration)) reason = "平台确认的模型或时长与任务不一致，请手动检查";
+        } else if (modelValue(model) !== String(labels[options.model] || "").toLowerCase() || Number(seconds[1]) !== Number(options.duration)) reason = "平台确认的模型或时长与任务不一致，请手动检查";
         if (options.ratio && options.ratio !== "adaptive") {
           var ratioPattern = /(\d+)\s*[:：]\s*(\d+)/;
           var ratio = parameter(ratioPattern, function (m) { return m[1] + ":" + m[2]; });
           if (!ratio || ratio[1] + ":" + ratio[2] !== options.ratio) reason = "平台未确认所选画面比例，请手动检查";
         }
       }
-      return { ok: !reason, pending: pending, kind: kind, key: key, text: "按要求生成", nativeOnly: true, reason: reason, button: buttons[0] || null, alreadyConfirmed: tracking.confirmed.indexOf(key) >= 0 };
+      return { ok: !reason, pending: pending, kind: kind, key: key, text: "按要求生成", nativeOnly: true, nativePanel: !!choice, nativeOption: nativeOption, reason: reason, panel: choice ? root : null, editor: editor || null, button: nativeOption ? choice.label : buttons[0] || null, alreadyConfirmed: tracking.confirmed.indexOf(key) >= 0 };
     }
     return { ok: false };
   };
@@ -414,7 +465,26 @@
     var found = findConfirmation(options);
     var result = Object.assign({}, found);
     delete result.button;
+    delete result.panel;
+    delete result.editor;
     return result;
+  };
+  api.fillGenerationConfirmation = function (options) {
+    var found = findConfirmation(options);
+    if (!found.ok || !found.nativePanel || found.kind !== "text" || !found.editor || found.alreadyConfirmed || !options || options.key !== found.key) return { ok: false, reason: found.reason || "确认输入框已变化或已经处理" };
+    var result = setEditorText(found.editor, "按要求生成");
+    if (result.ok) tracking.confirmationEditor = { key: found.key, panel: found.panel, editor: found.editor };
+    return result;
+  };
+  api.sendGenerationConfirmation = function (options) {
+    var found = findConfirmation(options), binding = tracking && tracking.confirmationEditor;
+    if (!found.ok || !found.nativePanel || found.kind !== "text" || found.alreadyConfirmed || !binding || !options || options.key !== found.key || binding.key !== found.key || binding.panel !== found.panel || binding.editor !== found.editor) return { ok: false, reason: found.reason || "确认输入框已变化或已经处理" };
+    if (String(found.editor.value === undefined ? txt(found.editor) : found.editor.value).trim() !== "按要求生成") return { ok: false, reason: "确认输入内容已变化" };
+    var button = all('[data-testid="chat_input_send_button"]', found.panel).find(visible);
+    if (!button || button.disabled || ["aria-disabled", "aria-busy", "data-loading"].some(function (attr) { return button.getAttribute(attr) === "true"; })) return { ok: false, reason: "确认框发送按钮尚未就绪" };
+    tracking.confirmed.push(found.key);
+    button.click();
+    return { ok: true, key: found.key, text: found.text };
   };
   api.confirmGeneration = function (options) {
     var found = findConfirmation(options);

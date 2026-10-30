@@ -20,7 +20,7 @@ class ActiveDeliveryPages {
         try {state=await this.driver.call('readNativeDeliveryState',point);} catch {state=null;}
         this.check();const value=state?.captcha,r=value?.rect,detected=state?.captchaDetected===true||Boolean(value);
         if(detected){this.captchaSeen=true;this.keepOpen=true;this.driver.preserve?.();}
-        if(detected&&context.solveCaptcha&&!this.solverAttempted&&!this.manual&&!this.pauseRequested){
+        if(detected&&value&&context.solveCaptcha&&!this.solverAttempted&&!this.manual&&!this.pauseRequested){
           this.solverAttempted=true;this.solverPromise=Promise.resolve().then(()=>context.solveCaptcha(this)).catch(()=>({solved:false,manualRequired:true,reason:'solver_failed'}));
         }
         if(value&&typeof value.id==='string'&&value.id.length<=100&&r&&[r.x,r.y,r.width,r.height].every(Number.isFinite)&&r.x>=0&&r.y>=0&&r.width>0&&r.height>0&&r.x+r.width<=4096&&r.y+r.height<=4096) {
@@ -39,12 +39,16 @@ class ActiveDeliveryPages {
       },
       async observe(binding,{automatic=false}={}) {
         this.binding(binding);const frame=await this.snapshot();
-        if(automatic&&(!frame.captchaStateKnown||frame.captchaDetected||this.inputHeld||this.inputInFlight||this.activeSteps))return false;
+        if(!frame.captchaStateKnown||frame.captchaDetected||this.inputHeld||this.inputInFlight||this.activeSteps||this.pauseRequested){
+          if(automatic)return false;
+          throw Error('验证尚未结束或输入仍在进行，请等待原页面就绪');
+        }
         if(this.driver.resumeAutoClose?.()===false)throw Error('自动任务已停止，原页面保留供人工核对');
         this.manual=false;this.keepOpen=false;return true;
       },
-      async waitForResume({receiptAccepted=false,providerResponded=false}={}) {while(this.manual||this.pauseRequested||this.keepOpen&&this.captchaSeen){this.check();if((receiptAccepted||providerResponded)&&await this.observe({taskId:this.taskId,pageId:this.pageId},{automatic:true}))break;await new Promise(resolve=>setTimeout(resolve,100));}this.check();},
-      async runAutomation(run) {while(this.manual||this.pauseRequested)await this.waitForResume();this.check();this.activeSteps++;try{return await run();}finally{this.activeSteps--;}},
+      async waitForResume({receiptAccepted=false,providerResponded=false}={}) {while(this.manual||this.pauseRequested||this.keepOpen&&this.captchaSeen){this.check();if((this.captchaSeen||receiptAccepted||providerResponded)&&await this.observe({taskId:this.taskId,pageId:this.pageId},{automatic:true}))break;await new Promise(resolve=>setTimeout(resolve,100));}this.check();},
+      // Only the existing solver may work inside a challenge; human input still owns the page.
+      async runAutomation(run,{verification=false}={}) {await this.snapshot();while(this.manual||this.pauseRequested||!verification&&this.keepOpen&&this.captchaSeen)await this.waitForResume();this.check();this.activeSteps++;try{return await run();}finally{this.activeSteps--;}},
       async assertInput(binding,method,value) {
         this.binding(binding);if(!this.manual)throw Error('captcha observe mode');
         if(method==='Input.dispatchMouseEvent') {

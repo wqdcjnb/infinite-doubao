@@ -286,3 +286,23 @@ test('new 50-task sends require every processed callback and image consumption p
   delete f.bindings['task-050'].lastSendProcessed;assert.equal(f.adapter.sendReceipt(op,op.payload.tasks).receipt.processedComplete,false);
   delete f.local(1).attachmentConsumptionProof;assert.equal(f.adapter.sendReceipt(op,op.payload.tasks).receipt.tasks[0].status,'uncertain');
 });
+
+test('a confirmed 50-task prefix does not block read-only inspection or resend any accepted original',async t=>{
+  const f=fixture(t,{total:50,initialSent:9,referenceCount:0});
+  Object.assign(f.local(1),{confirmationIntents:{original:{kind:'text',state:'sent',at:'2026-10-29T00:00:00Z'}},generationObservedAt:'2026-10-29T00:01:00Z',status:'running'});
+  const before=JSON.stringify(store.get().tasks),proof=await f.prove();
+  assert.equal(proof.receipt.generationIntentCount,1);assert.deepEqual(proof.receipt.generationIntentTaskIds,['task-001']);
+  f.dispatch(()=>{for(const snapshot of f.continuation.payload.tasks)f.accept(snapshot,{proof:false});});
+  const result=await f.adapter.execute(f.continuation,{checkLease:()=>{}});
+  assert.equal(result.receipt.tasks.length,41);assert.deepEqual(f.calls[0].ids,f.tasks.slice(9).map(t=>t.draftId));
+  assert.equal(JSON.stringify(store.get().tasks.slice(0,9)),before);
+});
+
+test('50-task image continuation exposes the same consumed-image and processed evidence as normal sending',async t=>{
+  const f=fixture(t,{total:50,initialSent:9});await f.prove();
+  f.journal.bindTask=(id,patch)=>Object.assign(f.bindings[id],patch);
+  f.dispatch(async(_ids,options)=>{for(const snapshot of f.continuation.payload.tasks){const draft=f.draft(Number(snapshot.id.slice(-3)));f.accept(snapshot);await options.onDraftProcessed({draft,issued:true,received:true});}});
+  const result=await f.adapter.execute(f.continuation,{checkLease:()=>{}});
+  assert.equal(result.receipt.tasks.length,41);assert.equal(result.receipt.processed.length,41);
+  for(const row of result.receipt.tasks){assert.equal(row.attachmentProof?.referenceCount,5);assert.equal(row.attachmentProof.userMessageId,row.userMessageId);assert.equal(row.attachmentProof.names.length,5);}
+});

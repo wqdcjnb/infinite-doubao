@@ -95,3 +95,26 @@ test('accepted first receipt stays byte-equivalent when second is captcha-unknow
   const saved=drafts.list();assert.deepEqual(saved.map(d=>d.id),f.ids.slice(1));assert.ok(saved[0].submissionRecord.task.submissionUncertain);assert.equal(saved[1].submissionRecord,undefined);
   assert.deepEqual(pauses[0].notStartedDraftIds,[f.ids[2]]);
 });
+
+
+test('continueOnFailure cannot advance beyond a captcha-unknown original send',async t=>{
+  const f=await fixture(t,async()=>{throw Error('captcha receipt timeout');}),pauses=[];
+  await assert.rejects(queue.submitDrafts(f.ids,{...f.options,continueOnFailure:true,onDeliveryPage:()=>({captchaSeen:true,keepOpen:true,setStage:()=>{},close:()=>{}}),onDeliveryPause:info=>pauses.push(info)}));
+  assert.deepEqual(f.sent,[f.ids[0]]);
+  assert.deepEqual(pauses[0].notStartedDraftIds,f.ids.slice(1));
+});
+
+test('a long human verification does not consume the original receipt timeout budget',async t=>{
+  let release,entered=false,failure;
+  const page={manual:false,captchaSeen:false,keepOpen:false,setStage:()=>{},close:()=>{}};
+  const hold=new Promise(resolve=>{release=resolve;});
+  const f=await fixture(t,async value=>{entered=true;page.manual=true;page.captchaSeen=true;page.keepOpen=true;await hold;page.manual=false;page.keepOpen=false;return {ok:true,conversationUrl:'https://www.doubao.com/chat/'+value.id,userMessageId:'message-'+value.id};});
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});
+  const sending=queue.submitDrafts(f.ids,{...f.options,onDeliveryPage:()=>page}).catch(error=>{failure=error;});
+  for(let i=0;i<100&&!entered;i++)await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(entered,true);t.mock.timers.tick(16*60*1000);
+  for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));
+  const timedOut=failure;release();await sending;
+  assert.equal(timedOut,undefined,'human verification must not time out an issued original send');
+  assert.equal(failure,undefined);assert.deepEqual(f.sent,f.ids);
+});

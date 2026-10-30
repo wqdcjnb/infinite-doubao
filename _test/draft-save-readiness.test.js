@@ -1,6 +1,6 @@
 "use strict";
 const { test } = require("node:test"), assert = require("node:assert/strict"), vm = require("node:vm"), fs = require("node:fs"), path = require("node:path");
-async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, noSidebar = false, partialBody = false } = {}) {
+async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, richDocument = false, remount = false, hidden = false, duplicate = false, partialBody = false } = {}) {
   let now = 1000, switched = 0, filledAt = 0, current = { tagName: "TEXTAREA", value: "" };
   const prompt = "【草稿编号：DB-111111111111111111111111】 视频", scope = "account-a";
   const metadata = { id: "native", title: prompt, scene: "new-office-task", inputDraftIndex: { accountScope: scope, conversationScope: "local:native", inputId: "primary" } };
@@ -9,7 +9,7 @@ async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, noSidebar 
   const button = { get disabled() { return now < filledAt + upload; }, getAttribute: () => null };
   const newChat = { innerText: "新对话", click() { switched = now; current.value = ""; } };
   const document = { querySelector: s => s.includes("draft-conversation-section") ? section : s.includes("chat_input_action_mode") ? mode : s.includes("chat_input_send_button") ? button : current,
-    querySelectorAll: s => s.includes("draft-conversation-section") ? switched && !noSidebar ? [row] : [] : s.includes("contenteditable") ? [current] : s === 'button, [role="button"]' ? [newChat] : [] };
+    querySelectorAll: s => s.includes("draft-conversation-section") ? switched ? hidden ? [] : remount ? [row, { ...row, dataset: {}, querySelector: () => ({ innerText: "旧草稿" }) }] : [row] : [] : s === 'button, [role="button"]' ? [newChat] : s.includes("contenteditable") ? [current] : s.includes("chat_input_action_mode") ? [mode] : s.includes("chat_input_send_button") ? [button] : [] };
   function input() {
     const ready = bodyAfterSwitch ? switched && now >= switched + bodyAfterSwitch : now >= filledAt + 200;
     return { state: { accountScope: scope, records: ready || partialBody ? [{ address: metadata.inputDraftIndex, updatedAt: stale ? 1 : now,
@@ -17,7 +17,9 @@ async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, noSidebar 
   }
   const indexedDB = { databases: async () => [{ name: "flow-draft-conversations-v2" }, { name: "samantha-web" }], open(name) {
     const q = {}; queueMicrotask(() => { q.result = { close() {}, transaction() {
-      const tx = { objectStore: () => ({ get: () => read(input()), getAll: () => read(switched ? [{ accountScope: scope, id: metadata.id, data: metadata }] : []) }) };
+      const records = [{ accountScope: scope, id: metadata.id, data: metadata }];
+      if (duplicate) records.push({ ...records[0], id: "duplicate", data: { ...metadata, id: "duplicate" } });
+      const tx = { objectStore: () => ({ get: () => read(input()), getAll: () => read(switched ? records : []) }) };
       function read(value) { const r = {}; queueMicrotask(() => { r.result = value; r.onsuccess(); queueMicrotask(() => tx.oncomplete()); }); return r; } return tx;
     } }; q.onsuccess(); }); return q;
   } };
@@ -28,10 +30,20 @@ async function save({ stale = false, upload = 0, bodyAfterSwitch = 0, noSidebar 
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/page/native-drafts.js"), "utf8"), context);
   assert.equal((await api.prepareNativeDraft({ executionMode: "work" })).ok, true);
   const prepareMs = now - 1000; current.value = prompt; filledAt = now;
+  if (richDocument) current.editor = { getText: () => prompt };
   const result = await api.saveNativeDraft({ id: "local", prompt, executionMode: "work" });
+  if (duplicate) return result;
   assert.equal(result.ok, true, result.reason); assert.equal(result.bindings[0].nativeId, "native");
+  assert.equal((await api.verifyNativeDraftSaved({ id: "local", prompt, executionMode: "work" })).ok, true);
+  assert.equal((await api.verifyNativeDraftSaved({ id: "local", prompt: prompt + "changed", executionMode: "work" })).ok, false);
+  assert.equal((await api.verifyNativeDraftSaved({ id: "local", prompt, executionMode: "work", accountScope: "other" })).ok, false);
   return { prepareMs, switchMs: switched - filledAt, savedMs: now - filledAt };
 }
+
+test("侧栏整体重挂载或新行不可见时按完整存储确认，不因DOM数量误报保存失败", async () => {
+  await save({ remount: true }); await save({ hidden: true });
+  const duplicate = await save({ duplicate: true }); assert.equal(duplicate.ok, false); assert.match(duplicate.reason, /重复草稿编号/);
+});
 test("云电脑编辑器已替换时快速准备；完整正文已落盘可提前确认", async () => {
   const result = await save(); assert.equal(result.prepareMs, 100); assert.equal(result.switchMs, 200);
 });
@@ -43,12 +55,38 @@ test("侧栏新条目出现后仍核对完整正文落盘，不能提前显示�
   const result = await save({ bodyAfterSwitch: 400 }); assert.ok(result.savedMs >= result.switchMs + 400);
 });
 
-test("侧栏未显示或重挂载时，按完整账号范围正文确认原生草稿保存", async () => {
-  const result = await save({ noSidebar: true });
-  assert.ok(result.savedMs >= result.switchMs);
-});
-
 test("同编号的部分正文仍在落盘时继续等待完整记录，不提前判为未知", async () => {
   const result = await save({ bodyAfterSwitch: 400, partialBody: true });
   assert.ok(result.savedMs >= result.switchMs + 400);
+});
+
+test("富文本内部文档已同步可立即保存，仍等待上传和完整正文持久化", async () => {
+  const fast = await save({ richDocument: true, bodyAfterSwitch: 400 });
+  assert.equal(fast.switchMs, 0); assert.ok(fast.savedMs >= 400);
+  assert.ok((await save({ richDocument: true, upload: 900 })).switchMs >= 900);
+});
+
+test("人机验证期间保留原请求，超过两分钟后仍能接收回执且不代替用户验证", async () => {
+  let now = 0, reads = 0;
+  const api = {}, document = { querySelectorAll: () => [] };
+  class Clock extends Date { static now() { return now; } }
+  const context = vm.createContext({ window: { auto: api }, CFG: { autoKey: "auto" }, document, Date: Clock, getComputedStyle: () => ({ visibility: 'visible' }), setTimeout: resolve => { now += 10000; queueMicrotask(resolve); } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/page/native-drafts.js'), 'utf8'), context);
+  api.readNativeDeliveryState = () => ({ captchaDetected: now < 180000 });
+  api.readNativeQuotaResponse = () => null;
+  api.readNativeDraftReceipt = () => {
+    assert.ok(now >= 180000); reads++;
+    return { ok: true, userMessageId: 'verified-user', conversationUrl: 'https://www.doubao.com/chat/verified' };
+  };
+  const result = await api.waitNativeDraftAccepted({});
+  assert.equal(result.ok, true); assert.ok(now >= 180000); assert.equal(reads, 1); assert.equal(result.userMessageId, 'verified-user');
+});
+
+test("没有验证弹窗且没有回执时仍按两分钟超时，不无限占用页面", async () => {
+  let now = 0;const api = {};
+  class Clock extends Date { static now() { return now; } }
+  const context = vm.createContext({ window: { auto: api }, CFG: { autoKey: 'auto' }, document: { querySelectorAll: () => [] }, Date: Clock, setTimeout: resolve => { now += 10000; queueMicrotask(resolve); } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/page/native-drafts.js'), 'utf8'), context);
+  api.readNativeDraftReceipt = () => ({ ok: false });
+  const result = await api.waitNativeDraftAccepted({});assert.equal(result.ok, false);assert.equal(now,120000);
 });

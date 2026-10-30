@@ -8,8 +8,9 @@
   var sendAttachmentProof = null;
   var captchaFrames = new WeakMap(), captchaEpoch = 0, captchaDocumentId = "";
   api.readNativeDeliveryState = function (point) {
+    var mask = Array.from(document.querySelectorAll('#captcha_container')).some(visible);
     var frames = Array.from(document.querySelectorAll('iframe[src*="/verifycenter/captcha"]')).filter(visible);
-    if (!frames.length) return { captchaDetected: false };
+    if (!frames.length) return { captchaDetected: mask };
     if (frames.length !== 1) return { captchaDetected: true };
     var frame = frames[0], rect = frame.getBoundingClientRect(), style = getComputedStyle(frame);
     var width = window.innerWidth || document.documentElement.clientWidth, height = window.innerHeight || document.documentElement.clientHeight;
@@ -727,8 +728,9 @@
     return { ok: true, clickedAt: new Date().toISOString(), ...(attachmentProof ? { attachmentProof: attachmentProof } : {}) };
   });
   api.readNativeDraftReceipt = function (options) {
+    if (api.readNativeDeliveryState().captchaDetected) return { ok: false };
     var match = location.pathname.match(/^\/chat\/([^/]+)$/), id = match && match[1];
-    if (!id || (options.conversationIds || []).includes(id) || !normalize(options.prompt)) return { ok: false };
+    if (!id || /^local_/.test(id) || (options.conversationIds || []).includes(id) || !normalize(options.prompt)) return { ok: false };
     var number = numberIn(options.prompt), baseline = new Set(options.baselineMessageIds || []), accepted = new Set();
     Array.from(document.querySelectorAll('[data-message-id]')).forEach(function (node) {
       var messageId = String(node.getAttribute("data-message-id") || "").trim();
@@ -770,8 +772,17 @@
     return node ? { ok: true, quotaLimited: true, conversationUrl: location.href, providerMessage: normalize(text(node)).slice(0, 300) } : null;
   };
   api.waitNativeDraftAccepted = result(async function (options) {
-    var deadline = Date.now() + 120000, pendingAttachments = false, clearedAt = null, clearedMessage = "", clearedRoot = null, clearedEditor = null;
-    while (Date.now() < deadline) {
+    var receiptRemaining = 120000, checkedAt = Date.now(), paused = false, pendingAttachments = false, clearedAt = null, clearedMessage = "", clearedRoot = null, clearedEditor = null;
+    for (;;) {
+      var now = Date.now(), delivery = api.readNativeDeliveryState();
+      if (!paused) receiptRemaining -= now - checkedAt;
+      checkedAt = now; paused = delivery.captchaDetected;
+      if (paused) {
+        clearedAt = null; clearedMessage = ""; clearedRoot = null; clearedEditor = null;
+        await new Promise(function (resolve) { setTimeout(resolve, 250); });
+        continue;
+      }
+      if (receiptRemaining <= 0) break;
       var quota = api.readNativeQuotaResponse(options); if (quota) return quota;
       var receipt = api.readNativeDraftReceipt(options);
       if (receipt.ok) {
@@ -780,14 +791,13 @@
         var root = document.querySelector("#input-engine-container"), current = importEditor();
         var remaining = root && Array.from(root.querySelectorAll('[data-testid="attachment_area"] [data-kind][aria-label]'));
         var busy = root && Array.from(root.querySelectorAll('[aria-busy="true"], [data-loading="true"], [role="progressbar"], progress')).some(visible);
-        var challenge = Array.from(document.querySelectorAll('iframe[src*="/verifycenter/captcha"]')).some(visible);
+        var challenge = api.readNativeDeliveryState().captchaDetected;
         if (root && visible(root) && current && visible(current) && current.closest && current.closest("#input-engine-container") === root && !importText(current) && remaining.length === 0 && !busy && !challenge) {
           var message = receipt.conversationUrl + "/" + receipt.userMessageId;
           if (clearedAt === null || clearedMessage !== message || clearedRoot !== root || clearedEditor !== current) { clearedAt = Date.now(); clearedMessage = message; clearedRoot = root; clearedEditor = current; }
           if (Date.now() - clearedAt >= 500) return { ...receipt, attachmentConsumptionProof: { version: 1, names: options.attachmentNames.slice(), userMessageId: receipt.userMessageId, checkedAt: new Date().toISOString() } };
         } else { clearedAt = null; clearedMessage = ""; clearedRoot = null; clearedEditor = null; }
       } else { clearedAt = null; clearedMessage = ""; clearedRoot = null; clearedEditor = null; }
-      if (Array.from(document.querySelectorAll('iframe[src*="/verifycenter/captcha"]')).some(visible)) deadline = Date.now() + 120000;
       await new Promise(function (resolve) { setTimeout(resolve, 250); });
     }
     if (pendingAttachments) return { ok: false, attachmentsPending: true, reason: "文字消息已出现，但未确认附件已从输入框完整提交；保留原页和发送意图，停止后续投递，不会自动重发" };

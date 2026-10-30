@@ -81,7 +81,7 @@ class Driver {
     const deadline = Date.now() + 5000;
     for (;;) {
       check();
-      const result = options ? await this.call("send", options) : await this.call("send");
+      const result = options?.confirmation ? await this.call("sendGenerationConfirmation", options.confirmation) : options ? await this.call("send", options) : await this.call("send");
       if (!options?.nativeOnly || result?.ok || !/发送按钮/.test(result?.reason || "") || Date.now() >= deadline) return result;
       // React mounts the custom confirmation send button after the input event.
       // Retry only explicit pre-click failures, never a lost click response.
@@ -91,6 +91,7 @@ class Driver {
   async beginTask(taskId) { return this.call("beginTask", taskId); }
   async confirmGeneration() { return this.call("confirmGeneration"); }
   async readProgress() { return this.call("readProgress"); }
+  async expandGenerationPlan() { return this.call("expandGenerationPlan"); }
   async waitIdle(ms) { return this.call("waitIdle", ms); }
   async clickText(labels) { return this.call("clickText", labels); }
   async appeal(script) { return this.call("appeal", script); }
