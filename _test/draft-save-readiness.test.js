@@ -68,14 +68,18 @@ test("富文本内部文档已同步可立即保存，仍等待上传和完整�
 
 test("人机验证期间保留原请求，超过两分钟后仍能接收回执且不代替用户验证", async () => {
   let now = 0, reads = 0;
-  const frame = { isConnected: true, hidden: false, closest: () => null, getClientRects: () => [{}] };
-  const api = {}, document = { querySelectorAll: () => [frame] };
+  const api = {}, document = { querySelectorAll: () => [] };
   class Clock extends Date { static now() { return now; } }
   const context = vm.createContext({ window: { auto: api }, CFG: { autoKey: "auto" }, document, Date: Clock, getComputedStyle: () => ({ visibility: 'visible' }), setTimeout: resolve => { now += 10000; queueMicrotask(resolve); } });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/page/native-drafts.js'), 'utf8'), context);
-  api.readNativeDraftReceipt = () => ++reads > 20 ? { ok: true, userMessageId: 'verified-user', conversationUrl: 'https://www.doubao.com/chat/verified' } : { ok: false };
+  api.readNativeDeliveryState = () => ({ captchaDetected: now < 180000 });
+  api.readNativeQuotaResponse = () => null;
+  api.readNativeDraftReceipt = () => {
+    assert.ok(now >= 180000); reads++;
+    return { ok: true, userMessageId: 'verified-user', conversationUrl: 'https://www.doubao.com/chat/verified' };
+  };
   const result = await api.waitNativeDraftAccepted({});
-  assert.equal(result.ok, true); assert.ok(now > 120000); assert.equal(result.userMessageId, 'verified-user');
+  assert.equal(result.ok, true); assert.ok(now >= 180000); assert.equal(reads, 1); assert.equal(result.userMessageId, 'verified-user');
 });
 
 test("没有验证弹窗且没有回执时仍按两分钟超时，不无限占用页面", async () => {
