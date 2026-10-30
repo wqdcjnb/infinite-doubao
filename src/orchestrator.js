@@ -123,6 +123,7 @@ async function beginTracking(driver, task, inst, resume) {
 async function confirmGeneration(driver, task, options, sb, context = {}) {
   if (!driver.call) return null;
   const expected = { model: task.model, duration: task.duration, ratio: task.ratio };
+  if (task.studioTaskId && task.receiptUserMessageId) expected.receiptUserMessageId = task.receiptUserMessageId;
   const check = context.check || (() => checkStopped(sb));
   const persist = context.persist || (values => patchTask(task.id, values, true));
   const candidate = await driver.call("peekGenerationConfirmation", expected);
@@ -139,13 +140,18 @@ async function confirmGeneration(driver, task, options, sb, context = {}) {
   if (task.studioTaskId && !context.checkLease) return { waiting: true, blocked: true, reason: "只读取回原对话；新的生成确认需要有效发送租约" };
   const checkAction = () => { check(); if (task.studioTaskId) context.checkLease?.(); };
   checkAction();
-  const intent = { kind: "text", state: "pending", at: new Date().toISOString() };
+  if (context.ready && !await context.ready()) return { waiting: true, reason: "等待原页面人工验证结束" };
+  const nativeOption = task.studioTaskId && candidate.kind === "button" && candidate.nativeOption === true;
+  const nativePanel = task.studioTaskId && candidate.nativePanel === true;
+  const intent = { kind: nativeOption ? "button" : "text", state: "pending", at: new Date().toISOString() };
   persist({ confirmationIntents: { ...intents, [candidate.key]: intent } });
   let actionAttempted = false;
   try {
     checkAction();
-    const filled = await driver.setText("按要求生成", checkAction);
-    if (!filled?.ok) throw new Error("填写视频参数确认失败");
+    if (!nativeOption) {
+      const filled = nativePanel ? await driver.call("fillGenerationConfirmation", { ...expected, key: candidate.key }) : await driver.setText("按要求生成", checkAction);
+      if (!filled?.ok) throw new Error("填写视频参数确认失败");
+    }
     const latest = await driver.call("peekGenerationConfirmation", expected);
     if (!latest?.ok || latest.key !== candidate.key) {
       // Streaming replies can change between inspection and filling. No
@@ -155,12 +161,18 @@ async function confirmGeneration(driver, task, options, sb, context = {}) {
       return { waiting: true, reason: "生成确认内容仍在更新，等待完整参数" };
     }
     checkAction();
+    if (context.ready && !await context.ready()) {
+      const remaining = { ...task.confirmationIntents }; delete remaining[candidate.key];
+      persist({ confirmationIntents: remaining });
+      return { waiting: true, reason: "等待原页面人工验证结束" };
+    }
+    checkAction();
     actionAttempted = true;
-    const sent = await driver.send({ nativeOnly: true }, checkAction);
+    const sent = nativeOption ? await driver.call("confirmGeneration", { ...expected, key: candidate.key }) : await driver.send({ nativeOnly: true, ...(nativePanel ? { confirmation: { ...expected, key: candidate.key } } : {}) }, checkAction);
     if (!sent?.ok) { actionAttempted = false; throw new Error(`发送视频参数确认失败：${sent?.reason || "未找到发送按钮"}`); }
     check();
     persist({ confirmationIntents: { ...task.confirmationIntents, [candidate.key]: { ...intent, state: "sent" } } });
-    emitLog(task, "已回复“按要求生成”");
+    emitLog(task, nativeOption ? "已选择第一项“按要求生成”" : "已回复“按要求生成”");
     return { waiting: true, sent: true, reason: "确认已发送，等待平台开始生成" };
   } catch (error) {
     if (!actionAttempted) {
@@ -392,6 +404,14 @@ async function dispatchOne(sbId, opts = {}) {
   if (task.draftBatchId && task.sentAt && !task.submittedAt) patchTask(task.id, { submittedAt: task.sentAt }, true);
   const fixedId = task.submittedAt ? task.instanceId : task.preferredInstanceId;
   const fixed = fixedId ? store.find(fixedId) : null;
+  if (task.studioTaskId && task.submittedAt && fixed && (
+    store.get().taskDrafts.some(draft => draft.instanceId === fixed.id && draft.template?.studioTaskId && draft.studioSendOnly !== true && !draft.submissionRecord) ||
+    store.get().tasks.some(other => other.instanceId === fixed.id && other.studioTaskId && other.studioSendOnly !== true && other.status === "submitted")
+  )) {
+    const waitReason = "等待原账号完成草稿发送和生成确认，再取回视频结果";
+    patchTask(task.id, { stage: "waiting_account", waitReason });
+    scheduleWake(); return { ok: false, error: waitReason, taskId: task.id };
+  }
   const exclude = new Set([...(opts.triedInstances || []), ...Object.keys(task.accountExclusions || {})]);
   const inst = fixedId ? (fixed && !exclude.has(fixedId) && instanceReady(fixed, !!task.submittedAt).ok ? fixed : null) : pickInstance(exclude, opts.preferredInstances || []);
   if (!inst) {
@@ -552,7 +572,14 @@ async function draftStep(operation, label, run, timeoutMs = 60000) {
     return await Promise.race([Promise.resolve().then(() => { signal.throwIfAborted(); return run(); }), new Promise((_, reject) => {
       abort = () => reject(signal.reason);
       signal.addEventListener("abort", abort, { once: true });
-      timer = setTimeout(() => operation.controller.abort(new Error(`${label}超时，请检查账号页面或网络后重试`)), timeoutMs);
+      if (!operation.activity) { timer = setTimeout(() => operation.controller.abort(new Error(`${label}超时，请检查账号页面或网络后重试`)), timeoutMs); return; }
+      let remaining = timeoutMs, last = Date.now();
+      timer = setInterval(() => {
+        const now = Date.now(), page = operation.activity;
+        if (!(page?.manual || page?.pauseRequested || page?.keepOpen && page?.captchaSeen || page?.inputHeld || page?.inputInFlight)) remaining -= now - last;
+        last = now;
+        if (remaining <= 0) operation.controller.abort(new Error(`${label}超时，请检查账号页面或网络后重试`));
+      }, 100);
     })]);
   } finally { clearTimeout(timer); signal.removeEventListener("abort", abort); }
 }
@@ -591,7 +618,7 @@ async function confirmSubmittedTaskOnce(taskId, { checkLease, onDeliveryPage } =
   try {
     stopWatch = watchDraftLease(operation, checkLease);
       driver = await draftStep(operation, "原对话页面", () => deps.resolveDraftDriver(inst, { signal: operation.controller.signal }));
-      activity=onDeliveryPage?.({driver,cancel:error=>operation.controller.abort(error)});
+      activity=onDeliveryPage?.({driver,cancel:error=>operation.controller.abort(error)});operation.activity=activity;
       check();
       await draftStep(operation, "原对话加载", () => driver.navigate(task.conversationUrl)); pinned=true;check();
       const login = await draftStep(operation, "原对话登录检查", () => driver.waitForLogin ? driver.waitForLogin({ timeoutMs: 30000, check }) : driver.isLoggedIn());
@@ -600,8 +627,22 @@ async function confirmSubmittedTaskOnce(taskId, { checkLease, onDeliveryPage } =
       const initial=observeProgress(await draftStep(operation, "原对话状态", () => driver.readProgress()));check();if(initial==="failed")return;
       if(initial!=="started"){
         activity?.setStage?.("waiting_receipt");
-        const confirm=()=>draftStep(operation, "原对话确认", () => confirmGeneration(driver,task,store.get().settings.orchestrator||{},{id:task.storyboardId},{check,checkLease,persist:patch=>patchTask(task.id,patch,true)}));
-        const confirmation=activity?.runAutomation?await activity.runAutomation(confirm):await confirm();
+        const ready=async()=>{if(!activity)return true;const frame=await activity.snapshot();check();return frame.captchaStateKnown&&!frame.captchaDetected&&!activity.manual&&!activity.pauseRequested&&!activity.inputHeld&&!activity.inputInFlight;};
+        const confirm=()=>draftStep(operation, "原对话确认", async () => {
+          check();if(driver.expandGenerationPlan)await driver.expandGenerationPlan();check();
+          return confirmGeneration(driver,task,store.get().settings.orchestrator||{},{id:task.storyboardId},{check,checkLease,ready,persist:patch=>patchTask(task.id,patch,true)});
+        });
+        let confirmation;
+        // The plan and its separate confirmation panel hydrate after login.
+        // Keep this original page for bounded checks; human waits use no rounds.
+        for(let attempt=0;attempt<40;attempt++){
+          await waitHuman();check();
+          const state=observeProgress(await draftStep(operation,"原对话状态",()=>driver.readProgress()));check();
+          if(state==="failed")return;if(state==="started")break;
+          confirmation=activity?.runAutomation?await activity.runAutomation(confirm):await confirm();
+          if(confirmation?.sent||confirmation?.blocked||confirmation?.recorded)break;
+          if(attempt<39)await new Promise(resolve=>setTimeout(resolve,250));
+        }
         if(confirmation?.sent){
           let deadline=Date.now()+120000;
           for(;;){
@@ -823,7 +864,7 @@ async function submitDrafts(ids, options = {}) {
         const cleanup = () => { const keepOpen=holdPage||activity?.keepOpen===true;if(keepOpen)driver?.preserve?.();activity?.close?.();children.delete(child);child.controller.abort(new Error("本条草稿核对已结束"));if(!keepOpen)driver?.close(); };
         const recordFailure = error => {
           if (issued && !received && draft.template.studioTaskId && draft.template.attachments.length) { holdPage = true; if(activity)activity.keepOpen=true; }
-          const mustPause = options.continueOnFailure !== true || error.code === "CAPTCHA_HANDOFF_INTERRUPTED" || activity?.inputHeld || activity?.inputInFlight;
+          const mustPause = holdPage || options.continueOnFailure !== true || error.code === "CAPTCHA_HANDOFF_INTERRUPTED" || activity?.captchaSeen || activity?.humanTouched || activity?.inputHeld || activity?.inputInFlight;
           if (mustPause && (holdPage || (!received && activity?.captchaSeen) || activity?.keepOpen || error.code === "CAPTCHA_HANDOFF_INTERRUPTED")) deliveryPause = {
             reason: holdPage || activity?.keepOpen || error.code === "CAPTCHA_HANDOFF_INTERRUPTED" ? "manual_interrupted" : "captcha_wait_ended",
             taskId: draft.template.studioTaskId, draftId: draft.id,
@@ -834,7 +875,7 @@ async function submitDrafts(ids, options = {}) {
           if (issued && !received && record) { try { const observed = driver?.webContents?.getURL?.(); if (/^https:\/\/www\.doubao\.com\/chat\/[^/?#]+$/.test(observed || "")) record.task.unverifiedConversationUrl = observed; } catch {} }
           drafts.updateMany({ [draft.id]: { nativeError: message, ...(received || issued ? { submissionRecord: JSON.parse(JSON.stringify(record)) } : {}) } });
           log.warn("draft-dispatch-failed", { draftBatchId, draftId: draft.id, instanceId: inst.id, issued, message });
-          progress("本条异常已记录，继续投递其他草稿");
+          progress(deliveryPause ? "本条发送待核验，已暂停本账号后续草稿" : "本条异常已记录，继续投递其他草稿");
         };
         progress(`正在准备第 ${index + 1} 条`);
         try {
@@ -844,7 +885,7 @@ async function submitDrafts(ids, options = {}) {
             log.info("draft-preparation-stage", { draftBatchId, draftId: draft.id, index: index + 1, stage: "page_ready", elapsedMs: Date.now() - preparingAt });
             if (child.controller.signal.aborted) driver.close();
             checkDraft();
-            activity = options.onDeliveryPage?.({ draft, driver, cancel: error => child.controller.abort(error) });
+            activity = options.onDeliveryPage?.({ draft, driver, cancel: error => child.controller.abort(error) });child.activity=activity;
             activity?.setStage?.("preparing");
             const login = await driver.waitForLogin({ check: checkDraft });
             if (login?.loggedIn !== true) throw new Error(login?.by === "login-button"

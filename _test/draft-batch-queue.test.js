@@ -59,6 +59,29 @@ async function waitFor(check) {
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
 
+for (const awaiting of ["draft", "confirmation"]) test(`工厂账号先完成${awaiting === "draft" ? "未发草稿" : "逐条确认"}，结果轮询不抢占原账号`, async () => {
+  account("factory-priority");
+  const items = [template("first"), template("second")];
+  items.forEach((item, n) => { item.studioTaskId = "factory-priority-" + n; });
+  const ids = drafts.createMany(items.map(item => item.id)).map(d => d.id);
+  await queue.saveDrafts(ids);
+  await queue.submitDrafts(awaiting === "draft" ? ids.slice(0, 1) : ids, { sendOnly: true });
+  const first = store.get().tasks[0];
+  queue.patchTask(first.id, { status: "queued", generationObservedAt: new Date().toISOString() }, true);
+  require("../src/storyboard").updateShot(first.storyboardId, first.shotId, { status: "queued" });
+  queue.resume(first.storyboardId);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(queue.getTask(first.id).status, "queued", "结果轮询抢占了尚有发送或确认工作的账号");
+  assert.equal(queue.state().running.length, 0);
+  if (awaiting === "draft") await queue.submitDrafts(ids.slice(1), { sendOnly: true });
+  const second = store.get().tasks.find(task => task.id !== first.id);
+  queue.patchTask(second.id, { status: "queued", generationObservedAt: new Date().toISOString() }, true);
+  require("../src/storyboard").updateShot(second.storyboardId, second.shotId, { status: "queued" });
+  queue.resume(first.storyboardId);
+  await waitFor(() => store.get().tasks.every(task => task.status === "succeeded"));
+  assert.equal(sends().length, 2, "结果取回不得重复投递已发送草稿");
+});
+
 test("五图草稿的打开、点击发送和回执核对共享原始附件清单", async () => {
   account("five-images");const item=template("five-images");
   fs.mkdirSync(P.dir("attachments"),{recursive:true});
@@ -116,16 +139,20 @@ for(const rejected of [true,false])test(rejected?"五图消费检查调用异常
   const ids=factoryImageBatch();await queue.saveDrafts(ids);calls.length=0;
   hook=(method,opts)=>{if(method==="sendNativeDraft")return {ok:true,clickedAt:new Date().toISOString(),attachmentProof:{version:1,names:opts.attachmentNames,fileKeys:opts.attachmentNames.map(n=>"key-"+n)}};
     if(method==="waitNativeDraftAccepted"){if(rejected)throw Error("附件消费检查调用异常");return {ok:false,reason:"附件消费检查失败"};}return null;};
-  await assert.rejects(queue.submitDrafts(ids,{sendOnly:true,onDeliveryPage(){return {};}}),/附件/);
+  await assert.rejects(queue.submitDrafts(ids,{sendOnly:true,continueOnFailure:true,onDeliveryPage(){return {};}}),/附件/);
   assert.equal(sends().length,1);assert.equal(calls.some(c=>c.method==="close"),false);assert.equal(drafts.list().find(d=>d.id===ids[1]).submissionRecord,undefined);
 });
-test("工厂逐条继续模式保留首条附件未知并发送下一条，未知条不重发",async()=>{
-  const ids=factoryImageBatch();await queue.saveDrafts(ids);calls.length=0;const processed=[];
+test("工厂继续模式遇到图文接收未知也暂停后缀，保留原页及意图且不重发",async()=>{
+  const ids=factoryImageBatch();await queue.saveDrafts(ids);calls.length=0;const processed=[],pauses=[],messages=[];
+  const listener=event=>messages.push(event.message);queue.events.on('draft',listener);
   hook=(method,opts)=>{if(method==="sendNativeDraft")return {ok:true,clickedAt:new Date().toISOString(),attachmentProof:{version:1,names:opts.attachmentNames,fileKeys:opts.attachmentNames.map(n=>"key-"+n)}};
     if(method==="waitNativeDraftAccepted")return opts.id===ids[0]?{ok:false,attachmentsPending:true,reason:"首条附件未确认"}:{ok:true,conversationUrl:"https://www.doubao.com/chat/second",userMessageId:"second-user",attachmentConsumptionProof:{version:1,names:opts.attachmentNames,userMessageId:"second-user",checkedAt:new Date().toISOString()}};return null;};
-  await assert.rejects(queue.submitDrafts(ids,{sendOnly:true,continueOnFailure:true,onDeliveryPage(){return {};},onDraftProcessed({draft,issued,received}){processed.push({id:draft.id,issued,received});}}),/首条附件/);
-  assert.deepEqual(processed,[{id:ids[0],issued:true,received:false},{id:ids[1],issued:true,received:true}]);
-  assert.deepEqual(sends().map(c=>c.options.id),ids);assert.equal(drafts.list().find(d=>d.id===ids[0]).submissionRecord.task.submissionUncertain,true);assert.equal(store.get().tasks.length,1);assert.equal(store.get().tasks[0].receiptUserMessageId,"second-user");
+  try{await assert.rejects(queue.submitDrafts(ids,{sendOnly:true,continueOnFailure:true,onDeliveryPage(){return {};},onDeliveryPause(info){pauses.push(info);},onDraftProcessed({draft,issued,received}){processed.push({id:draft.id,issued,received});}}),/首条附件/);}
+  finally{queue.events.removeListener('draft',listener);}
+  assert.deepEqual(processed,[{id:ids[0],issued:true,received:false}]);
+  assert.deepEqual(sends().map(c=>c.options.id),[ids[0]]);assert.equal(drafts.list().find(d=>d.id===ids[0]).submissionRecord.task.submissionUncertain,true);assert.equal(store.get().tasks.length,0);
+  assert.equal(drafts.list().find(d=>d.id===ids[1]).submissionRecord,undefined);assert.equal(calls.some(c=>c.method==='close'),false);
+  assert.equal(pauses.length,1);assert.deepEqual(pauses[0].notStartedDraftIds,[ids[1]]);assert.ok(messages.some(message=>/待核验.*暂停/.test(message)));
   const attempts=sends().length;await assert.rejects(queue.submitDrafts([ids[0]],{sendOnly:true,continueOnFailure:true}),/不会自动重发/);assert.equal(sends().length,attempts);
 });
 test("真实五图发送遇限额时记录每条原意图并全部跳过，不确认生成",async()=>{

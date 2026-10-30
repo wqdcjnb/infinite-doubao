@@ -512,13 +512,15 @@ test('disconnect while holding a human pointer preserves the exact sender page a
   await h.deliver(h.session,[deliveryCommand(h,'drag-down','input',{kind:'pointer',phase:'down',x:.2,y:.25,button:'left'})]);await h.deliver(null);
   assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased']);assert.equal(h.cancelled(),0);assert.equal(h.win.isDestroyed(),false);assert.equal(h.entry.manual,true);assert.equal(h.entry.keepOpen,true);
 });
-test('automatic held cleanup permits immediate reconnect input while explicit resume alone releases automation',async t=>{
+test('reconnected input stays usable but resume cannot bypass a visible verification',async t=>{
   const h=deliverySetup(t);await h.deliver(h.session);await h.deliver(h.session,[deliveryCommand(h,'takeover','captcha_takeover')]);
   await h.deliver(h.session,[deliveryCommand(h,'down','input',{kind:'pointer',phase:'down',x:.2,y:.25,button:'left'})]);await h.deliver(null);
   const reconnect={...h.session,id:'reconnected'};await h.deliver(reconnect);
   assert.equal(h.win.isDestroyed(),false);assert.deepEqual(h.events.map(e=>e.value.type),['mousePressed','mouseReleased']);assert.equal(h.entry.manual,true);
   await h.deliver(reconnect,[deliveryCommand(h,'next-click','input',{kind:'click',x:.3,y:.4})]);assert.equal(h.acks().find(a=>a.id==='next-click')?.ok,true);
-  await h.deliver(reconnect,[deliveryCommand(h,'resume','observe')]);assert.equal(h.entry.manual,false);assert.equal(h.entry.keepOpen,true,'visible captcha keeps its original page');assert.equal(h.cancelled(),0);
+  await h.deliver(reconnect,[deliveryCommand(h,'resume','observe')]);assert.equal(h.acks().find(a=>a.id==='resume')?.ok,false);assert.equal(h.entry.manual,true);assert.equal(h.entry.keepOpen,true);
+  delete h.state.captcha;h.state.captchaDetected=false;
+  await h.deliver(reconnect,[deliveryCommand(h,'verified-resume','observe')]);assert.equal(h.entry.manual,false);assert.equal(h.entry.keepOpen,false);assert.equal(h.cancelled(),0);
 });
 
 for(const change of ['replaced','gone'])test(`a held pointer preserves its sender when the challenge is ${change} before release`,async t=>{
