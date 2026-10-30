@@ -95,3 +95,12 @@ test('disabled automatic solving or an absent caller key never starts a native s
     assert.equal(f.page.keepOpen,true);f.page.close();
   }
 });
+
+test('mask-only verification waits for an actionable frame before starting any configured solver',async t=>{
+  const f=fixture(t,async()=>({solved:false,manualRequired:true,reason:'offline_manual'}));
+  const frame=f.state.captcha;delete f.state.captcha;
+  await f.page.snapshot();await flush();
+  assert.equal(f.page.keepOpen,true);assert.equal(f.page.captchaSeen,true);assert.equal(f.invocations.length,0);
+  f.state.captcha=frame;await f.page.snapshot();await f.page.solverPromise;
+  assert.equal(f.invocations.length,1);
+});

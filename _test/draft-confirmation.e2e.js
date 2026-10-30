@@ -113,11 +113,61 @@ app.whenReady().then(async () => {
   await call("beginTask", { taskId: "native-failure", resume: true, baselineMessageIds: ["receipt"] });
   assert.equal((await call("readProgress")).state, "unknown");
   await evaluate(`document.querySelector('[data-message-id="response"]').__reactFiber$fixture.memoizedProps.message.final_status.message='Timeout'`);
-  assert.equal((await call("readProgress")).errorCode, "platform_rejected");
+  assert.equal((await call("readProgress")).state, "unknown");
   await evaluate(`(()=>{const reply=document.querySelector('[data-message-id="response"]');reply.__reactFiber$fixture.memoizedProps.message.final_status={};reply.innerHTML='<span data-testid="message_box_failed_icon" style="display:inline-block;width:20px;height:20px">!</span>';})()`);
-  assert.equal((await call("readProgress")).errorCode, "platform_rejected");
+  assert.equal((await call("readProgress")).state, "unknown");
   assert.equal((await call("peekGenerationConfirmation", expected)).kind, undefined);
-  report.checks.push("empty streaming reply remains pending; current terminal timeout and native failure icon stop confirmation");
+  report.checks.push("empty streaming, timeout and failure icon remain pending verification and stop confirmation until a settled reply");
+  await evaluate(`(()=>{window.reset();document.querySelectorAll('[data-message-id]').forEach(n=>n.remove());
+    const user=document.createElement('div');user.dataset.messageId='receipt';user.dataset.messageRole='user';document.body.append(user);
+    const reply=document.createElement('div');reply.dataset.messageId='expired';reply.dataset.messageRole='assistant';
+    reply.innerHTML='<section data-testid="preamble-elapsed" data-message-content-collapsed="true"><button aria-expanded="false">共用时 1 小时 0 分 47 秒</button><div hidden>模型：Seedance 2.5 总时长：30 秒 画面比例：16:9。分镜0—6秒、6—12秒、12—18秒、18—24秒、24—30秒。</div></section><p>方案已展示完毕，等待你确认后再开始生成。回复 "按要求生成" 即可启动，或告诉我需要调整的地方。</p>';
+    const section=reply.querySelector('section'),button=section.querySelector('button');
+    button.onclick=()=>{section.dataset.messageContentCollapsed='false';button.setAttribute('aria-expanded','true');section.querySelector('div').hidden=false;window.events.push({type:'expand-original-plan'});};document.body.append(reply);
+  })()`);
+  await call("beginTask", { taskId: "expired-original", resume: true, baselineMessageIds: ["receipt"] });
+  assert.equal((await call("peekGenerationConfirmation", expected)).ok, false);
+  assert.equal((await driver.expandGenerationPlan()).expanded, true);
+  assert.equal((await driver.expandGenerationPlan()).expanded, false);
+  assert.equal((await call("peekGenerationConfirmation", expected)).ok, true);
+  assert.equal((await evaluate("window.events.filter(e=>e.type==='expand-original-plan')")).length,1);
+  await evaluate(`document.querySelector('[data-message-id="expired"] section div').textContent='模型：Seedance 2.5 总时长15秒 比例16:9'`);
+  assert.equal((await call("peekGenerationConfirmation", expected)).ok, false);
+  report.checks.push("expired original plan expands once through the real Driver; only that same assistant supplies missing parameters");
+  await evaluate(`document.querySelector('[data-message-id="expired"]').textContent='视频生成未能启动，免费体验套餐不支持创作类视频生成，需要升级正式订阅。'`);
+  assert.equal((await call("readProgress")).state,"failed");
+  assert.equal((await call("peekGenerationConfirmation", expected)).ok,false);
+  report.checks.push("explicit startup/package rejection stops confirmation without buying, sending or borrowing another plan");
+  const nativeStore=require('../src/store'),nativePaths=require('../src/paths'),orchestrator=require('../src/orchestrator');
+  for(const hasInput of [true,false]){
+    await evaluate(`(()=>{document.body.innerHTML='<main><div data-message-id="choice-receipt" data-message-role="user">原草稿</div><div id="provider-plan" data-message-id="choice-plan" data-message-role="assistant"></div></main><div id="input-engine-container"><div id="main-chat" contenteditable="true" role="textbox"></div><button id="main-send" data-testid="chat_input_send_button">发送</button></div><section aria-labelledby="choice-heading"><h2 id="choice-heading">任意变化的确认标题</h2><label><input type="radio" name="choice">1 按要求生成<p>使用 Seedance 2.5 生成30秒16:9视频</p></label><label><input type="radio" name="choice">2 暂不生成</label>'+(${hasInput}?' <textarea id="panel-editor"></textarea><button id="panel-send" data-testid="chat_input_send_button">发送</button>':'')+'</section>';
+      window.choiceEvents=[];const reply=document.querySelector('#provider-plan');reply.textContent=${JSON.stringify(hasInput?'模型Seedance 2.5 总时长30秒 比例16:9，方案已就绪。':'是否按以上完整方案（Seedance 2.5 / 30秒 / 16:9）开始生成视频？')};
+      document.querySelector('#main-send').onclick=()=>{window.choiceEvents.push({type:'main-send',text:document.querySelector('#main-chat').innerText});reply.textContent='视频正在生成 1%';};
+      const button=document.querySelector('#panel-send');if(button)button.onclick=()=>{window.choiceEvents.push({type:'panel-send',text:document.querySelector('#panel-editor').value});reply.textContent='视频正在生成 1%';};
+      document.querySelector('section input').onchange=()=>{window.choiceEvents.push({type:'first-option'});reply.textContent='视频正在生成 1%';};})()`);
+    if(hasInput){
+      await call('beginTask',{taskId:'panel-binding',resume:true,baselineMessageIds:['choice-receipt']});
+      const confirmation={...expected,receiptUserMessageId:'choice-receipt'};confirmation.key=(await call('peekGenerationConfirmation',confirmation)).key;
+      assert.equal((await call('fillGenerationConfirmation',confirmation)).ok,true);
+      assert.equal(await evaluate('document.querySelector("#main-chat").innerText'),'');
+      await evaluate('(()=>{const editor=document.querySelector("#panel-editor");editor.replaceWith(editor.cloneNode(true));})()');
+      assert.equal((await call('sendGenerationConfirmation',confirmation)).ok,false,'a replaced editor must require a fresh binding');
+      assert.deepEqual(await evaluate('window.choiceEvents'),[]);
+      await evaluate('(()=>{const button=document.querySelector("#panel-send");button.disabled=true;document.querySelector("#panel-editor").oninput=()=>setTimeout(()=>{button.disabled=false;},350);})()');
+    }
+    orchestrator.stopAll();nativePaths.init({home:path.join(home,'native-choice-'+hasInput)});nativeStore.load();nativeStore.add({id:'fixture',name:'fixture'});
+    Object.assign(nativeStore.get().settings.orchestrator,{autoConfirm:true,autoDownload:false});
+    const task={id:'native-choice',studioTaskId:'factory-original',instanceId:'fixture',status:'submitted',receiptUserMessageId:'choice-receipt',conversationUrl:win.webContents.getURL(),baselineMessageIds:['choice-receipt'],baselineUrls:[],model:'seedance_v2.5',duration:30,ratio:'16:9',storyboardId:'board',shotId:'shot',log:[]};
+    nativeStore.get().tasks.push(task);nativeStore.get().storyboards.push({id:'board',shots:[{id:'shot'}]});nativeStore.save();
+    driver.navigate=async()=>{};driver.isLoggedIn=async()=>({loggedIn:true});orchestrator.init({resolveDraftDriver:async()=>driver});
+    await orchestrator.confirmSubmittedTaskOnce(task.id,{checkLease(){}});
+    assert.equal(await evaluate('document.querySelector("#main-chat").innerText'),'','must never write to the main chat behind a confirmation');
+    assert.deepEqual(await evaluate('window.choiceEvents'),hasInput?[{type:'panel-send',text:'按要求生成'}]:[{type:'first-option'}]);
+    await orchestrator.confirmSubmittedTaskOnce(task.id,{checkLease(){}});
+    assert.equal((await evaluate('window.choiceEvents')).length,1);
+    report.checks.push(hasInput?'factory text reply stays in the exact confirmation panel despite a visible main chat':'factory no-input panel overrides an assistant question and selects its first option exactly once');
+  }
+  orchestrator.stopAll();
   report.passed = true;
 }).catch(error => { report.error = error.stack; }).finally(() => {
   if (win && !win.isDestroyed()) win.destroy();
