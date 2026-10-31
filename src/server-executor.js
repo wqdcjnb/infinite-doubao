@@ -50,7 +50,7 @@ class NativeAdapter {
   registerDelivery(op,taskId,draftId,inst,driver,cancel,context) {
     const retained=this.deliveryPages.retained.get(op.accountId);
     const page=this.deliveryPages.register({accountId:op.accountId,operationId:op.id,batchId:op.batchId,taskId,draftId,environmentVersion:inst.studioEnvironment?.version,executorSessionId:this.sessionId,instance:inst,driver,checkLease:this.leaseGuard(op,context),cancel,
-      ...(!op.payload.validationRunId&&this.captchaConfig?.enabled&&this.captchaConfig.apiKey?{solveCaptcha:page=>this.solveCaptchaPage(page)}:{})});
+      ...(!op.payload?.validationRunId&&this.captchaConfig?.enabled&&this.captchaConfig.apiKey?{solveCaptcha:page=>this.solveCaptchaPage(page)}:{})});
     if(retained?.driver===driver&&retained.taskId===taskId&&retained.batchId===op.batchId&&retained.environmentVersion===inst.studioEnvironment?.version&&retained.executorSessionId===this.sessionId){
       page.keepOpen=retained.keepOpen;page.captchaSeen=retained.captchaSeen;page.humanTouched=retained.humanTouched;
       this.deliveryPages.retained.delete(op.accountId);
