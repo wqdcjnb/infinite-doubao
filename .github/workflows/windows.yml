@@ -1,0 +1,39 @@
+name: Windows packages
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.17.0'
+      - name: Full native regression suite
+        shell: pwsh
+        run: |
+          npm test *> windows-unit-tests.log
+          if ($LASTEXITCODE -ne 0) { Get-Content windows-unit-tests.log -Tail 150; exit $LASTEXITCODE }
+          Get-Content windows-unit-tests.log -Tail 12
+      - name: Build pinned Windows x64 application and installer
+        run: node build/windows.mjs
+      - name: Install delivered EXE and test both Chinese locales
+        run: node _test/windows-smoke.cjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: windows-x64
+          path: |
+            dist/windows-x64/DoubaoWorkshop-*-Setup.exe
+            dist/windows-x64/SHA256SUMS-windows-x64.txt
+            dist/windows-x64/windows-smoke.json
+            dist/windows-x64/smoke-*.json
+            dist/windows-x64/smoke-*.log
+            dist/windows-x64/installer-regression.log
+            dist/windows-x64/client-*.png
+            windows-unit-tests.log
+          if-no-files-found: warn
+          compression-level: 0

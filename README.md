@@ -50,7 +50,7 @@ DM_TEST_RUNTIME='/absolute/path/豆包工坊.app/Contents/MacOS/豆包工坊' \
 - `tools/asar.mjs`：无需第三方依赖的 ASAR 打包工具。
 - `_test/`：单元测试与隔离集成验收。
 
-Windows 构建沿用 `build/build.mjs` 和 `build/installer.mjs`；macOS 构建使用 `npm run pack:mac`。构建环境与签名配置参见相应脚本及 [更新发布说明](docs/updates.md)。
+Windows x64 在 Windows 本机运行 `npm run pack:win`，下载并校验固定版本的 Electron，再构建单文件安装器；精简客户端不需要 Python 或独立素材处理组件。macOS 构建使用 `npm run pack:mac`。构建环境与签名配置参见相应脚本及 [更新发布说明](docs/updates.md)。
 
 独立服务器执行端仍通过显式 `--studio-executor` 入口启动；其共用的账号窗口、页面自动化及持久化模块保留，未随桌面网页版删除。协议参见 [服务器执行器](docs/server-executor.md)。
 

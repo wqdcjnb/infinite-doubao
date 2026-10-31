@@ -20,6 +20,7 @@
 !/build/activate-update.cjs
 !/build/install-update-server.ps1
 !/build/mac.mjs
+!/build/windows.mjs
 !/build/mac-dependencies.json
 !/build/components.mjs
 !/.github/

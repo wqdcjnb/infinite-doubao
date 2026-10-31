@@ -24,7 +24,7 @@ function fixture(t,solver,options={}) {
   const adapter=new NativeAdapter({journal:{},client:{},accounts:{},sessionId:'offline-session',captchaConfig,
     captchaSolver:async options=>{invocations.push(options);return solver(options);}});
   t.after(()=>adapter.deliveryPages.closeAll());
-  const operation={id:'offline-operation',accountId:'offline-account',batchId:'offline-batch',payload:{}};
+  const operation={id:'offline-operation',accountId:'offline-account',batchId:'offline-batch'};
   const instance={id:'offline-instance',studioEnvironment:{version:'offline-environment'}};
   const page=adapter.registerDelivery(operation,'offline-task','offline-draft',instance,driver,error=>cancelled.push(error),
     {checkLease:()=>{checks++;if(!leaseCurrent)throw Error('fixture lease expired');}});

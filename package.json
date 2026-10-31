@@ -13,6 +13,7 @@
     "pack:mac": "node build/mac.mjs",
     "test": "node _test/run-tests.cjs",
     "installer": "node build/installer.mjs",
-    "publish:lan": "node build/publish-update.mjs --upload"
+    "publish:lan": "node build/publish-update.mjs --upload",
+    "pack:win": "node build/windows.mjs"
   }
 }

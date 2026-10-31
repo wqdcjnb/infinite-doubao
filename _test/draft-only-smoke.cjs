@@ -66,7 +66,12 @@ async function call(channel, ...args) {
   for (const channel of ["dm:template:submit", "dm:web:open", "dm:server:start", "dm:asset:grid", "dm:jianying:edit"]) {
     await assert.rejects(c.eval(`DM.call(${JSON.stringify(channel)})`), /No handler registered/);
   }
-  const listeners = execFileSync("lsof", ["-nP", "-a", "-p", String(child.pid), "-iTCP", "-sTCP:LISTEN"], { encoding: "utf8" });
+  const listeners = process.platform === "win32"
+    ? execFileSync("netstat", ["-ano", "-p", "tcp"], { encoding: "utf8" }).split(/\r?\n/).filter(line => {
+      const fields = line.trim().split(/\s+/);
+      return fields.at(-1) === String(child.pid) && fields.includes("LISTENING");
+    }).join("\n")
+    : execFileSync("lsof", ["-nP", "-a", "-p", String(child.pid), "-iTCP", "-sTCP:LISTEN"], { encoding: "utf8" });
   assert.ok(!/:17823\b|:17825\b/.test(listeners), listeners);
   report.checks.push("Only draft workflow navigation; no retired IPC or local web/API listener, including legacy startup flags");
 
