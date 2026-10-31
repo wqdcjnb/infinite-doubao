@@ -37,7 +37,7 @@ try {
   for (const language of ["zh-CN", "zh-HK"]) {
     let output;
     try {
-      output = run(process.execPath, [path.join(__dirname, "draft-only-smoke.cjs")], { env: { ...process.env, DM_TEST_RUNTIME: path.join(install, pkg.productName + ".exe"), DM_TEST_OUTPUT: out, DM_TEST_FIXTURE_LANGUAGE: language, DM_TEST_CDP_PORT: "9261" } });
+      output = run(process.execPath, [path.join(__dirname, "draft-only-smoke.cjs")], { env: { ...process.env, DM_TEST_RUNTIME: path.join(install, pkg.productName + ".exe"), DM_TEST_OUTPUT: out, DM_TEST_FIXTURE_LANGUAGE: language, DM_TEST_FIXTURE_BOOT_DELAY: "500", DM_TEST_CDP_PORT: "9261" } });
     } catch (error) {
       fs.writeFileSync(path.join(out, `smoke-${language}.log`), String(error.stdout || "") + String(error.stderr || ""));
       throw error;

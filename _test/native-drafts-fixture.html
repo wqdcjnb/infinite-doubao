@@ -1,4 +1,4 @@
-<!doctype html><html><body>
+<!doctype html><html><body hidden>
 <img alt="avatar" class="avatar" width="30" height="30"><span>我的创作</span>
 <button id="new-work">新工作任务</button><button id="new-chat">新对话</button>
 <aside data-testid="draft-conversation-section"></aside><nav id="recent"></nav><div id="messages"></div>
@@ -70,6 +70,9 @@ document.querySelector('form').onsubmit=async e=>{e.preventDefault();send.disabl
 render();const previous=saved.conversations.find(c=>location.pathname==='/chat/'+c.id);if(previous)show(previous);
 if(new URLSearchParams(location.search).has('no-composer'))editor.remove();
 window.fixtureReady=true;
+// Match an app mounting its controls after storage initialization: clicks on
+// pre-rendered, unwired buttons must not race the IndexedDB bootstrap.
+document.body.hidden=false;
 if(window.fixtureSidebarDelay){const parent=box.parentNode,next=box.nextSibling;box.remove();setTimeout(()=>parent.insertBefore(box,next),window.fixtureSidebarDelay);}
 })();
 </script></body></html>

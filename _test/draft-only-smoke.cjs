@@ -12,10 +12,15 @@ const fixtureLabel = value => traditional ? value.replaceAll("云电脑", "雲�
 fs.mkdirSync(output, { recursive: true });
 const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "doubao-draft-only-smoke-")));
 process.env.DM_TEST_CDP_PORT ||= "9268";
-const report = { home, runtime, language: traditional ? "zh-HK" : "zh-CN", checks: [], sends: [], errors: [] };
+const report = { home, runtime, language: traditional ? "zh-HK" : "zh-CN", checks: [], sends: [], errors: [], fixtureEvents: [] };
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 let child, c;
 const server = http.createServer((req, res) => {
+  if (req.url === "/fixture-event") {
+    let data = ""; req.on("data", chunk => { data += chunk; });
+    req.on("end", () => { report.fixtureEvents.push(JSON.parse(data)); res.end("ok"); });
+    return;
+  }
   if (req.url === "/submit") {
     let data = "";
     req.on("data", chunk => { data += chunk; });
@@ -29,7 +34,10 @@ const server = http.createServer((req, res) => {
   if (req.url === "/result-ready") { res.setHeader("Content-Type", "application/json"); return res.end("false"); }
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Set-Cookie": "sessionid=local-fixture-only; Path=/" });
   const fixture = fs.readFileSync(path.join(__dirname, "native-drafts-fixture.html"), "utf8");
-  const seed = "<script>if(!localStorage.getItem('fixture'))localStorage.setItem('fixture','{\"drafts\":[],\"conversations\":[]}');" + fs.readFileSync(path.join(__dirname, "native-drafts-indexeddb.js"), "utf8") + "</script>";
+  const bootDelay = Math.max(0, Number(process.env.DM_TEST_FIXTURE_BOOT_DELAY) || 0);
+  const startup = `document.addEventListener('click',e=>{if(e.target.id==='new-work')fetch('/fixture-event',{method:'POST',body:JSON.stringify({event:'new-work',ready:!!window.fixtureReady,at:Date.now()})});},true);`;
+  const gate = bootDelay ? `window.fixtureDraftStore=window.fixtureDraftStore.then(async store=>{await new Promise(r=>setTimeout(r,${bootDelay}));return store;});` : "";
+  const seed = "<script>if(!localStorage.getItem('fixture'))localStorage.setItem('fixture','{\"drafts\":[],\"conversations\":[]}');" + startup + fs.readFileSync(path.join(__dirname, "native-drafts-indexeddb.js"), "utf8") + gate + "</script>";
   res.end(fixtureLabel(fixture.replace("<script>", seed + "<script>")));
 });
 async function wait(check, timeout = 30000) {
@@ -100,7 +108,11 @@ async function call(channel, ...args) {
   await fill("#draftAccount", "smoke-account");
   await c.eval("if(!document.querySelector('#draftSelectAll').checked)document.querySelector('#draftSelectAll').click()");
   await click("#draftSave");
-  await wait(async () => { const drafts = await call("dm:drafts"); return drafts.length === 2 && drafts.every(draft => draft.nativeState === "saved"); }, 90000);
+  await wait(async () => {
+    const drafts = await call("dm:drafts"), failed = drafts.find(draft => draft.nativeError);
+    if (failed) throw Error(`Draft import failed: ${failed.nativeError}`);
+    return drafts.length === 2 && drafts.every(draft => draft.nativeState === "saved");
+  }, 90000);
   assert.equal(report.sends.length, 0);
   await wait(() => c.eval("!document.querySelector('#draftRefresh').disabled"));
   await click("#draftImported"); await click("#draftSelectAll");
