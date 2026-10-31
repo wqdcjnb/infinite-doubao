@@ -406,7 +406,7 @@ async function dispatchOne(sbId, opts = {}) {
   const fixed = fixedId ? store.find(fixedId) : null;
   if (task.studioTaskId && task.submittedAt && fixed && (
     store.get().taskDrafts.some(draft => draft.instanceId === fixed.id && draft.template?.studioTaskId && draft.studioSendOnly !== true && !draft.submissionRecord) ||
-    store.get().tasks.some(other => other.instanceId === fixed.id && other.studioTaskId && other.studioSendOnly !== true && other.status === "submitted")
+    store.get().tasks.some(other => other.instanceId === fixed.id && other.studioTaskId && other.studioSendOnly !== true && other.status === "submitted" && !(other.studioValidationEndpoint?.runId && ["first_confirmation","confirmation_unknown","generation_observed"].includes(other.studioValidationEndpoint.state)))
   )) {
     const waitReason = "等待原账号完成草稿发送和生成确认，再取回视频结果";
     patchTask(task.id, { stage: "waiting_account", waitReason });
@@ -590,9 +590,10 @@ function watchDraftLease(operation, checkLease) {
   timer.unref?.();
   return () => clearInterval(timer);
 }
-async function confirmSubmittedTaskOnce(taskId, { checkLease, onDeliveryPage } = {}) {
+async function confirmSubmittedTaskOnce(taskId, { checkLease, onDeliveryPage, stopAfterFirstConfirmation = false, recoveryDriver } = {}) {
   const task = getTask(taskId);
   if (!task?.studioTaskId || !checkLease) throw new Error("生成确认需要当前工厂任务租约");
+  const verifySent=stopAfterFirstConfirmation&&Object.values(task.confirmationIntents||{}).some(intent=>intent.state==='sent');
   if (task.studioSendOnly || !task.receiptUserMessageId || !task.conversationUrl || task.submissionUncertain) return;
   const inst = store.find(task.instanceId);
   if (!inst || !deps.resolveDraftDriver) throw new Error("原账号确认页面未就绪");
@@ -603,8 +604,9 @@ async function confirmSubmittedTaskOnce(taskId, { checkLease, onDeliveryPage } =
     if(!activity)return;
     for(;;){
       check();const frame=await activity.snapshot();check();
+      if(stopAfterFirstConfirmation&&(frame.captchaDetected||activity.humanTouched)&&!task.studioValidationRecoveryRequired)patchTask(task.id,{studioValidationRecoveryRequired:true},true);
       if(frame.captchaStateKnown&&!frame.captchaDetected&&!activity.inputHeld&&!activity.inputInFlight){
-        if(await activity.observe({taskId:activity.taskId,pageId:activity.pageId},{automatic:true}))return;
+        if(await activity.observe({taskId:activity.taskId,pageId:activity.pageId},{automatic:true})){if(stopAfterFirstConfirmation&&task.studioValidationRecoveryRequired)patchTask(task.id,{studioValidationRecoveryRequired:false},true);return;}
       }
       await new Promise(resolve=>setTimeout(resolve,100));
     }
@@ -617,13 +619,18 @@ async function confirmSubmittedTaskOnce(taskId, { checkLease, onDeliveryPage } =
   };
   try {
     stopWatch = watchDraftLease(operation, checkLease);
-      driver = await draftStep(operation, "原对话页面", () => deps.resolveDraftDriver(inst, { signal: operation.controller.signal }));
+      if(recoveryDriver){
+        if(!recoveryDriver||recoveryDriver.webContents?.getURL?.()!==task.conversationUrl||recoveryDriver.resumeAutoClose?.(operation.controller.signal)!==true)throw Error("原验证页面不可恢复，保留确认记录待核验");
+        driver=recoveryDriver;pinned=true;
+      }else{if(verifySent||stopAfterFirstConfirmation&&task.studioValidationRecoveryRequired)throw Error("原验证页面不可恢复，保留确认记录待核验");driver = await draftStep(operation, "原对话页面", () => deps.resolveDraftDriver(inst, { signal: operation.controller.signal }));}
       activity=onDeliveryPage?.({driver,cancel:error=>operation.controller.abort(error)});operation.activity=activity;
       check();
-      await draftStep(operation, "原对话加载", () => driver.navigate(task.conversationUrl)); pinned=true;check();
+      if(!recoveryDriver)await draftStep(operation, "原对话加载", () => driver.navigate(task.conversationUrl)); pinned=true;check();
       const login = await draftStep(operation, "原对话登录检查", () => driver.waitForLogin ? driver.waitForLogin({ timeoutMs: 30000, check }) : driver.isLoggedIn());
       check(); if (login?.loggedIn !== true) return;
-      await waitHuman();check();await draftStep(operation, "原对话跟踪", () => beginTracking(driver,task,inst,true));check();
+      await waitHuman();check();
+      if(verifySent)return {validationVerified:true};
+      await draftStep(operation, "原对话跟踪", () => beginTracking(driver,task,inst,true));check();
       const initial=observeProgress(await draftStep(operation, "原对话状态", () => driver.readProgress()));check();if(initial==="failed")return;
       if(initial!=="started"){
         activity?.setStage?.("waiting_receipt");
@@ -643,6 +650,7 @@ async function confirmSubmittedTaskOnce(taskId, { checkLease, onDeliveryPage } =
           if(confirmation?.sent||confirmation?.blocked||confirmation?.recorded)break;
           if(attempt<39)await new Promise(resolve=>setTimeout(resolve,250));
         }
+        if(stopAfterFirstConfirmation && (confirmation?.sent || confirmation?.recorded)){await waitHuman();check();return {validationVerified:confirmation?.sent===true};}
         if(confirmation?.sent){
           let deadline=Date.now()+120000;
           for(;;){
@@ -654,11 +662,13 @@ async function confirmSubmittedTaskOnce(taskId, { checkLease, onDeliveryPage } =
         }
       }
       await waitHuman();check();
+      if(stopAfterFirstConfirmation)return;
       if (task.generationObservedAt || Object.values(task.confirmationIntents || {}).some(intent => intent.state === "sent")) {
         patchTask(task.id, { status: "queued", stage: "generating" }, true);
         storyboard.updateShot(task.storyboardId, task.shotId, { status: "queued" });
       }
   } catch(error) {
+    if(stopAfterFirstConfirmation&&activity&&(activity.humanTouched||activity.captchaSeen))patchTask(task.id,{studioValidationRecoveryRequired:true},true);
     if(activity&&(activity.humanTouched||activity.captchaSeen||Object.keys(task.confirmationIntents||{}).length)){activity.keepOpen=true;driver?.preserve?.();}
     throw error;
   } finally {
@@ -720,8 +730,9 @@ async function saveDrafts(ids, options = {}) {
       const step = async (label, run, timeoutMs) => {
         emit("draft", { message: label + "…", instanceId: inst.id });
         log.info("draft-save-step", { instanceId: inst.id, draftId: draft.id, stage: label });
-        const result = await draftStep(child, label, run, timeoutMs);
+        const result = await draftStep(child, label, () => child.activity ? child.activity.runAutomation(run) : run(), timeoutMs);
         checkAction(); child.controller.signal.throwIfAborted();
+        if(child.activity){await child.activity.snapshot();await child.activity.waitForResume();checkAction();}
         return requirePage(result);
       };
       try {
@@ -735,7 +746,8 @@ async function saveDrafts(ids, options = {}) {
           if (child.controller.signal.aborted) { opened.close?.(); child.controller.signal.throwIfAborted(); }
           return opened;
         }) : accountDriver;
-        releaseObservation = options.onImportPage?.({ draft, driver });
+        releaseObservation = options.onImportPage?.({ draft, driver, cancel:error=>child.controller.abort(error) });
+        child.activity=releaseObservation?.activity;
         if (driver !== accountDriver && driver.prepareDraftImport) await step(`正在激活草稿输入区 ${position}`, () => driver.prepareDraftImport());
         await step(`正在检查草稿账号 ${position}`, async () => {
           const state = driver.waitForLogin ? await driver.waitForLogin({ timeoutMs: 30000, check: () => { checkAction(); child.controller.signal.throwIfAborted(); } }) : await driver.isLoggedIn();
@@ -802,11 +814,12 @@ async function saveDrafts(ids, options = {}) {
         errors.push({ id: draft.id, draftNumber: draft.draftNumber || drafts.numberFor(draft.id), name: draft.template.name, message });
         emit("draft", { message: `草稿 ${draft.draftNumber || drafts.numberFor(draft.id)} 导入失败：${message}；已跳过，继续下一条（${position}）`, instanceId: inst.id });
       } finally {
+        const keepOpen=child.activity?.keepOpen===true;if(keepOpen)driver?.preserve?.();
         releaseObservation?.();
         operation.controller.signal.removeEventListener("abort", abort);
         // The signal closes a dedicated page, including any late upload callbacks.
         child.controller.abort(new Error("本条草稿导入已结束"));
-        if (driver) {
+        if (driver && !keepOpen) {
           void driver.call("cancelNativeDraftImport").catch(() => {});
           if (driver !== accountDriver) driver.close?.();
         }

@@ -48,8 +48,14 @@ class NativeAdapter {
     this.captchaConfig=captchaConfig;this.captchaSolver=captchaSolver;
   }
   registerDelivery(op,taskId,draftId,inst,driver,cancel,context) {
-    return this.deliveryPages.register({accountId:op.accountId,operationId:op.id,batchId:op.batchId,taskId,draftId,environmentVersion:inst.studioEnvironment?.version,executorSessionId:this.sessionId,instance:inst,driver,checkLease:this.leaseGuard(op,context),cancel,
-      ...(this.captchaConfig?.enabled&&this.captchaConfig.apiKey?{solveCaptcha:page=>this.solveCaptchaPage(page)}:{})});
+    const retained=this.deliveryPages.retained.get(op.accountId);
+    const page=this.deliveryPages.register({accountId:op.accountId,operationId:op.id,batchId:op.batchId,taskId,draftId,environmentVersion:inst.studioEnvironment?.version,executorSessionId:this.sessionId,instance:inst,driver,checkLease:this.leaseGuard(op,context),cancel,
+      ...(!op.payload?.validationRunId&&this.captchaConfig?.enabled&&this.captchaConfig.apiKey?{solveCaptcha:page=>this.solveCaptchaPage(page)}:{})});
+    if(retained?.driver===driver&&retained.taskId===taskId&&retained.batchId===op.batchId&&retained.environmentVersion===inst.studioEnvironment?.version&&retained.executorSessionId===this.sessionId){
+      page.keepOpen=retained.keepOpen;page.captchaSeen=retained.captchaSeen;page.humanTouched=retained.humanTouched;
+      this.deliveryPages.retained.delete(op.accountId);
+    }
+    return page;
   }
   async solveCaptchaPage(page) {
     if(page.manual||page.pauseRequested)return {solved:false,manualRequired:true,reason:'human_control'};
@@ -107,7 +113,9 @@ class NativeAdapter {
     return task;
   }
   async import(op,recover=false,context={}) {
-    const snapshot=requireTask(op),inst=this.account(op),id=stableId('',`${op.accountId}/${snapshot.id}`),templateId=stableId('studio-template-',snapshot.id);
+    const snapshot=requireTask(op);
+    if((snapshot.validationRunId!==undefined||op.payload.validationRunId!==undefined)&&(!/^[A-Za-z0-9_-]{8,80}$/.test(snapshot.validationRunId||'')||snapshot.validationRunId!==op.payload.validationRunId))throw Error('validation import scope required');
+    const inst=this.account(op),id=stableId('',`${op.accountId}/${snapshot.id}`),templateId=stableId('studio-template-',snapshot.id);
     const binding=this.journal.task(snapshot.id);
     if(binding && binding.accountId!==op.accountId)throw new Error('task account binding mismatch');
     const snapshotHash=crypto.createHash('sha256').update(JSON.stringify(snapshot,(key,value)=>key==='downloadUrl'?undefined:value)).digest('hex');
@@ -124,15 +132,17 @@ class NativeAdapter {
       const attachments=await downloadReferences(snapshot.references||[],path.join(P.dir('attachments'),id),this.client);
       const template={id:templateId,studioTaskId:snapshot.id,name:`${snapshot.userName||'工作台'} · ${snapshot.id}`,prompt:snapshot.prompt,...snapshot.parameters,attachments};
       templates.validateSnapshot(template);
-      this.journal.bindTask(snapshot.id,{accountId:op.accountId,draftId:id,templateId,snapshotHash});
+      this.journal.bindTask(snapshot.id,{accountId:op.accountId,draftId:id,templateId,snapshotHash,...(snapshot.validationRunId?{validationRunId:snapshot.validationRunId}:{})});
       draft={id,draftNumber:drafts.numberFor(id),template,executionMode:'work',createdAt:new Date().toISOString(),...(op.payload.sendOnly===true?{studioSendOnly:true}:{})};
       store.get().taskDrafts.push(draft);durableSave();
     }
     const check=this.leaseGuard(op,context);
-    await queue.saveDrafts([draft.id],{instanceId:inst.id,checkLease:check,expectedAccountScope:op.payload.action==='resume_unwritten_import'?op.payload.accountScope:undefined,onImportPage:({driver})=>{
+    await queue.saveDrafts([draft.id],{instanceId:inst.id,checkLease:check,expectedAccountScope:op.payload.action==='resume_unwritten_import'?op.payload.accountScope:undefined,onImportPage:({driver,cancel})=>{
       if(!driver.window)return;
       const page={instance:inst,window:driver.window,check};this.importPages.set(op.accountId,page);
-      return ()=>{if(this.importPages.get(op.accountId)===page)this.importPages.delete(op.accountId);};
+      const release=()=>{release.activity?.close();if(this.importPages.get(op.accountId)===page)this.importPages.delete(op.accountId);};
+      if(snapshot.validationRunId)release.activity=this.registerDelivery(op,snapshot.id,draft.id,inst,driver,cancel,context);
+      return release;
     }});
     draft=drafts.list().find(d=>d.id===draft.id);
     if(draft?.nativeState!=='saved' || !draft.nativeBinding)throw new Error('native draft binding missing');
@@ -140,6 +150,7 @@ class NativeAdapter {
     return {outcome:'success',receipt:{draftId:draft.id,nativeBinding:draft.nativeBinding}};
   }
   sendReceipt(op,tasks) {
+    this.validationSendScope(op,tasks);
     if(op.payload.batchSize===50&&op.payload.sendOnly===false)return this.normalSendReceipt(op,tasks);
     const items=tasks.map(snapshot=>{
       try {
@@ -303,7 +314,16 @@ class NativeAdapter {
     if(recover)return this.realContinuationReceipt(op);
     await this.send(op,false,context);check();return this.realContinuationReceipt(op);
   }
+  validationSendScope(op,tasks) {
+    if(!Array.isArray(tasks)){if(op.payload.validationRunId)throw Error('validation send scope mismatch');return;}
+    if(!op.payload.validationRunId&&!tasks?.some(task=>task.validationRunId||this.journal.task(task.id)?.validationRunId))return;
+    const source=op.kind==='account'&&this.journal.get(op.payload.originalOperationId)?.operation;
+    const full=op.kind==='send'&&op.payload.batchSize===50&&tasks.length===50;
+    const continuation=op.kind==='account'&&op.payload.action==='continue_unstarted_drafts'&&source?.kind==='send'&&source.accountId===op.accountId&&source.batchId===op.batchId&&source.payload.validationRunId===op.payload.validationRunId&&tasks.length>0&&tasks.length<=50&&tasks.every(task=>source.payload.tasks?.some(original=>original.id===task.id));
+    if(!/^[A-Za-z0-9_-]{8,80}$/.test(op.payload.validationRunId||'')||!full&&!continuation||tasks.some(task=>{const binding=this.journal.task(task.id);return task.validationRunId!==op.payload.validationRunId||binding?.validationRunId!==op.payload.validationRunId||binding?.accountId!==op.accountId||!matchesImportSnapshotHash(task,binding.snapshotHash)||!sameNativeBinding(binding.nativeBinding,task);}))throw Error('validation send scope mismatch');
+  }
   async send(op,recover=false,context={}) {
+    this.validationSendScope(op,op.payload.tasks);
     const inst=this.account(op),tasks=op.payload.tasks;
     if(!Array.isArray(tasks) || !tasks.length || tasks.length>100)throw new Error('invalid send batch');
     const ids=tasks.map(task=>{
@@ -344,16 +364,46 @@ class NativeAdapter {
     }
     return tasks.length?{outcome:'progress',receipt:{tasks}}:null;
   }
+  validationEndpoint(op,task,receipt) {
+    if(op.payload.validationStopAfterConfirmation!==true)return null;
+    const intents=Object.values(task.confirmationIntents||{}),sent=intents.some(intent=>intent.state==='sent');
+    if(task.studioValidationEndpoint&&task.studioValidationEndpoint.runId!==op.payload.validationRunId)throw Error('validation checkpoint scope mismatch');
+    if(!intents.length&&!confirmed(task))return null;
+    if(sent&&task.studioValidationEndpoint?.state!=='first_confirmation')return null;
+    const state=sent?'first_confirmation':intents.length?'confirmation_unknown':'generation_observed';
+    if(!sent)queue.patchTask(task.id,{status:'submitted',studioValidationEndpoint:{runId:op.payload.validationRunId,state}},true);
+    return {outcome:sent?'success':'uncertain',receipt:{...receipt,confirmed:sent,status:sent?'confirmation_sent':'running',validationRunId:op.payload.validationRunId,validationEndpoint:sent?'first_confirmation':intents.length?'confirmation_unknown':'generation_observed'}};
+  }
   async track(op,context={}) {
+    const snapshot=op.payload.task,binding=this.journal.task(op.taskId||snapshot?.id);
+    const validation=Boolean(op.payload.validationStopAfterConfirmation||op.payload.validationRunId||snapshot?.validationRunId||binding?.validationRunId);
+    if(validation){
+      const {localTaskId,conversationId,...original}=snapshot||{};
+      if(op.payload.validationStopAfterConfirmation!==true||!/^[A-Za-z0-9_-]{8,80}$/.test(op.payload.validationRunId||'')||snapshot?.id!==op.taskId||snapshot.validationRunId!==op.payload.validationRunId||binding?.validationRunId!==op.payload.validationRunId||binding?.accountId!==op.accountId||!matchesImportSnapshotHash(original,binding.snapshotHash)||!sameNativeBinding(binding.nativeBinding,original))throw Error('validation original import scope mismatch');
+    }
     const inst=this.account(op);
     const taskId=op.taskId||op.payload.task?.id,task=this.local(taskId,op.accountId);
     if(!task)return {outcome:'uncertain',receipt:{taskId,status:'running',error:'original local task missing'}};
+    if(validation&&(!originalMessage(task)||snapshot.localTaskId!==task.id||snapshot.conversationId!==task.conversationUrl))throw Error('validation original message scope mismatch');
     const receipt={taskId,localTaskId:task.id,conversationId:task.conversationUrl,...(task.receiptUserMessageId?{userMessageId:task.receiptUserMessageId}:{}),confirmed:confirmed(task)};
+    const endpoint=this.validationEndpoint(op,task,receipt);if(endpoint)return endpoint;
+    let recoveryDriver;
+    if(validation&&(task.studioValidationRecoveryRequired||this.deliveryPages.retained.has(op.accountId)||Object.values(task.confirmationIntents||{}).some(intent=>intent.state==='sent'))){
+      const page=this.deliveryPages.retained.get(op.accountId);
+      if(!page||page.taskId!==taskId||page.batchId!==op.batchId||page.draftId!==binding.draftId||page.executorSessionId!==this.sessionId||page.environmentVersion!==inst.studioEnvironment?.version||page.driver.window.isDestroyed?.()||page.driver.webContents?.getURL?.()!==task.conversationUrl||page.inputHeld||page.inputInFlight||page.pauseRequested)return {outcome:'uncertain',receipt:{...receipt,status:'running',validationEndpoint:'confirmation_verification_unknown'}};
+      recoveryDriver=page.driver;
+    }
     if(task.studioSendOnly || op.payload.sendOnly===true)return {outcome:'progress',receipt:{...receipt,confirmed:false,status:'running'}};
     if((!confirmed(task)||task.status==='submitted') && ['submitted','queued'].includes(task.status) && task.receiptUserMessageId) {
-      await queue.confirmSubmittedTaskOnce(task.id,{checkLease:this.leaseGuard(op,context),onDeliveryPage:({driver,cancel})=>this.registerDelivery(op,taskId,this.journal.task(taskId)?.draftId,inst,driver,cancel,context)});
+      const confirmation=await queue.confirmSubmittedTaskOnce(task.id,{stopAfterFirstConfirmation:validation,recoveryDriver,checkLease:this.leaseGuard(op,context),onDeliveryPage:({driver,cancel})=>this.registerDelivery(op,taskId,this.journal.task(taskId)?.draftId,inst,driver,cancel,context)});
       receipt.confirmed=confirmed(task);
+      if(validation&&confirmation?.validationVerified&&Object.values(task.confirmationIntents||{}).some(intent=>intent.state==='sent'))queue.patchTask(task.id,{status:'submitted',studioValidationEndpoint:{runId:op.payload.validationRunId,state:'first_confirmation',verifiedAt:new Date().toISOString()}},true);
+      const endpoint=this.validationEndpoint(op,task,receipt);if(endpoint)return endpoint;
       if(task.status!=='failed' && !receipt.confirmed)return {outcome:'progress',receipt:{...receipt,status:'running'}};
+    }
+    if(validation){
+      if(task.status==='failed')return {outcome:['generation_failed','quota'].includes(task.errorCode)?'failure':'uncertain',receipt:{...receipt,status:['generation_failed','quota'].includes(task.errorCode)?'failed':'running',error:'Original validation requires review'}};
+      return {outcome:receipt.confirmed?'uncertain':'progress',receipt:{...receipt,status:'running',validationEndpoint:receipt.confirmed?'confirmation_verification_unknown':undefined}};
     }
     if(task.status==='succeeded') {
       const files=task.result?.files||[];
@@ -562,7 +612,7 @@ async function start() {
       pages.add(win);const close=()=>{if(!win.isDestroyed())win.destroy();};
       win.on('closed',()=>{pages.delete(win);signal?.removeEventListener('abort',close);});signal?.addEventListener('abort',close,{once:true});
       win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
-      try {await win.loadURL('about:blank');await environment.prepareStudioWindow(win,inst);await win.loadURL(store.DEFAULT_URL);const instanceDriver=await driver.open(inst,{webContents:win.webContents});instanceDriver.window=win;instanceDriver.close=close;instanceDriver.preserve=()=>signal?.removeEventListener('abort',close);instanceDriver.resumeAutoClose=()=>{if(signal?.aborted)return false;signal?.addEventListener('abort',close,{once:true});return true;};return instanceDriver;} catch(error){close();throw error;}
+      try {await win.loadURL('about:blank');await environment.prepareStudioWindow(win,inst);await win.loadURL(store.DEFAULT_URL);const instanceDriver=await driver.open(inst,{webContents:win.webContents});instanceDriver.window=win;instanceDriver.close=close;instanceDriver.preserve=()=>signal?.removeEventListener('abort',close);instanceDriver.resumeAutoClose=nextSignal=>{if(nextSignal){signal?.removeEventListener('abort',close);signal=nextSignal;}if(signal?.aborted)return false;signal?.addEventListener('abort',close,{once:true});return true;};return instanceDriver;} catch(error){close();throw error;}
     },findWebContents:inst=>accounts.find(inst)});
   queue.recoverTemplateTasks();queue.pause('');
   const journal=new Journal(path.join(cfg.stateDir,'studio-journal.json')),client=new StudioClient(cfg);
