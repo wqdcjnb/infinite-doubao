@@ -26,26 +26,6 @@ function rendererFunction(name) {
   return source[0];
 }
 
-test("接口设置只提交用户修改字段，端口和启停不再被运行状态覆盖", async () => {
-  const submitted = [];
-  const messages = [];
-  const context = vm.createContext({
-    V: { server: { port: 17823, running: true } },
-    DM: { saveSettings: async (patch) => { submitted.push(JSON.parse(JSON.stringify(patch))); return patch; } },
-    guard: async (fn) => fn(), refreshBadges: async () => {}, refreshSettings: async () => {}, say: (message) => messages.push(message)
-  });
-  vm.runInContext(rendererFunction("patchServer"), context);
-  await context.patchServer("port", 19000);
-  await context.patchServer("enabled", false);
-  context.V.server = null;
-  await context.patchServer("enabled", true);
-  assert.deepEqual(submitted, [{ server: { port: 19000 } }, { server: { enabled: false } }, { server: { enabled: true } }]);
-  assert.equal(messages.length, 3);
-  context.DM.saveSettings = async () => { throw new Error("端口占用"); };
-  await assert.rejects(context.patchServer("port", 19001), /端口占用/);
-  assert.equal(messages.length, 3, "保存失败不出现成功提示");
-});
-
 test("旧自定义模板命名设置迁移后真正用于下载命名", () => {
   store.get().settings.naming = "template";
   store.get().settings.namingTemplate = "{account}_{index}_{prompt}";
@@ -109,7 +89,7 @@ test("任务队列显示执行阶段、进度、等待原因及未下载提示",
   assert.equal(context.taskStatusText({ status: "running", stage: "downloading" }), "下载并检查成片");
   assert.equal(context.taskStatusText({ status: "failed", stage: "generating", progress: 42 }), "失败");
   assert.equal(context.taskResultText({ waitReason: "请先登录账号" }), "请先登录账号");
-  assert.match(context.taskResultText({ result: { downloadSkipped: true } }), /尚未保存到素材库/);
+  assert.match(context.taskResultText({ result: { downloadSkipped: true } }), /尚未保存到视频目录/);
   assert.match(context.taskResultText({ result: { files: ["C:\\audit\\video.mp4"], unwatermarked: false } }), /尚未确认为无水印.*video.mp4/);
 });
 

@@ -40,7 +40,7 @@ beforeEach(() => {
       readProgress: async () => { calls.push({ method: "result" }); return await hook("result", {}, { taskId }) || { state: "done", mediaUrls: [`https://fixture.invalid/${index}/${taskId}.mp4`] }; }
     };
   };
-  queue.init({ sessionFor: () => ({ cookies: { get: async () => [{ name: "sessionid" }] } }), resolveDriver, resolveDraftDriver: async inst => {
+  queue.init({ draftsOnly: false, sessionFor: () => ({ cookies: { get: async () => [{ name: "sessionid" }] } }), resolveDriver, resolveDraftDriver: async inst => {
     const driver = await resolveDriver(inst), close = driver.close;
     peakWorkers = Math.max(peakWorkers, ++liveWorkers);
     let closed = false;
@@ -58,6 +58,28 @@ async function waitFor(check) {
   throw new Error("Native draft fixture timed out");
 }
 const sends = () => calls.filter((c) => c.method === "sendNativeDraft");
+
+test("精简客户端保留模板到云电脑草稿的批量发送和原对话取回，不能触发直接生成", async () => {
+  queue.init({ draftsOnly: true });
+  try {
+    const inst = account("draft-only");
+    const ids = batch();
+    await queue.saveDrafts(ids, { instanceId: inst.id });
+    assert.equal(drafts.list().filter(draft => draft.nativeState === "saved").length, 2);
+    const submitted = await queue.submitDrafts(ids, { instanceId: inst.id });
+    assert.equal(submitted.count, 2);
+    await waitFor(() => queue.taskList().every(task => task.status === "succeeded"));
+    assert.equal(queue.taskList().length, 2);
+    assert.equal(drafts.list().length, 0);
+    assert.equal(sends().length, 2);
+    assert.equal(calls.filter(call => call.method === "normalSend").length, 0);
+    const task = queue.taskList()[0];
+    assert.equal((await queue.retryTask(task.id)).ok, true);
+    await waitFor(() => queue.getTask(task.id).status === "succeeded");
+    assert.equal(sends().length, 2, "取回已接收任务不再次发送草稿");
+    assert.equal(calls.filter(call => call.method === "normalSend").length, 0);
+  } finally { queue.init({ draftsOnly: false }); }
+});
 
 for (const awaiting of ["draft", "confirmation"]) test(`工厂账号先完成${awaiting === "draft" ? "未发草稿" : "逐条确认"}，结果轮询不抢占原账号`, async () => {
   account("factory-priority");

@@ -1,120 +1,35 @@
-// Run against the actual DMG on a clean macOS runner, using only a disposable profile.
+"use strict";
+// Install the actual DMG and exercise only the retained client workflow.
 const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
-const { CDP } = require("./cdp");
-const root = path.resolve(__dirname, "..");
-const pkg = require("../package.json");
+assert.equal(process.platform, "darwin");
+const root = path.resolve(__dirname, ".."), pkg = require("../package.json");
 const out = path.join(root, "dist", `mac-${process.arch}`);
-const fixture = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "豆包工坊 安装测试-")));
-const home = path.join(fixture, "用户数据"), mount = path.join(fixture, "镜像");
-const app = path.join(fixture, "Applications", pkg.productName + ".app");
-const res = path.join(app, "Contents", "Resources");
+const fixture = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "doubao-dmg-smoke-")));
+const mount = path.join(fixture, "mount"), app = path.join(fixture, pkg.productName + ".app");
+let mounted = false;
 const report = { version: pkg.version, platform: process.platform, arch: process.arch, checks: [] };
-process.env.DM_TEST_CDP_PORT = "9261";
-const run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 120000 });
-const pause = (ms) => new Promise((r) => setTimeout(r, ms));
-async function attach() {
-  for (let n = 0; n < 80; n++) {
-    try { const c = await CDP.attach(); if (await c.eval("!!window.DM")) return c; c.close(); } catch {}
-    await pause(500);
-  }
-  throw new Error("Packaged main window did not open");
-}
-let c, mounted = false;
-let componentServer;
-(async () => {
-  assert.equal(process.platform, "darwin");
+function run(cmd, args, options = {}) { return execFileSync(cmd, args, { encoding: "utf8", timeout: 180000, ...options }); }
+try {
   fs.mkdirSync(mount);
   run("hdiutil", ["attach", path.join(out, `DoubaoWorkshop-${pkg.version}-mac-${process.arch}.dmg`), "-readonly", "-nobrowse", "-mountpoint", mount]); mounted = true;
   run("ditto", [path.join(mount, pkg.productName + ".app"), app]);
   run("hdiutil", ["detach", mount]); mounted = false;
   run("codesign", ["--verify", "--deep", "--strict", app]);
-  report.checks.push("DMG mounted, copied app, signature verified");
-  const P = require("../src/paths"), store = require("../src/store");
-  P.init({ home }); store.load(); store.get().settings.server.enabled = false;
-  for (let i = 1; i <= 2; i++) store.add({ id: `batch-fixture-${i}`, name: `测试账号 ${i}`, platform: "local-fixture", url: "http://127.0.0.1:18854/chat" });
-  store.get().settings.downloadDir = path.join(home, "videos");
-  Object.assign(store.get().settings.orchestrator, { maxParallel: 1, pollInterval: 1500, autoDownload: true, taskTimeoutMs: 30000, retryLimit: 1, stopHotkey: "CommandOrControl+Alt+Shift+F9", appeal: false });
-  store.save();
-  const marker = path.join(home, "attachments", "保留素材.txt");
-  fs.writeFileSync(marker, "keep user data");
-  const catalog = JSON.parse(fs.readFileSync(path.join(res, "optional-components.json")));
-  assert.equal(fs.existsSync(path.join(res, "python")), false);
-  assert.equal(fs.existsSync(path.join(res, "tools")), false);
-  let componentRequests = 0;
-  componentServer = require("node:http").createServer((req, response) => {
-    if (req.url !== "/" + catalog.file.name) { response.writeHead(404); response.end(); return; }
-    componentRequests++;
-    response.writeHead(200, { "Content-Length": catalog.file.size });
-    fs.createReadStream(path.join(out, catalog.file.name)).pipe(response);
-  });
-  await new Promise(resolve => componentServer.listen(18856, "127.0.0.1", resolve));
-  store.get().settings.updateUrl = "http://127.0.0.1:18856/latest.json";
-  store.save();
-  run("/usr/bin/open", ["-n", "-a", app, "--args", `--user-data-dir=${home}`, "--remote-debugging-port=9261"]);
-  c = await attach();
-  assert.equal(path.resolve((await c.eval("DM.paths()")).home), home);
-  assert.equal((await c.eval("DM.call('dm:state')")).ok, true);
-  const status = await c.eval("DM.call('dm:update:status')");
-  assert.equal(status.data.platform, "darwin");
-  assert.ok(status.data.source.endsWith(`latest-darwin-${process.arch}.json`));
-  assert.equal(await c.eval("!!document.querySelector('[data-view=\"drafts\"]')"), true);
-  report.checks.push("Installed main window, preload IPC, draft navigation, platform update endpoint");
-  assert.equal((await c.eval("DM.call('dm:components:status')")).data.phase, "idle");
-  assert.equal((await c.eval("DM.probeMask()")).opencv, "");
-  assert.equal(componentRequests, 0);
-  const installed = (await c.eval("DM.call('dm:components:install')")).data;
-  assert.equal(installed.phase, "installed", JSON.stringify(installed));
-  const componentRoot = installed.directory;
-  assert.ok(componentRoot.startsWith(home));
-  assert.equal(componentRequests, 1);
-  componentServer.close(); componentServer = null;
-  report.checks.push("Lean app starts without media tools; explicit download installs verified tools in persistent user data");
-  const probe = await c.eval("DM.probeMask()");
-  assert.ok(probe.model && probe.script && probe.ffmpegOk && probe.opencv, JSON.stringify(probe));
-  assert.ok(probe.python.startsWith(componentRoot)); assert.ok(probe.ffmpeg.startsWith(componentRoot));
-  const input = path.join(fixture, "中文测试视频.mp4"), maskOut = path.join(fixture, "处理结果");
-  run(path.join(componentRoot, "tools", "ffmpeg"), ["-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240:r=10", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", input]);
-  const masked = await c.eval(`DM.runMask(${JSON.stringify({ files: [input], outDir: maskOut, keepOriginal: true })})`);
-  assert.equal(masked.ok, true, JSON.stringify(masked));
-  assert.equal(masked.results.length, 1); assert.ok(fs.statSync(masked.results[0].out).size > 1000);
-  const duration = run(path.join(componentRoot, "tools", "ffprobe"), ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", masked.results[0].out]);
-  assert.ok(Number(duration.trim()) > 0);
-  report.checks.push("Bundled Python/OpenCV/YuNet and FFmpeg/ffprobe processed a video with a Chinese path");
-  const png = path.join(fixture, "图片素材.png"), grid = path.join(fixture, "四宫格.png");
-  run(path.join(componentRoot, "tools", "ffmpeg"), ["-y", "-i", input, "-frames:v", "1", png]);
-  const collage = await c.eval(`DM.call('dm:asset:grid',${JSON.stringify([png, png, png, png])},${JSON.stringify({ out: grid, cols: 2, cell: 256 })})`);
-  assert.ok(collage.ok && collage.data.ok, JSON.stringify(collage));
-  run(path.join(componentRoot, "python", "bin", "python3"), ["-B", "-I", "-c", "import cv2,sys;assert cv2.imread(sys.argv[1]).shape[:2]==(512,512)", grid]);
-  assert.equal((await c.eval(`DM.runMask(${JSON.stringify({ files: [png], outDir: maskOut, keepOriginal: true })})`)).ok, true);
-  report.checks.push("PNG image processing and four-image grid composition");
-  fs.copyFileSync(input, path.join(__dirname, "clip.mp4"));
-  process.env.DM_TEST_HOME = home;
-  console.log(run(process.execPath, [path.join(__dirname, "task-drafts.e2e.js")]));
-  report.checks.push("Real packaged webview: save cloud drafts, preserve attachments, batch send, retrieve videos, keep editor open");
-  const shot = await c.send("Page.captureScreenshot", { format: "png" });
-  fs.writeFileSync(path.join(out, "mac-main-window.png"), Buffer.from(shot.data, "base64"));
-  await c.eval("setTimeout(()=>window.close(),100)"); c.close(); c = null; await pause(1000);
-  run("/usr/bin/open", ["-a", app]); c = await attach();
-  assert.equal((await c.eval("DM.call('dm:state')")).ok, true);
-  assert.equal(fs.readFileSync(marker, "utf8"), "keep user data");
-  assert.equal((await c.eval("DM.call('dm:components:status')")).data.phase, "installed");
-  report.checks.push("Closing and reopening from LaunchServices restores the main window and preserves user data");
+  report.checks.push("DMG mounted, application copied and signature verified");
+  const executable = run("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleExecutable", path.join(app, "Contents/Info.plist")]).trim();
+  console.log(run(process.execPath, [path.join(__dirname, "draft-only-smoke.cjs")], { env: { ...process.env, DM_TEST_RUNTIME: path.join(app, "Contents/MacOS", executable), DM_TEST_OUTPUT: out, DM_TEST_CDP_PORT: "9261" } }));
+  const smoke = JSON.parse(fs.readFileSync(path.join(out, "smoke-results.json"), "utf8"));
+  assert.equal(smoke.ok, true, smoke.error);
+  report.checks.push(...smoke.checks);
+  fs.copyFileSync(path.join(out, "client-window.png"), path.join(out, "mac-main-window.png"));
   report.ok = true;
-})().catch(async (error) => {
+} catch (error) {
   report.ok = false; report.error = error.stack; process.exitCode = 1;
-  if (c) {
-    try {
-      report.diagnostics = await c.eval(`(async()=>({draftStatus:document.querySelector('#draftStatus')?.textContent,drafts:await DM.call('dm:drafts'),logs:await DM.call('dm:logs',30),guest:document.querySelector('webview')?await document.querySelector('webview').executeJavaScript('({text:document.body.innerText,button:document.querySelector("[type=submit]").outerHTML,trace:window.fixtureTrace,now:Date.now()})'):null}))()`);
-      fs.writeFileSync(path.join(out, "mac-main-window.png"), Buffer.from((await c.send("Page.captureScreenshot", { format: "png" })).data, "base64"));
-    } catch (diagnosticError) { report.diagnosticError = String(diagnosticError); }
-  }
-}).finally(() => {
-  c?.close();
-  componentServer?.close();
-  try { run("/usr/bin/osascript", ["-e", `tell application ${JSON.stringify(app)} to quit`]); } catch {}
+} finally {
   if (mounted) try { run("hdiutil", ["detach", mount]); } catch {}
-  fs.writeFileSync(path.join(out, "mac-smoke.json"), JSON.stringify(report, null, 2));
+  fs.writeFileSync(path.join(out, "mac-smoke.json"), JSON.stringify(report, null, 2) + "\n");
+  fs.rmSync(fixture, { recursive: true, force: true });
   console.log(JSON.stringify(report, null, 2));
-});
+}

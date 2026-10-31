@@ -6,7 +6,7 @@
  * 两件事：
  *   1) 指纹伪装：向主进程同步取本账号的档案，在主世界 document_start 阶段注入改写。
  *      必须用主世界执行 —— preload 默认在隔离世界，改 navigator 页面根本看不到。
- *   2) 无水印导出：在视频卡片上挂「无水印下载」按钮，解析官方原片地址后交给主进程下载。
+ *   2) 注入云电脑草稿保存、发送和原对话结果核对所需的自动化原语。
  */
 
 const { ipcRenderer, webFrame } = require("electron");
@@ -60,11 +60,7 @@ const HOST = (() => {
 const IS_DOLA = /(^|\.)dola\.com$/i.test(HOST);
 const IS_DOUBAO = /(^|\.)(doubao|dola)\.(com|cn)$/i.test(HOST) || /cici/i.test(HOST);
 
-window.addEventListener("DOMContentLoaded", () => {
-  if (IS_DOLA || IS_DOUBAO) {
-    installNoWatermark();
-  }
-});
+// 桌面端已移除独立视频导出入口；不再向账号网页添加下载按钮。
 
 // 仅在本地探针/调试页显示环境条：真实站点里这条横幅会把账号名和指纹直接写进 DOM，
 // 任何脚本读一下 innerText 就知道是哪个账号、用的什么档案，等于自己把牌摊开。

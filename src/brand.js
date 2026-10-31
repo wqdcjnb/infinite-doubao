@@ -14,8 +14,8 @@ const DEFAULTS = {
   name: "豆包工坊",
   englishName: "Doubao Workshop",
   productKey: "infinite-doubao",
-  version: "1.5.20",
-  slogan: "多账号 AI 素材流水线",
+  version: "1.5.21",
+  slogan: "任务模板 · 云电脑草稿 · 批量提交",
   // 首页问候等地方用到的外链，全部可关
   links: {
     community: "",
@@ -28,11 +28,11 @@ const DEFAULTS = {
     // 页面增强（时长/模型/分辨率响应改写）
     pageEnhancer: true,
     // 本地 REST + MCP + SSE
-    localServer: true,
+    localServer: false,
     // 剪映草稿导出
-    jianying: true,
+    jianying: false,
     // 素材遮脸
-    faceMask: true,
+    faceMask: false,
     // 分镜批量编排
     orchestrator: true,
     // 账号探活 / 一键登录

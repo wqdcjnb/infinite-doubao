@@ -1,7 +1,0 @@
-<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>账号网页交互验收</title>
-<style>body{padding:24px;font:18px system-ui;color:#1a2230}input,textarea,button{font:inherit;padding:12px;margin:8px 0}textarea{display:block;width:80%;height:120px}button{display:block}#result{white-space:pre-wrap}</style></head>
-<body><h1>账号网页交互验收</h1><p>用于本机测试，不会向豆包提交内容。</p>
-<textarea aria-label="测试文本" id="text" placeholder="在此输入中文、换行和英文"></textarea>
-<button id="button">确认输入</button><input type="file" id="files" multiple><p id="result"></p>
-<script>document.querySelector('#button').onclick=()=>document.querySelector('#result').textContent='收到：'+document.querySelector('#text').value;document.querySelector('#files').onchange=(e)=>document.querySelector('#result').textContent='附件：'+Array.from(e.target.files).map(f=>f.name).join('、');</script></body></html>

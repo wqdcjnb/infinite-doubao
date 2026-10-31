@@ -57,7 +57,7 @@
     if (message) throw new Error(message);
     return null;
   }
-  function unavailable(el) { return el.disabled || el.getAttribute("aria-disabled") === "true" || /升级|购买|开通|支付|订阅|充值/.test(text(el)); }
+  function unavailable(el) { return el.disabled || el.getAttribute("aria-disabled") === "true" || /升级|升級|购买|購買|开通|開通|支付|订阅|訂閱|充值|儲值/.test(text(el)); }
   function videoEntry() {
     return nodes('button, [role="button"], [role="menuitem"], [role="option"]').find(function (el) { return /^(视频生成|生成视频)(?:\s|$)/.test(text(el)); });
   }
@@ -102,9 +102,9 @@
     return entry;
   }
   api.prepareWorkTask = async function () {
-    function newWorkEntry() { return nodes('button, [role="button"]').find(function (el) { return /^新工作任务(?:\s|$)/.test(text(el)); }); }
+    function newWorkEntry() { return nodes('button, [role="button"]').find(function (el) { return /^新工作任[务務](?:\s|$)/.test(text(el)); }); }
     function cloudMode() {
-      return nodes('[data-testid="chat_input_action_mode"]', editorRoot()).find(function (el) { return /^云电脑\s*[>›»]?$/.test(text(el)) && !unavailable(el); });
+      return nodes('[data-testid="chat_input_action_mode"]', editorRoot()).find(function (el) { return /^(?:云(?:端)?电脑|雲(?:端)?電腦)\s*[>›»]?$/.test(text(el)) && !unavailable(el); });
     }
     try {
       await waitFor(function () { return editor() || newWorkEntry(); }, "页面输入区尚未就绪，请等待网页加载后重试", LOAD_TIMEOUT);
@@ -125,7 +125,7 @@
         if (unavailable(mode)) throw new Error("工作任务模式不可用");
         activate(mode);
         var cloud = await waitFor(function () {
-          return cloudMode() || nodes('[role="menuitem"], [role="option"], [role="menuitemradio"]').find(function (el) { return /^云电脑(?:\s|$)/.test(text(el)); });
+          return cloudMode() || nodes('[role="menuitem"], [role="option"], [role="menuitemradio"]').find(function (el) { return /^(?:云(?:端)?电脑|雲(?:端)?電腦)(?:\s|$)/.test(text(el)); });
         }, "当前账号没有可选择的云电脑模式", LOAD_TIMEOUT);
         if (unavailable(cloud)) throw new Error("当前账号的云电脑模式不可用");
         if (!cloudMode()) activate(cloud);

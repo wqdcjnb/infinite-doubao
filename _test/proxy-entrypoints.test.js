@@ -7,7 +7,6 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { EventEmitter } = require("node:events");
 const main = fs.readFileSync(path.join(__dirname, "../src/main.js"), "utf8");
-const apiSource = fs.readFileSync(path.join(__dirname, "../src/api.js"), "utf8");
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 function functionSource(name) {
@@ -127,59 +126,3 @@ for (const channel of ["account:update", "dm:instance:update"]) {
     assert.deepEqual(f.steps, ["save", "apply"]);
   });
 }
-
-async function restFixture() {
-  const f = fixture(); const routes = new Map();
-  const apiContext = vm.createContext({ module: { exports: {} }, require(name) {
-    if (name === "./instances") return f.instances;
-    if (name === "./orchestrator") return f.orchestrator;
-    if (name === "./store") return f.store;
-    if (name.startsWith("node:")) return require(name);
-    return {};
-  } });
-  vm.runInContext(apiSource, apiContext, { filename: "src/api.js" });
-  class HttpServer {
-    constructor() { this.port = 17823; }
-    get(route, handler) { routes.set("GET " + route, handler); }
-    post(route, handler) { routes.set("POST " + route, handler); }
-    patch(route, handler) { routes.set("PATCH " + route, handler); }
-    del(route, handler) { routes.set("DELETE " + route, handler); }
-    async start() {}
-    info() { return { port: this.port }; }
-  }
-  Object.assign(f.context, {
-    server: null, httpMod: { HttpServer }, api: apiContext.module.exports, findWebContents() {}, pushToUi() {},
-    mcp: { init() {}, setup() {} }, sse: { setup() {} }, log: { info() {} }
-  });
-  // startServer must inject its actual prepareSession into api.init; no test-only injection.
-  vm.runInContext(functionSource("startServer"), f.context);
-  await f.context.startServer();
-  const responses = [];
-  const invoke = (id = f.instance.id) => routes.get("PATCH /api/instances/:id")({
-    params: { id }, body: { proxy: { mode: "direct" } },
-    ok(value) { f.steps.push("respond"); const response = { ok: true, value }; responses.push(response); return response; },
-    fail(status, message) { const response = { ok: false, status, message }; responses.push(response); return response; }
-  });
-  return { ...f, responses, invoke };
-}
-
-test("REST PATCH通过真实startServer注入prepareSession，完成配置后才唤醒和响应", async () => {
-  const f = await restFixture(); const pending = f.invoke();
-  await flush(); assert.deepEqual(f.steps, ["save", "apply"]); assert.equal(f.responses.length, 0);
-  assert.equal(f.configured[0].proxy.mode, "direct");
-  f.resolveSession(); const response = await pending;
-  assert.deepEqual(f.steps, ["save", "apply", "attach", "wake", "respond"]);
-  assert.equal(response.ok, true); assert.equal(response.value, f.instance);
-});
-
-test("REST PATCH配置失败向HTTP层传播异常，不发成功响应也不唤醒", async () => {
-  const f = await restFixture(); const pending = f.invoke();
-  const rejected = assert.rejects(pending, /fixture apply failed/);
-  f.rejectSession(new Error("fixture apply failed")); await rejected;
-  assert.deepEqual(f.steps, ["save", "apply"]); assert.equal(f.responses.length, 0);
-});
-
-test("REST PATCH不存在账号返回404，不配置其他账号会话", async () => {
-  const f = await restFixture(); const result = await f.invoke("missing");
-  assert.equal(result.ok, false); assert.equal(result.status, 404); assert.deepEqual(f.steps, []);
-});

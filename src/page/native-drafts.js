@@ -30,8 +30,15 @@
   function text(el) { return String(el && (/^(TEXTAREA|INPUT)$/.test(el.tagName) ? el.value : el.innerText || el.textContent) || "").replace(/\s+/g, " ").trim(); }
   function editor() { return document.querySelector('#input-engine-container .tiptap[contenteditable="true"], #input-engine-container textarea, .tiptap.ProseMirror[contenteditable="true"]'); }
   function title(row) { return text(row.querySelector(":scope > span > span")); }
-  function rows() { return Array.from(document.querySelectorAll('[data-testid="draft-conversation-section"] > [role="button"][class~="group/conversation-item"]')).filter(function (r) { return title(r) && title(r) !== "新对话"; }); }
-  function mode() { return text(document.querySelector('#input-engine-container [data-testid="chat_input_action_mode"]')); }
+  function rows() { return Array.from(document.querySelectorAll('[data-testid="draft-conversation-section"] > [role="button"][class~="group/conversation-item"]')).filter(function (r) { return title(r) && !/^新(?:对话|對話)$/.test(title(r)); }); }
+  // Only UI labels are canonicalized; prompts and persisted draft content stay exact.
+  function cloudLabel(value) { return /^(?:云(?:端)?电脑|雲(?:端)?電腦)\s*[>›»]?$/.test(value); }
+  function cloudModeNode(node) {
+    return node && (cloudLabel(text(node)) || (node.querySelectorAll && Array.from(node.querySelectorAll("*")).some(function (child) {
+      return (!child.children || !child.children.length) && visible(child) && cloudLabel(text(child));
+    })));
+  }
+  function mode() { var node = document.querySelector('#input-engine-container [data-testid="chat_input_action_mode"]'); return cloudModeNode(node) ? "云电脑" : text(node); }
   function sendButton() { return document.querySelector('button[data-testid="chat_input_send_button"]'); }
   function enabled(button) { return button && !button.disabled && !["aria-disabled", "aria-busy", "data-disabled", "data-loading"].some(function (attr) { return button.getAttribute(attr) === "true"; }); }
   function normalize(value) { return String(value || "").replace(/\s+/g, " ").trim(); }
@@ -73,9 +80,7 @@
     }
     if (current && (!normalize(options.prompt) || prompt !== normalize(options.prompt))) reasons.push("完整提示词不一致（预期 " + normalize(options.prompt).length + " 字，当前 " + prompt.length + " 字）");
     var modes = visibleNodes(root, '[data-testid="chat_input_action_mode"]'), modeNode = modes.length === 1 ? modes[0] : null;
-    var isWork = modeNode && (text(modeNode) === "云电脑" || (modeNode.querySelectorAll && Array.from(modeNode.querySelectorAll("*")).some(function (node) {
-      return (!node.children || !node.children.length) && visible(node) && text(node) === "云电脑";
-    })));
+    var isWork = cloudModeNode(modeNode);
     if (options.executionMode === "work" && !isWork) reasons.push("工作模式未就绪（当前：" + (modeNode ? text(modeNode).slice(0, 40) : "模式标签未唯一加载") + "）");
     var uploading = root.querySelectorAll('[aria-busy="true"], [data-loading="true"], [role="progressbar"], progress');
     if (Array.from(uploading).some(function (node) {
@@ -198,7 +203,7 @@
     });
   }
   function switchTo(work) {
-    var prefix = work ? /^新工作任务(?:\s|$)/ : /^新对话(?:\s|$)/;
+    var prefix = work ? /^新工作任[务務](?:\s|$)/ : /^新(?:对话|對話)(?:\s|$)/;
     var button = Array.from(document.querySelectorAll('button, [role="button"]')).find(function (b) { return prefix.test(text(b)); });
     if (!button) throw new Error("未找到" + (work ? "新工作任务" : "新对话") + "入口");
     button.click();

@@ -61,24 +61,6 @@ test("opening a queued account requests its background tab once and reuses its w
   assert.equal(requests[0].payload.instanceId, inst.id);
 });
 
-test("server settings can start a stopped server, stop it, rebind its port, and replace its token", async () => {
-  const settings = { server: { enabled: true } };
-  const calls = [];
-  const context = vm.createContext({ server: null, store: { get: () => ({ settings }) }, startServer: async () => { calls.push("start"); context.server = { port: settings.server.port || 17823, setToken: (value) => calls.push(["token", value]) }; }, stopServer: async () => { calls.push("stop"); context.server = null; } });
-  vm.runInContext(functionSource("async function applyServerSettings", "/* ------------------------------------------------------------- 编排器装配 */"), context);
-  await context.applyServerSettings({ enabled: true });
-  assert.deepEqual(calls, ["start"]);
-  await context.applyServerSettings({ token: "test-only-token" });
-  assert.deepEqual(calls[1], ["token", "test-only-token"]);
-  settings.server.port = 19005;
-  await context.applyServerSettings({ port: 19005 });
-  assert.equal(context.server.port, 19005);
-  assert.deepEqual(calls.slice(-2), ["stop", "start"]);
-  settings.server.enabled = false;
-  await context.applyServerSettings({ enabled: false });
-  assert.equal(context.server, null);
-});
-
 test("changing stop hotkey retains the previous binding when registration fails", () => {
   const registered = new Set(["F10"]);
   const context = vm.createContext({ registeredStopHotkey: "F10", globalShortcut: { register: (key) => { if (key === "bad") return false; registered.add(key); return true; }, unregister: (key) => registered.delete(key) }, orchestrator: {}, pushToUi() {}, log: {} });
@@ -87,20 +69,6 @@ test("changing stop hotkey retains the previous binding when registration fails"
   assert.equal(registered.has("F10"), true);
   context.applyStopHotkey("F9");
   assert.deepEqual([...registered], ["F9"]);
-});
-
-test("application shutdown preserves the next-launch API setting, explicit stop disables it", async () => {
-  const settings = { server: { enabled: true } };
-  let saves = 0;
-  const context = vm.createContext({ server: { stop: async () => {} }, sse: { close() {} }, store: { get: () => ({ settings }), save: () => { saves++; } } });
-  vm.runInContext(functionSource("async function stopServer", "async function applyServerSettings"), context);
-  await context.stopServer({ persist: false });
-  assert.equal(settings.server.enabled, true);
-  assert.equal(saves, 0);
-  context.server = { stop: async () => {} };
-  await context.stopServer();
-  assert.equal(settings.server.enabled, false);
-  assert.equal(saves, 1);
 });
 
 test("SPA login cookie updates wake a waiting account once and ignore unrelated cookies", async () => {

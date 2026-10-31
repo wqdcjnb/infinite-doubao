@@ -4,16 +4,16 @@
 (function views () {
 
 /**
- * 工作台视图（模板 / 任务 / 素材 / 接口 / 日志 / 设置）
+ * 云电脑草稿工作流（模板 / 草稿 / 提交记录 / 日志 / 设置）
  *
  * 和 app.js 的分工：app.js 只管「账号环境」那一屏（多开、指纹、代理、webview 标签），
- * 这里管其余全部。两边共用主进程的同一批模块，界面能看到的行为和 REST/MCP 完全一致。
+ * 这里负责模板、草稿和提交记录。
  */
 
 const DM = window.DM;
 
 const V = {
-  view: "accounts",
+  view: "templates",
   templates: [],
   activeTemplate: "",
   selectedTemplates: new Set(),
@@ -28,8 +28,6 @@ const V = {
   draftError: "",
   tasks: [],
   taskFilter: "",
-  apiTab: "rest",
-  server: null,
   settings: {},
   models: [],
   paths: null,
@@ -205,15 +203,12 @@ async function setView(name) {
   if (V.view === "templates" && name !== "templates" && V.templateDirty) {
     if (!await guard(saveTemplate, null)) return;
   }
-  if (V.view === "assets" && name !== "assets") qa("#assetBody video").forEach((video) => video.pause());
   V.view = name;
   qa(".vtab").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   qa(".view").forEach((s) => s.classList.toggle("active", s.id === `view-${name}`));
   if (name === "templates") await guard(refreshTemplates);
   if (name === "drafts") await guard(refreshDrafts);
   if (name === "tasks") refreshTasks();
-  if (name === "assets") refreshAssets();
-  if (name === "api") refreshApi();
   if (name === "logs") refreshLogs();
   if (name === "settings") refreshSettings();
 }
@@ -241,14 +236,7 @@ async function updateBadges() {
     const dot = q("#taskDot");
     if (dot) dot.classList.toggle("on", ((state.orchestrator && state.orchestrator.running) || []).length > 0);
   }
-  if (!state) return;
-  V.server = state.server;
-  const badge = q("#vbServer");
-  if (badge) {
-    const on = !!(V.server && V.server.port);
-    badge.textContent = on ? `API :${V.server.port}` : "API 关";
-    badge.classList.toggle("ok", on);
-  }
+
 }
 
 /* ============================================================== 任务模板 */
@@ -414,7 +402,7 @@ async function deleteTemplate() {
   const template = V.templates.find((t) => t.id === V.activeTemplate);
   if (!template) return;
   if (!await window.DMDialogs.confirm({ title: "删除这个任务模板？", subject: template.name,
-    message: "删除后，此模板将从任务提交列表中移除。", detail: "已提交的任务及附件副本会保留。",
+    message: "删除后，此模板将从任务模板列表中移除。", detail: "已提交的任务及附件副本会保留。",
     confirmLabel: "删除模板", danger: true })) return;
   await guard(async () => {
     await call("dm:template:remove", template.id);
@@ -523,7 +511,7 @@ function renderDrafts() {
   all.disabled = V.draftBusy || !visible.length;
   const box = q("#draftList");
   box.replaceChildren();
-  if (!visible.length) box.appendChild(node("div", "empty-hint", V.draftBucket === "imported" ? "尚无已确认存入豆包的草稿。" : imported ? "待导入列表已清空。请切换到“已存入豆包”选择草稿并一键发送。" : "在「任务提交」中将模板加入草稿箱，再到这里指定账号、保存和发送。"));
+  if (!visible.length) box.appendChild(node("div", "empty-hint", V.draftBucket === "imported" ? "尚无已确认存入豆包的草稿。" : imported ? "待导入列表已清空。请切换到“已存入豆包”选择草稿并一键发送。" : "在「任务模板」中将模板加入草稿箱，再到这里指定账号、保存和发送。"));
   for (const draft of visible) {
     const t = draft.template;
     const row = node("div", "draft-row");
@@ -614,13 +602,13 @@ async function submitSelectedDrafts() {
   const ids = [...V.selectedDrafts];
   V.draftBusy = true;
   V.draftError = "";
-  V.draftMessage = `正在准备 ${ids.length} 条草稿，逐条连续投递，回执在后台核对…`;
+  V.draftMessage = `正在准备 ${ids.length} 条草稿，逐条发送并核对接收回执…`;
   renderDrafts(); renderTemplateList();
   let result;
   try {
     result = await call("dm:drafts:submit", ids, { instanceId: q("#draftAccount").value, sendOnly: true });
     ids.forEach((id) => V.selectedDrafts.delete(id));
-    say(`${result.count} 条草稿已由 ${result.instanceName} 全部发送，正在取回视频结果`);
+    say(`${result.count} 条草稿已由 ${result.instanceName} 全部发送，可在「提交记录」查看。`);
   } catch (error) {
     V.draftError = error.message;
     throw error;
@@ -634,8 +622,6 @@ async function submitSelectedDrafts() {
 
 
 /* ============================================================== 任务队列 */
-
-const jianyingOpeningTasks = new Set();
 
 async function refreshTasks() {
   return queueRefresh("tasks", updateTasks);
@@ -664,7 +650,7 @@ function taskStatusText(task) {
 function taskResultText(task) {
   const result = task.result || {};
   const messages = [task.error, task.waitReason];
-  if (result.downloadSkipped) messages.push("自动下载已关闭，视频尚未保存到素材库");
+  if (result.downloadSkipped) messages.push("自动下载已关闭，视频尚未保存到视频目录");
   if (result.warning) messages.push(result.warning);
   if (Array.isArray(result.warnings)) messages.push(...result.warnings);
   if (result.files?.length && (result.watermark === "kept" || result.unwatermarked === false)) messages.push("成片尚未确认为无水印");
@@ -676,7 +662,7 @@ function renderTaskTable() {
   const wrap = q("#taskTable");
   wrap.replaceChildren();
   if (!V.tasks.length) {
-    wrap.appendChild(node("div", "empty-hint", "还没有任务。去「任务提交」创建模板，填写提示词并提交。"));
+    wrap.appendChild(node("div", "empty-hint", "还没有提交记录。创建任务模板后，加入草稿箱保存并发送。"));
     return;
   }
   const table = node("table", "tbl task-table");
@@ -733,7 +719,7 @@ function renderTaskTable() {
     tr.appendChild(info);
     const ops = node("td", "task-ops");
     const actions = node("div", "task-actions");
-    if (["submitted", "failed", "cancelled", "queued"].includes(t.status)) {
+    if (t.draftBatchId && (t.submittedAt || t.sentAt) && ["submitted", "failed", "cancelled", "queued"].includes(t.status)) {
       const retry = node("button", "ghost tiny task-retry", t.submittedAt || t.generatedAt ? "继续取回" : t.status === "queued" ? "继续" : "重试");
       retry.addEventListener("click", async () => {
         await guard(async () => {
@@ -744,9 +730,7 @@ function renderTaskTable() {
         });
       });
       actions.appendChild(retry);
-      const redispatch = node("button", "ghost tiny", "改派");
-      redispatch.addEventListener("click", () => redispatchTask(t));
-      if (t.status !== "queued") actions.appendChild(redispatch);
+
     }
     if (t.templateId && ["running", "queued"].includes(t.status)) {
       const stop = node("button", "ghost tiny danger", "停止");
@@ -758,11 +742,7 @@ function renderTaskTable() {
       open.title = "在文件资源管理器中定位生成的视频文件";
       open.addEventListener("click", () => DM.showItem(t.result.files[0]));
       actions.appendChild(open);
-      const edit = node("button", "ghost tiny task-draft", jianyingOpeningTasks.has(t.id) ? "正在打开…" : "在剪映中编辑");
-      edit.disabled = jianyingOpeningTasks.has(t.id);
-      edit.title = "将视频发送到剪映继续剪辑；剪映已打开工程时，会加入当前工程";
-      edit.addEventListener("click", () => chooseTaskVideoForJianying(t));
-      actions.appendChild(edit);
+
     }
     ops.appendChild(actions);
     tr.appendChild(ops);
@@ -770,329 +750,6 @@ function renderTaskTable() {
   }
   table.appendChild(tbody);
   wrap.appendChild(table);
-}
-
-async function editTaskInJianying(task, file) {
-  if (jianyingOpeningTasks.has(task.id)) return;
-  jianyingOpeningTasks.add(task.id);
-  renderTaskTable();
-  try {
-    await guard(async () => {
-      const result = await call("dm:jianying:edit", { taskId: task.id, file });
-      if (result?.ok !== true || typeof result.file !== "string" || !result.file.trim()) {
-        throw new Error(result?.error || "未能确认视频已发送到剪映，请重试");
-      }
-      say("已发送到剪映，可在剪映时间线继续编辑");
-    });
-  } finally {
-    jianyingOpeningTasks.delete(task.id);
-    renderTaskTable();
-  }
-}
-
-function chooseTaskVideoForJianying(task) {
-  if (jianyingOpeningTasks.has(task.id)) return;
-  const files = task.result?.files || [];
-  if (!files.length) return;
-  if (files.length === 1) return editTaskInJianying(task, files[0]);
-  const wrap = node("div");
-  wrap.appendChild(node("p", "hint", `此任务有 ${files.length} 个视频，请选择本次要编辑的一个。其余视频仍保留在任务结果中。剪映已打开工程时，所选视频会加入当前工程。`));
-  const select = node("select");
-  for (const [index, file] of files.entries()) {
-    const option = node("option", "", `${index + 1}. ${String(file).split(/[\\/]/).pop()}`);
-    option.value = file;
-    option.title = file;
-    select.appendChild(option);
-  }
-  const selectedPath = node("p", "s-value", select.value);
-  select.title = select.value;
-  select.addEventListener("change", () => { selectedPath.textContent = select.value; select.title = select.value; });
-  wrap.appendChild(field("选择视频", select));
-  wrap.appendChild(selectedPath);
-  openModal("在剪映中编辑", wrap, [
-    { label: "取消" },
-    { label: "打开所选视频", kind: "primary", onClick: () => editTaskInJianying(task, select.value) }
-  ]);
-}
-
-async function redispatchTask(task) {
-  const list = V.instances.length ? V.instances : await guard(() => call("dm:instances"), []) || [];
-  if (!list.length) return say("还没有实例", true);
-  const wrap = node("div", "");
-  const sel = document.createElement("select");
-  for (const inst of list) {
-    const o = document.createElement("option");
-    o.value = inst.id;
-    o.textContent = `${inst.name} · ${inst.platform}`;
-    sel.appendChild(o);
-  }
-  wrap.appendChild(field("改派到实例", sel));
-  openModal("改派任务", wrap, [
-    { label: "取消" },
-    {
-      label: "改派",
-      kind: "primary",
-      onClick: async () => {
-        await guard(async () => {
-          const result = await call("dm:task:redispatch", task.id, sel.value);
-          if (!result.ok) throw new Error(result.error);
-          say("已改派");
-          await refreshTasks();
-        });
-      }
-    }
-  ]);
-}
-
-/* ============================================================== 素材库 */
-
-let assetGrid = null;
-const assetCards = new Map();
-
-async function refreshAssets() {
-  return queueRefresh("assets", updateAssets);
-}
-
-async function updateAssets() {
-  const result = await guard(() => call("dm:videos"), null);
-  if (V.view !== "assets") return;
-  const body = q("#assetBody");
-  q("#videoCount").textContent = String(result?.items.length || 0);
-  q("#videoDirectory").textContent = result ? `保存目录：${result.directory}` : "";
-  if (!result?.items.length) {
-    assetGrid = null;
-    assetCards.clear();
-    body.replaceChildren(node("div", "empty-hint", result
-      ? "还没有保存的成片。生成并下载完成后，视频会自动出现在这里。"
-      : "读取视频目录失败，请检查目录后刷新。"));
-    return;
-  }
-  if (!assetGrid) { assetGrid = node("div", "video-grid"); body.replaceChildren(assetGrid); }
-  const paths = new Set(result.items.map((item) => item.path));
-  for (const [file, cached] of assetCards) {
-    if (!paths.has(file)) { cached.card.remove(); assetCards.delete(file); }
-  }
-  result.items.forEach((item, index) => {
-    const signature = JSON.stringify(item);
-    let cached = assetCards.get(item.path);
-    if (!cached || cached.signature !== signature) {
-      const card = videoCard(item);
-      if (cached) cached.card.replaceWith(card);
-      cached = { signature, card };
-      assetCards.set(item.path, cached);
-    }
-    // Inserting a new first item leaves existing players attached and playing.
-    if (assetGrid.children[index] !== cached.card) assetGrid.insertBefore(cached.card, assetGrid.children[index] || null);
-  });
-}
-
-function videoCard(item) {
-  const card = node("article", "video-card");
-  const player = document.createElement("video");
-  player.src = DM.mediaUrl ? DM.mediaUrl(item.path) : item.url;
-  player.controls = true;
-  player.preload = "metadata";
-  player.setAttribute("aria-label", item.name);
-  player.addEventListener("play", () => qa("#assetBody video").forEach((other) => { if (other !== player) other.pause(); }));
-  player.addEventListener("error", () => {
-    const hint = node("div", "video-preview-error", "此格式请使用下方「打开视频」播放。");
-    player.replaceWith(hint);
-  }, { once: true });
-  card.appendChild(player);
-  const meta = node("div", "video-meta");
-  const title = node("strong", "", item.name);
-  title.title = item.name;
-  meta.appendChild(title);
-  const size = item.size >= 1048576 ? `${(item.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(item.size / 1024))} KB`;
-  meta.appendChild(node("p", "", `${size} · ${fmtTime(item.modifiedAt)}`));
-  if (item.templateName) meta.appendChild(node("p", "", item.templateName));
-  if (item.model) meta.appendChild(node("p", "", `${modelLabel(item.model)} · ${item.duration} 秒`));
-  meta.appendChild(node("p", "", item.watermark === "none" ? "无水印成片" : item.watermark === "kept" ? "成片保留水印" : "水印状态未确认"));
-  card.appendChild(meta);
-  const actions = node("div", "video-actions");
-  const open = node("button", "ghost tiny", "打开视频");
-  open.addEventListener("click", () => guard(() => DM.openPath(item.path)));
-  const locate = node("button", "ghost tiny", "打开所在文件夹");
-  locate.addEventListener("click", () => DM.showItem(item.path));
-  actions.append(open, locate);
-  card.appendChild(actions);
-  return card;
-}
-
-/* ============================================================ 接口 / MCP */
-
-const REST_ENDPOINTS = [
-  ["GET", "/api/state", "整体状态：编排器、额度、线程数"],
-  ["GET", "/api/instances", "实例列表（含今日额度、登录态）"],
-  ["POST", "/api/instances", "新建实例 { name, platform, url, proxy }"],
-  ["PATCH", "/api/instances/:id", "改实例（名称/代理/指纹字段）"],
-  ["DELETE", "/api/instances/:id", "删实例（连会话分区一起清）"],
-  ["POST", "/api/instances/:id/probe", "探活登录态"],
-  ["POST", "/api/instances/:id/fp-check", "指纹体检：页面实际值 vs 本地档案"],
-  ["POST", "/api/instances/:id/open", "取该实例当前页面地址（内嵌内核）"],
-  ["POST", "/api/instances/:id/cookie", "导入 CK 文本"],
-  ["GET", "/api/instances/:id/cookie", "导出 CK（JSON）"],
-  ["GET", "/api/storyboards", "分镜稿列表"],
-  ["POST", "/api/storyboards/import", "从 Markdown 导入 { name, text }"],
-  ["GET", "/api/storyboards/:id", "单个分镜 + 统计 + 任务"],
-  ["POST", "/api/storyboards/:id/start", "开始批量派发"],
-  ["POST", "/api/storyboards/:id/pause", "暂停"],
-  ["POST", "/api/storyboards/:id/resume", "继续"],
-  ["POST", "/api/storyboards/:id/stop", "停止"],
-  ["PATCH", "/api/storyboards/:id/shots/:shotId", "改镜头（提示词/时长/模型/参考图）"],
-  ["GET", "/api/storyboards/:id/export", "导出 Markdown"],
-  ["GET", "/api/tasks", "任务列表 ?status=&storyboardId=&limit="],
-  ["POST", "/api/tasks/:id/retry", "重试任务"],
-  ["POST", "/api/tasks/:id/redispatch", "改派到指定实例"],
-  ["GET", "/api/quota", "额度快照"],
-  ["POST", "/api/quota/:id/reset", "重置某实例的今日额度"],
-  ["GET", "/api/resources", "拦截到的媒资 ?kind=&unwatermarked="],
-  ["POST", "/api/resources/:id/download", "下载媒资到本地"],
-  ["POST", "/api/jianying/draft", "生成剪映草稿"],
-  ["POST", "/api/prompt/check", "提示词合规自检"],
-  ["POST", "/api/prompt/appeal", "生成申诉文案"],
-  ["GET", "/api/assets", "素材卡片 ?kind="],
-  ["GET", "/api/logs", "日志 ?limit=&q="],
-  ["GET", "/api/paths", "所有落盘目录"],
-  ["GET", "/api/server", "本地服务信息"],
-  ["POST", "/api/token/rotate", "轮换 Bearer token"],
-  ["GET", "/api/events", "SSE 事件流（?token=）"]
-];
-
-async function refreshApi() {
-  qa("[data-api-tab]").forEach((b) => b.classList.toggle("active", b.dataset.apiTab === V.apiTab));
-  const box = q("#apiBody");
-  box.replaceChildren();
-  const server = V.server || await guard(() => call("dm:server"), null);
-  const paths = V.paths || await guard(() => DM.paths(), null);
-  const base = server ? `http://127.0.0.1:${server.port}` : "http://127.0.0.1:17823";
-
-  if (V.apiTab === "rest") {
-    const head = node("div", "api-head");
-    const line = node("div", "api-line");
-    line.appendChild(node("span", "api-k", "BASE"));
-    line.appendChild(node("code", "api-v", base));
-    const cp = node("button", "ghost tiny", "复制");
-    cp.addEventListener("click", () => copyText(base));
-    line.appendChild(cp);
-    head.appendChild(line);
-
-    const tokenLine = node("div", "api-line");
-    tokenLine.appendChild(node("span", "api-k", "TOKEN"));
-    const token = (server && (server.token || server.tokenHint)) || "(见 api-token.txt)";
-    tokenLine.appendChild(node("code", "api-v", token));
-    const cpt = node("button", "ghost tiny", "复制");
-    cpt.addEventListener("click", () => copyText(token));
-    tokenLine.appendChild(cpt);
-    head.appendChild(tokenLine);
-    head.appendChild(node("div", "hint", "所有请求都要带 Authorization: Bearer <token>；只监听 127.0.0.1，不对公网暴露。"));
-    box.appendChild(head);
-
-    const table = node("table", "tbl api-tbl");
-    const thead = node("thead");
-    const hr = node("tr");
-    for (const h of ["方法", "路径", "说明", ""]) hr.appendChild(node("th", "", h));
-    thead.appendChild(hr);
-    table.appendChild(thead);
-    const tbody = node("tbody");
-    for (const [method, p, desc] of REST_ENDPOINTS) {
-      const tr = node("tr");
-      tr.appendChild(node("td", "m-" + method.toLowerCase(), method));
-      tr.appendChild(node("td", "", p));
-      tr.appendChild(node("td", "dim", desc));
-      const ops = node("td", "");
-      const c = node("button", "ghost tiny", "curl");
-      c.addEventListener("click", () => copyText(`curl -s "${base}${p.replace(/:\w+/g, "ID")}" -H "Authorization: Bearer ${token}"`));
-      ops.appendChild(c);
-      tr.appendChild(ops);
-      tbody.appendChild(tr);
-    }
-    table.appendChild(tbody);
-    box.appendChild(table);
-    return;
-  }
-
-  if (V.apiTab === "mcp") {
-    const cfg = {
-      mcpServers: {
-        "infinite-doubao": {
-          type: "http",
-          url: `${base}/mcp`,
-          headers: { Authorization: `Bearer ${(server && server.token) || "TOKEN"}` }
-        }
-      }
-    };
-    const head = node("div", "api-head");
-    head.appendChild(node("div", "hint", "MCP 走同一个本地端口：POST /mcp 是 JSON-RPC 2.0 单次响应，GET /mcp/sse 是流式通道。把下面这段贴进客户端的 mcp 配置即可。"));
-    const area = textInput(JSON.stringify(cfg, null, 2), "", true, 12);
-    head.appendChild(area);
-    const row = node("div", "row-gap");
-    const cp = node("button", "ghost tiny", "复制配置");
-    cp.addEventListener("click", () => copyText(area.value));
-    row.appendChild(cp);
-    const list = node("button", "ghost tiny", "查看工具清单");
-    list.addEventListener("click", async () => {
-      const r = await guard(() => call("dm:mcp:tools"), null);
-      if (!r) return;
-      const wrap = node("div", "");
-      const t = node("table", "tbl");
-      const tb = node("tbody");
-      for (const tool of r) {
-        const tr = node("tr");
-        tr.appendChild(node("td", "", tool.name));
-        tr.appendChild(node("td", "dim", tool.description || ""));
-        tb.appendChild(tr);
-      }
-      t.appendChild(tb);
-      wrap.appendChild(t);
-      openModal("MCP 工具清单", wrap, [{ label: "关闭" }]);
-    });
-    row.appendChild(list);
-    head.appendChild(row);
-    box.appendChild(head);
-    return;
-  }
-
-  if (V.apiTab === "sse") {
-    const head = node("div", "api-head");
-    head.appendChild(node("div", "hint", "事件流按变化即推，不用轮询。curl 一行就能看："));
-    const cmdEl = textInput(`curl -N "${base}/api/events?token=${(server && server.token) || "TOKEN"}"`, "", false);
-    cmdEl.readOnly = true;
-    head.appendChild(cmdEl);
-    head.appendChild(node("div", "hint", "事件类型：task / shot / resource / orchestrator / log。界面「任务队列」与「日志」就是吃这条流。"));
-    const live = node("div", "sse-live");
-    live.id = "ssePreview";
-    live.appendChild(node("div", "hint", "最近事件会在这里滚出来："));
-    const pre = node("pre", "sse-pre");
-    pre.id = "ssePre";
-    live.appendChild(pre);
-    head.appendChild(live);
-    box.appendChild(head);
-    return;
-  }
-
-  const head = node("div", "api-head");
-  head.appendChild(node("div", "hint", "不想开界面也能跑批：CLI 直接读同一个 APP_HOME，不需要 Electron。"));
-  const cmds = [
-    ["看整体状态", "node src/cli.js state"],
-    ["列出实例与额度", "node src/cli.js instances"],
-    ["导入并开跑", "node src/cli.js start <storyboardId>"],
-    ["看进度", "node src/cli.js status <storyboardId>"],
-    ["只看失败任务", "node src/cli.js tasks --status failed"],
-    ["下载所有无水印原片", "node src/cli.js resources --kind video --unwatermarked"],
-    ["取 token", "node src/cli.js token"]
-  ];
-  for (const [label, cmd] of cmds) {
-    const line = node("div", "api-line");
-    line.appendChild(node("span", "api-k", label));
-    line.appendChild(node("code", "api-v", cmd));
-    const c = node("button", "ghost tiny", "复制");
-    c.addEventListener("click", () => copyText(cmd));
-    line.appendChild(c);
-    head.appendChild(line);
-  }
-  if (paths) head.appendChild(node("div", "hint", `APP_HOME：${paths.home}`));
-  box.appendChild(head);
 }
 
 /* ================================================================ 日志 */
@@ -1154,12 +811,9 @@ async function refreshSettings() {
 
   const s = V.settings || {};
   const orch = s.orchestrator || {};
-  const srv = s.server || {};
 
-  box.appendChild(group("派发与并发", [
-    numberRow("并发上限", orch.maxParallel, "同时执行的任务数，不超过可用账号数", (v) => patchSetting(["orchestrator", "maxParallel"], v), { min: 1 }),
+  box.appendChild(group("草稿提交与任务记录", [
     numberRow("轮询间隔 (ms)", orch.pollInterval, "生成进度检查间隔，最少 1500 ms", (v) => patchSetting(["orchestrator", "pollInterval"], v), { min: 1500 }),
-    numberRow("失败重试次数", orch.retryLimit, "自动恢复上限为 0–10 次，0 表示不自动重试", (v) => patchSetting(["orchestrator", "retryLimit"], v), { min: 0, max: 10 }),
     toggleRow("自动下载成片", orch.autoDownload !== false, "生成完自动存进视频目录", (v) => patchSetting(["orchestrator", "autoDownload"], v)),
     toggleRow("自动确认生成", orch.autoConfirm !== false, "自动确认本次任务的生成参数，不处理付费或升级请求", (v) => patchSetting(["orchestrator", "autoConfirm"], v)),
     textRow("停止热键", orch.stopHotkey || "F10", "任何窗口按一下，整批立刻停", (v) => patchSetting(["orchestrator", "stopHotkey"], v))
@@ -1174,19 +828,6 @@ async function refreshSettings() {
   openVideos.addEventListener("click", () => guard(() => DM.openHome()));
   storageGroup.appendChild(openVideos);
   box.appendChild(storageGroup);
-  box.appendChild(window.DMComponents.panel());
-
-  box.appendChild(group("额度与命名", [
-    numberRow("每实例每日条数", (s.quota || {}).perDay || 2, `本地派发上限，按 ${(s.quota || {}).resetTz || "Asia/Tokyo"} 每日重置；平台实际额度以账号为准`, (v) => patchSetting(["quota", "perDay"], v), { min: 1 }),
-    selectRow("命名规则", s.naming || "timestamp", [["timestamp", "时间戳"], ["prompt", "提示词前 40 字"], ["custom", "自定义模板"]], (v) => patchSetting(["naming"], v)),
-    textRow("命名模板", s.namingTemplate || "{account}_{date}_{index}", "可用占位符：{account} {date} {index} {prompt}", (v) => patchSetting(["namingTemplate"], v))
-  ]));
-
-  box.appendChild(group("本地接口", [
-    toggleRow("开工即启动", srv.enabled !== false, "立即启停本地服务，同时记住下次启动状态", (v) => patchServer("enabled", v)),
-    numberRow("端口", srv.port || 17823, "服务运行时会自动切换到新端口", (v) => patchServer("port", v), { min: 1, max: 65535 }),
-    textRow("Bearer token", srv.token || "", "留空沿用本机生成的 token；修改后立即应用", (v) => patchServer("token", v))
-  ]));
 
   const aboutGroup = group("关于", [
     kvRow("版本", (state && state.brand && state.brand.version) || "1.2.0"),
@@ -1307,15 +948,6 @@ async function patchSetting(path, value) {
   });
 }
 
-async function patchServer(key, value) {
-  await guard(async () => {
-    V.settings = await DM.saveSettings({ server: { [key]: value } });
-    await refreshBadges();
-    await refreshSettings();
-    say(key === "enabled" ? (value ? "本地接口已启动" : "本地接口已关闭") : V.server?.running ? "本地接口设置已生效" : "已保存，下次启动本地接口时使用");
-  });
-}
-
 /* ============================================================ 事件与启动 */
 
 function bindEvents() {
@@ -1323,9 +955,7 @@ function bindEvents() {
   qa(".vtab").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
   qa("[data-home-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.homeView)));
   qa("[data-home-action]").forEach((b) => b.addEventListener("click", () => {
-    if (b.dataset.homeAction === "downloads") guard(() => DM.openHome());
     if (b.dataset.homeAction === "account") q("#btnNew").click();
-    if (b.dataset.homeAction === "mask") q('.tool[data-panel="mask"]').click();
   }));
 
   bindTemplateEvents();
@@ -1342,24 +972,6 @@ function bindEvents() {
     refreshTasks();
   });
 
-  q("#videoRefresh").addEventListener("click", refreshAssets);
-  q("#videoOpenDirectory").addEventListener("click", () => guard(() => DM.openHome()));
-  qa("[data-api-tab]").forEach((b) => b.addEventListener("click", () => { V.apiTab = b.dataset.apiTab; refreshApi(); }));
-  q("#apiRotate").addEventListener("click", async () => {
-    await guard(() => call("dm:server:rotate"), null);
-    say("token 已轮换（旧 token 立即失效）");
-    V.server = await guard(() => call("dm:server"), null);
-    refreshApi();
-    refreshBadges();
-  });
-  q("#apiRestart").addEventListener("click", async () => {
-    await guard(async () => { await call("dm:server:stop"); await call("dm:server:start"); }, null);
-    V.server = await guard(() => call("dm:server"), null);
-    say("服务已重启");
-    refreshApi();
-    refreshBadges();
-  });
-
   q("#logFilter").addEventListener("input", () => scheduleRefresh("log-filter", renderLogs, "logs"));
   q("#logClear").addEventListener("click", () => { V.logLines = []; renderLogs(); });
   q("#logLive").addEventListener("change", () => { if (q("#logLive").checked) renderLogs(); });
@@ -1372,7 +984,6 @@ function bindEvents() {
     if (e.type === "draft") { V.draftMessage = e.message; if (V.draftBusy) q("#draftStatus").textContent = e.message; else say(e.message); if (["templates", "drafts"].includes(V.view)) scheduleRefresh("drafts", refreshDrafts, V.view); }
     scheduleRefresh("badges", refreshBadges);
     if (V.view === "tasks") scheduleRefresh("tasks", refreshTasks, "tasks");
-    if (V.view === "assets" && e.type === "task" && e.task?.status === "succeeded") scheduleRefresh("assets", refreshAssets, "assets");
   });
   DM.onLog((line) => {
     if (!line) return;
@@ -1380,13 +991,11 @@ function bindEvents() {
     if (V.logLines.length > 800) V.logLines = V.logLines.slice(-800);
     if (V.view === "logs" && q("#logLive").checked) scheduleRefresh("logs", () => { if (q("#logLive").checked) renderLogs(); }, "logs");
   });
-  DM.onResource((item) => { if (V.view === "assets" && item?.downloaded) scheduleRefresh("assets", refreshAssets, "assets"); });
   DM.onHotkey((payload) => say(`已按 ${payload.key} 全部停止`, true));
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return;
     scheduleRefresh("badges", refreshBadges);
     if (V.view === "tasks") scheduleRefresh("tasks", refreshTasks, "tasks");
-    if (V.view === "assets") scheduleRefresh("assets", refreshAssets, "assets");
     if (V.view === "logs" && q("#logLive").checked) scheduleRefresh("logs", renderLogs, "logs");
   });
 }
@@ -1396,7 +1005,7 @@ async function boot() {
   V.paths = await guard(() => DM.paths(), null);
   V.instances = await guard(() => call("dm:instances"), []) || [];
   await refreshBadges();
-  setView("accounts");
+  await setView("templates");
   setInterval(() => { if (!document.hidden) refreshBadges(); }, 8000);
 
 }

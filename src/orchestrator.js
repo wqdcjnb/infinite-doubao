@@ -20,6 +20,10 @@ const events = new EventEmitter();
 const runtime = { running: new Map(), nativeDrafts: new Map(), busy: new Set(), blocked: new Map(), paused: false, stopped: new Set(), timer: null, lastError: "" };
 let deps = { resolveDriver: null, resolveDraftDriver: null, findWebContents: null };
 function init(d) { deps = { ...deps, ...(d || {}) }; }
+const DRAFTS_ONLY_MESSAGE = "当前客户端仅支持云电脑草稿，请将模板加入草稿箱后保存并提交";
+function retainedTask(task) {
+  return deps.draftsOnly !== true || !!(task?.draftBatchId && task.executionMode === "work" && (task.submittedAt || task.sentAt));
+}
 function emit(type, payload) {
   try { events.emit("event", { type, at: new Date().toISOString(), ...payload }); } catch {}
   try { events.emit(type, payload); } catch {}
@@ -57,7 +61,7 @@ function addTask(task) {
 }
 function getTask(id) { return store.get().tasks.find((t) => t.id === String(id)) || null; }
 function taskList(filter = {}) {
-  let out = store.get().tasks.slice().reverse();
+  let out = store.get().tasks.filter(retainedTask).reverse();
   for (const key of ["storyboardId", "instanceId", "status"]) if (filter[key]) out = out.filter((t) => t[key] === filter[key]);
   return out.slice(0, Number(filter.limit) || 200);
 }
@@ -388,7 +392,7 @@ function maxParallel() { return Math.max(1, Math.min(Number(store.get().settings
 async function dispatchOne(sbId, opts = {}) {
   const sb = storyboard.raw(sbId);
   if (!sb) return { ok: false, error: "分镜不存在" };
-  const shot = sb.shots.find((s) => ["pending", "queued"].includes(s.status) && !(opts.skipIds || []).includes(s.id));
+  const shot = sb.shots.find((s) => ["pending", "queued"].includes(s.status) && !(opts.skipIds || []).includes(s.id) && retainedTask(getTask(s.taskId)));
   if (!shot) return { ok: false, error: "没有可派发的镜头", done: true };
   let task = getTask(shot.taskId);
   if (!task || task.status !== "queued") {
@@ -437,7 +441,7 @@ function pump(sbId, opts = {}) {
   }
 }
 function scheduleWake() {
-  if (runtime.timer || runtime.paused || !store.get().tasks.some((t) => t.status === "queued" && !runtime.stopped.has(t.storyboardId))) return;
+  if (runtime.timer || runtime.paused || !store.get().tasks.some((t) => retainedTask(t) && t.status === "queued" && !runtime.stopped.has(t.storyboardId))) return;
   runtime.timer = setTimeout(() => { runtime.timer = null; wakeQueue(); }, 2000); runtime.timer.unref?.();
 }
 function wakeQueue(instanceId) {
@@ -448,11 +452,12 @@ function wakeQueue(instanceId) {
   if (runtime.paused) return;
   for (const task of store.get().tasks) {
     if (activeCount() >= maxParallel()) break;
-    if (task.status === "queued" && !runtime.stopped.has(task.storyboardId)) pump(task.storyboardId);
+    if (retainedTask(task) && task.status === "queued" && !runtime.stopped.has(task.storyboardId)) pump(task.storyboardId);
   }
   scheduleWake();
 }
 function start(sbId, opts = {}) {
+  if (deps.draftsOnly === true) return { ok: false, error: DRAFTS_ONLY_MESSAGE };
   const sb = storyboard.raw(sbId);
   if (!sb) return { ok: false, error: "分镜不存在" };
   runtime.stopped.delete(sb.id); runtime.paused = false;
@@ -467,7 +472,7 @@ function start(sbId, opts = {}) {
   return { ok: true, storyboardId: sb.id, parallel: maxParallel() };
 }
 function pause(sbId) { runtime.paused = true; emit("paused", { storyboardId: sbId }); return { ok: true }; }
-function resume(sbId, opts = {}) { runtime.paused = false; runtime.stopped.delete(String(sbId)); pump(sbId, opts); wakeQueue(); emit("resumed", { storyboardId: sbId }); return { ok: true }; }
+function resume(sbId, opts = {}) { if (deps.draftsOnly === true) return { ok: false, error: DRAFTS_ONLY_MESSAGE }; runtime.paused = false; runtime.stopped.delete(String(sbId)); pump(sbId, opts); wakeQueue(); emit("resumed", { storyboardId: sbId }); return { ok: true }; }
 function stop(sbId) { runtime.stopped.add(String(sbId)); emit("stopped", { storyboardId: sbId }); return { ok: true }; }
 function stopTask(id) {
   const task = getTask(id);
@@ -486,6 +491,7 @@ function stopAll() {
 async function retryTask(taskId, opts = {}) {
   const task = getTask(taskId);
   if (!task) return { ok: false, error: "任务不存在" };
+  if (!retainedTask(task)) return { ok: false, error: DRAFTS_ONLY_MESSAGE };
   if (runtime.running.has(task.id)) return { ok: false, error: "任务还在运行" };
   const sb = storyboard.raw(task.storyboardId);
   const shot = sb?.shots.find((s) => s.id === task.shotId);
@@ -496,6 +502,7 @@ async function retryTask(taskId, opts = {}) {
   pump(sb.id, opts); scheduleWake(); return { ok: true, taskId };
 }
 async function redispatch(taskId, instanceId) {
+  if (deps.draftsOnly === true) return { ok: false, error: DRAFTS_ONLY_MESSAGE };
   const task = getTask(taskId);
   if (!task) return { ok: false, error: "任务不存在" };
   if (!store.find(instanceId)) return { ok: false, error: "账号不存在" };
@@ -533,6 +540,7 @@ function commitTemplates(records, draftIds = [], startQueue = true) {
   return records.map(({ task }) => ({ taskId: task.id, status: task.status }));
 }
 function submitTemplate(template) {
+  if (deps.draftsOnly === true) throw new Error(DRAFTS_ONLY_MESSAGE);
   return commitTemplates([templateRecords(templates.validateSnapshot(template))])[0];
 }
 function removeDrafts(ids) {
@@ -1010,6 +1018,7 @@ async function submitDrafts(ids, options = {}) {
 
 function recoverTemplateTasks() {
   for (const task of store.get().tasks) {
+    if (!retainedTask(task)) continue;
     if (!task.templateId || !["running", "queued"].includes(task.status)) continue;
     // Legacy running tasks have no submission marker. Do not guess and resend.
     if (task.status === "running" && !Object.hasOwn(task, "submittedAt")) {
@@ -1025,7 +1034,7 @@ function recoverTemplateTasks() {
 function state() {
   const stats = {};
   for (const sb of store.get().storyboards) stats[sb.id] = storyboard.stats(sb);
-  return { paused: runtime.paused, queued: store.get().tasks.filter((t) => t.status === "queued").length, failed: store.get().tasks.filter((t) => t.status === "failed").length,
+  return { paused: runtime.paused, queued: store.get().tasks.filter((t) => retainedTask(t) && t.status === "queued").length, failed: store.get().tasks.filter((t) => retainedTask(t) && t.status === "failed").length,
     running: [...runtime.running.values()].map((c) => ({ taskId: c.task.id, instanceId: c.inst.id, instanceName: c.inst.name, shotId: c.shot.id, shotIndex: c.shot.index, storyboardId: c.sb.id })).concat([...runtime.nativeDrafts.values()].map((c) => ({ ...c, taskId: "native-drafts", storyboardId: "" }))),
     busy: [...runtime.busy], parallel: maxParallel(), stopped: [...runtime.stopped], lastError: runtime.lastError, stats, tasks: taskList({ limit: 50 }) };
 }

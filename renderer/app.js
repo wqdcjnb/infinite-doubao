@@ -18,9 +18,6 @@ const state = {
   panel: "",
   paths: null,
   settings: {},
-  maskFiles: [],
-  maskResults: [],
-  maskRunning: false,
   proxyCache: {}
 };
 
@@ -59,11 +56,6 @@ async function boot() {
   }
   renderList();
 
-  API.onWatermarkProgress((p) => {
-    if (!p) return;
-    if (p.done) toast(`${p.ok ? "✅" : "⚠️"} ${p.label}`, !p.ok);
-  });
-  API.onMaskProgress(onMaskProgress);
   API.onSettingsChanged((settings) => { Object.assign(state.settings, settings || {}); });
   API.onAccountOpen(async ({ instanceId }) => {
     try {
@@ -75,12 +67,6 @@ async function boot() {
   });
 
   $("#btnNew").addEventListener("click", createAccount);
-  if (!API.isWeb) $("#btnWeb").addEventListener("click", async () => {
-    try {
-      const result = await API.call("dm:web:open");
-      if (!result?.ok) throw new Error(result?.error || "网页版启动失败");
-    } catch (error) { toast(error.message, true); }
-  });
   $("#accClose").addEventListener("click", closeAddModal);
   $("#accCancel").addEventListener("click", closeAddModal);
   $("#accOk").addEventListener("click", submitAddModal);
@@ -92,9 +78,6 @@ async function boot() {
     if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); submitAddModal(); }
   });
   $("#search").addEventListener("input", renderList);
-  $("#btnHome").addEventListener("click", async () => {
-    try { await API.openHome(); } catch (error) { toast("打开视频目录失败：" + error.message, true); }
-  });
   $("#btnGo").addEventListener("click", () => navigate($("#address").value));
   $("#address").addEventListener("keydown", (e) => { if (e.key === "Enter") navigate($("#address").value); });
   $("#btnReload").addEventListener("click", () => {
@@ -302,7 +285,10 @@ async function submitAddModal() {
 /* ---------------------------------------------------------------- 标签页 */
 
 function openAccount(acc, opts = {}) {
-  if (!opts.background) state.activeId = acc.id;
+  if (!opts.background) {
+    state.activeId = acc.id;
+    $('.vtab[data-view="accounts"]').click();
+  }
   const existing = state.tabs.find((t) => t.id === acc.id);
   if (existing) {
     if (!opts.background) activateTab(acc.id);
@@ -311,7 +297,7 @@ function openAccount(acc, opts = {}) {
   }
   $("#welcome").style.display = "none";
   const targetUrl = acc.url || state.settings.defaultUrl || "https://www.doubao.com/chat/";
-  const view = API.createAccountView ? API.createAccountView(acc) : document.createElement("webview");
+  const view = document.createElement("webview");
   view.setAttribute("partition", acc.partition);
   // preload 必须传磁盘绝对路径：Electron 43 的 webview 对 file:// URL 形式的 preload
   // 会静默不加载（既不报错也不执行），只有绝对路径可靠。
@@ -409,13 +395,12 @@ function togglePanel(name) {
 }
 
 function renderPanel() {
-  const titles = { env: "环境指纹", proxy: "代理 / IP", mask: "素材遮脸" };
+  const titles = { env: "环境指纹", proxy: "代理 / IP" };
   $("#drawerTitle").textContent = titles[state.panel] || "";
   const body = $("#drawerBody");
   body.textContent = "";
   if (state.panel === "env") renderEnvPanel(body);
   else if (state.panel === "proxy") renderProxyPanel(body);
-  else if (state.panel === "mask") renderMaskPanel(body);
 }
 
 /* ---- 环境面板 ---- */
@@ -781,242 +766,6 @@ function renderProxyPanel(body) {
       if (isCurrentPanel()) toast("解析失败：" + (error?.message || error), true);
     } finally { if (isCurrentPanel()) syncButtons(); }
   });
-}
-
-/* ---- 遮脸面板 ---- */
-
-function maskImageUrl(file) {
-  if (API.mediaUrl) return API.mediaUrl(file);
-  const encoded = String(file).replace(/\\/g, "/").split("/")
-    .map((part, index) => index === 0 && /^[a-z]:$/i.test(part) ? part : encodeURIComponent(part)).join("/");
-  const url = encoded.startsWith("//") ? "file:" + encoded : "file://" + (encoded.startsWith("/") ? encoded : "/" + encoded);
-  return `${url}?preview=${Date.now()}`;
-}
-
-function showMaskImagePreview(url, name, trigger) {
-  const previous = $("#maskImagePreview");
-  if (previous) window.DMDialogs.close(previous);
-  const mask = el("dialog", "modal-mask");
-  mask.id = "maskImagePreview";
-  mask.setAttribute("role", "dialog");
-  mask.setAttribute("aria-modal", "true");
-  mask.setAttribute("aria-labelledby", "maskImagePreviewTitle");
-  const box = el("div", "modal mask-image-modal");
-  const head = el("div", "modal-head");
-  const title = el("strong", null, `处理后图片 · ${name}`);
-  title.id = "maskImagePreviewTitle";
-  title.title = name;
-  head.appendChild(title);
-  const close = () => window.DMDialogs.close(mask);
-  const closeBtn = el("button", "dialog-close", "×");
-  closeBtn.setAttribute("aria-label", "关闭预览");
-  closeBtn.addEventListener("click", close);
-  head.appendChild(closeBtn);
-  box.appendChild(head);
-  const body = el("div", "modal-body");
-  const img = el("img", "hidden");
-  img.alt = `处理后的 ${name}`;
-  const hint = el("div", "hint", "图片加载中…");
-  img.addEventListener("load", () => { img.classList.remove("hidden"); hint.remove(); });
-  img.addEventListener("error", () => { img.classList.add("hidden"); hint.textContent = "图片预览加载失败，请关闭后定位文件检查。"; body.appendChild(hint); });
-  img.src = url;
-  body.appendChild(img);
-  body.appendChild(hint);
-  box.appendChild(body);
-  mask.appendChild(box);
-  document.body.appendChild(mask);
-  window.DMDialogs.open(mask, { focus: closeBtn, remove: true, onClose: () => { if (trigger?.isConnected) trigger.focus(); } });
-}
-
-function renderMaskPanel(body) {
-  const card = el("div", "card");
-  card.appendChild(el("h4", null, "上传前处理素材"));
-  const probe = el("div", "hint", "检测环境加载中…");
-  card.appendChild(probe);
-  card.appendChild(window.DMComponents.panel());
-  API.probeMask().then((p) => {
-    const ok = p.opencv && p.model && p.script;
-    probe.innerHTML = ok
-      ? `<span class="badge">OpenCV ${p.opencv}</span> <span class="badge">YuNet 模型就绪</span> <span class="badge${p.ffmpegOk ? "" : " warn"}">ffmpeg ${p.ffmpegOk ? "就绪" : "未找到"}</span>`
-      : "请先安装上方的本地素材处理组件，完成后重新打开此面板即可使用。";
-  });
-
-  const fMode = field(card, "打码方式");
-  const modeSel = el("select");
-  [["mosaic", "马赛克（像素块）"], ["blur", "高斯模糊"], ["dot", "圆点阵（打点）"], ["black", "压暗纯色"]].forEach(([v, t]) => {
-    const o = el("option", null, t);
-    o.value = v;
-    if ((state.settings.maskMode || "mosaic") === v) o.selected = true;
-    modeSel.appendChild(o);
-  });
-  fMode.appendChild(modeSel);
-
-  const fStr = field(card, "强度（块大小 / 模糊半径）");
-  const strIn = document.createElement("input");
-  strIn.type = "range";
-  strIn.min = "4";
-  strIn.max = "60";
-  strIn.value = String(state.settings.maskStrength || 18);
-  fStr.appendChild(strIn);
-  const strVal = el("div", "hint", `${strIn.value} px`);
-  strIn.addEventListener("input", () => { strVal.textContent = `${strIn.value} px`; });
-  fStr.appendChild(strVal);
-
-  const fPad = field(card, "外扩比例（把边缘也盖住）");
-  const padIn = document.createElement("input");
-  padIn.type = "range";
-  padIn.min = "0";
-  padIn.max = "60";
-  padIn.value = "18";
-  fPad.appendChild(padIn);
-  const padVal = el("div", "hint", "0.18 倍");
-  padIn.addEventListener("input", () => { padVal.textContent = `${(Number(padIn.value) / 100).toFixed(2)} 倍`; });
-  fPad.appendChild(padVal);
-
-  const keepWrap = el("label");
-  keepWrap.style.cssText = "display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)";
-  const keepC = document.createElement("input");
-  keepC.type = "checkbox";
-  keepC.style.width = "auto";
-  keepC.checked = state.settings.keepOriginal !== false;
-  keepWrap.appendChild(keepC);
-  keepWrap.appendChild(document.createTextNode("保留原文件（输出另存为 xxx_masked）"));
-  card.appendChild(keepWrap);
-
-  const btnRow = el("div", "row");
-  btnRow.style.marginTop = "10px";
-  const pickBtn = el("button", "ghost", "选择素材");
-  const runBtn = el("button", "primary", state.maskRunning ? "处理中…" : "开始处理");
-  pickBtn.disabled = runBtn.disabled = state.maskRunning;
-  btnRow.appendChild(pickBtn);
-  btnRow.appendChild(runBtn);
-  card.appendChild(btnRow);
-  body.appendChild(card);
-
-  const listCard = el("div", "card");
-  listCard.appendChild(el("h4", null, "待处理 / 结果"));
-  const listBox = el("div", "mask-list");
-  listBox.id = "maskList";
-  listCard.appendChild(listBox);
-  const bar = el("div", "progress");
-  const fill = el("i");
-  bar.appendChild(fill);
-  listCard.appendChild(bar);
-  const previews = el("div", "mask-previews");
-  previews.id = "maskPreviews";
-  listCard.appendChild(previews);
-  body.appendChild(listCard);
-  paintMaskList();
-
-  pickBtn.addEventListener("click", async () => {
-    const files = await API.pickMaskFiles();
-    if (!files.length) return;
-    state.maskFiles = files.concat(state.maskFiles).slice(0, 60);
-    state.maskResults = [];
-    $("#maskImagePreview")?.remove();
-    fill.style.width = "0%";
-    paintMaskList();
-  });
-
-  runBtn.addEventListener("click", async () => {
-    if (state.maskRunning) return;
-    if (!state.maskFiles.length) { toast("先选素材", true); return; }
-    state.maskRunning = true;
-    pickBtn.disabled = runBtn.disabled = true;
-    runBtn.textContent = "处理中…";
-    state.maskResults = [];
-    $("#maskImagePreview")?.remove();
-    fill.style.width = "0%";
-    paintMaskList();
-    try {
-      const out = await API.runMask({
-        files: state.maskFiles,
-        mode: modeSel.value,
-        strength: Number(strIn.value),
-        pad: Number(padIn.value) / 100,
-        keepOriginal: keepC.checked
-      });
-      if (out.ok) {
-        state.maskResults = (out.results || []).filter((r) => r.event === "done" && typeof r.out === "string" && r.out);
-        toast(`处理完成：${state.maskResults.length} 个文件`);
-        const done = new Set(state.maskResults.map((r) => r.file));
-        state.maskFiles = state.maskFiles.filter((f) => !done.has(f));
-        fill.style.width = "100%";
-        paintMaskList();
-      } else {
-        toast("处理失败：" + (out.message || out.stderr || "未知错误"), true);
-      }
-    } catch (error) {
-      toast("处理失败：" + ((error && error.message) || error), true);
-    } finally {
-      state.maskRunning = false;
-      pickBtn.disabled = runBtn.disabled = false;
-      runBtn.textContent = "开始处理";
-      if (!listBox.isConnected && state.panel === "mask") renderPanel();
-    }
-  });
-
-  function paintMaskList() {
-    if (!listBox) return;
-    listBox.textContent = "";
-    previews.replaceChildren();
-    for (const r of state.maskResults) {
-      const item = el("div", "mask-item");
-      item.appendChild(el("span", null, r.out.split(/[\\/]/).pop()));
-      const right = el("span", "p", `${r.faces} 张脸`);
-      right.style.cursor = "pointer";
-      right.addEventListener("click", () => API.showItem(r.out));
-      item.appendChild(right);
-      listBox.appendChild(item);
-      if (r.kind === "image") {
-        const name = r.out.split(/[\\/]/).pop();
-        const preview = el("div", "mask-preview-card");
-        const button = el("button", "mask-preview-trigger");
-        button.disabled = true;
-        button.title = `点击放大处理后的 ${name}`;
-        button.setAttribute("aria-label", button.title);
-        const img = el("img", "hidden");
-        img.alt = `处理后的 ${name}`;
-        img.decoding = "async";
-        const hint = el("span", "hint", "预览加载中…");
-        img.addEventListener("load", () => { img.classList.remove("hidden"); hint.remove(); button.disabled = false; });
-        img.addEventListener("error", () => { img.classList.add("hidden"); button.disabled = true; hint.textContent = "图片预览加载失败，请定位文件检查"; button.appendChild(hint); });
-        img.src = maskImageUrl(r.out);
-        button.appendChild(img);
-        button.appendChild(hint);
-        button.addEventListener("click", () => showMaskImagePreview(img.src, name, button));
-        preview.appendChild(button);
-        const caption = el("div", "mask-preview-caption");
-        const filename = el("strong", null, name);
-        filename.title = r.out;
-        caption.appendChild(filename);
-        caption.appendChild(el("span", "hint", "处理后图片 · 点击图片放大"));
-        preview.appendChild(caption);
-        previews.appendChild(preview);
-      }
-    }
-    for (const f of state.maskFiles) {
-      const item = el("div", "mask-item");
-      item.appendChild(el("span", null, f.split(/[\\/]/).pop()));
-      item.appendChild(el("span", "hint", "待处理"));
-      listBox.appendChild(item);
-    }
-    if (!state.maskFiles.length && !state.maskResults.length) {
-      listBox.appendChild(el("div", "hint", "还没有素材，点「选择素材」"));
-    }
-  }
-}
-
-function onMaskProgress(p) {
-  if (!p) return;
-  if (p.event === "progress") {
-    const fill = $("#drawerBody .progress > i");
-    if (fill) fill.style.width = `${Math.min(99, Number(p.percent) || 0)}%`;
-  } else if (p.event === "done") {
-    toast(`✅ ${String(p.out || "").split(/[\\/]/).pop()}（${p.faces} 张脸）`);
-  } else if (p.event === "error") {
-    toast(`⚠️ ${String(p.file || "").split(/[\\/]/).pop()}：${p.message}`, true);
-  }
 }
 
 boot().catch((error) => {

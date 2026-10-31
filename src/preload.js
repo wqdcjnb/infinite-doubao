@@ -24,13 +24,6 @@ contextBridge.exposeInMainWorld("DM", {
   testProxy: (id) => ipcRenderer.invoke("proxy:test", id),
   parseProxyList: (text) => ipcRenderer.invoke("proxy:parse-list", text),
 
-  probeMask: () => ipcRenderer.invoke("mask:probe"),
-  pickMaskFiles: () => ipcRenderer.invoke("mask:pick"),
-  runMask: (input) => ipcRenderer.invoke("mask:run", input),
-  onMaskProgress: (cb) => on("mask:progress", cb),
-
-  onWatermarkProgress: (cb) => on("dm:no-watermark-progress", cb),
-
   showItem: (file) => ipcRenderer.invoke("shell:show-item", file),
   openPath: (p) => ipcRenderer.invoke("shell:open-path", p),
   openExternal: (url) => ipcRenderer.invoke("shell:open-external", url),
@@ -51,7 +44,6 @@ contextBridge.exposeInMainWorld("DM", {
   onEvent: (cb) => on("dm:event", cb),
   onUpdate: (cb) => on("dm:update", cb),
   onLog: (cb) => on("dm:log", cb),
-  onResource: (cb) => on("dm:resource", cb),
   onAccountOpen: (cb) => on("dm:account:open", cb),
   onSettingsChanged: (cb) => on("dm:settings", cb),
   onHotkey: (cb) => on("dm:hotkey", cb)

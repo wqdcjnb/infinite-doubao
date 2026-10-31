@@ -28,7 +28,7 @@ jobs:
         run: |
           node -e "if(process.arch !== '${{ matrix.arch }}') process.exit(1)"
           node _test/run-tests.cjs
-      - name: Build DMG with bundled video and face-processing tools
+      - name: Build macOS package
         run: |
           brew list nasm >/dev/null 2>&1 || brew install nasm
           brew list pkgconf >/dev/null 2>&1 || brew install pkgconf

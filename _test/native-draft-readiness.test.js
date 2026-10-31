@@ -128,6 +128,17 @@ test("云电脑标签附有独立状态文案时核对精确可见标签，不�
   assert.equal((await p.api.sendNativeDraft(p.binding)).ok, true); assert.equal(p.sends(), 1);
 });
 
+for (const label of ["雲端電腦", "雲電腦", "云端电脑"]) test(`繁简体模式 ${label} 可以打开并核对原草稿，正文仍逐字检查`, async () => {
+  const p = await page({ onOpen({ mode }) { mode.innerText = label; } });
+  assert.equal((await p.api.openNativeDraft(p.binding)).ok, true);
+  p.input.value = p.binding.prompt.replace("第一段", "第壹段");
+  assert.equal((await p.api.sendNativeDraft(p.binding)).ok, false);
+  assert.equal(p.sends(), 0);
+  p.input.value = p.binding.prompt;
+  assert.equal((await p.api.sendNativeDraft(p.binding)).ok, true);
+  assert.equal(p.sends(), 1);
+});
+
 test("隐藏的云电脑菜单选项不能冒充当前模式，发送前再次检查模式", async () => {
   const p = await page(); assert.equal((await p.api.openNativeDraft(p.binding)).ok, true);
   p.mode.innerText = "对话"; p.mode.querySelectorAll = () => [{ ...p.element("云电脑"), hidden: true }];

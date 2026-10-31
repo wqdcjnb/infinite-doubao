@@ -75,7 +75,7 @@ function fixture({ code = source, call: customCall } = {}) {
   const context = vm.createContext({ window, document, navigator: {}, console, setTimeout: (fn, ms) => { timers.set(++nextTimer, { fn, ms }); return nextTimer; }, clearTimeout: (id) => timers.delete(id), setInterval() {} });
   const end = code.lastIndexOf('if (document.readyState === "loading")');
   assert.ok(end > 0);
-  vm.runInContext(code.slice(0, end) + "window.testViews = {V, bindEvents, refreshTasks, refreshBadges, refreshAssets, refreshLogs, renderLogs, setView};\n})();", context);
+  vm.runInContext(code.slice(0, end) + "window.testViews = {V, bindEvents, refreshTasks, refreshBadges, refreshLogs, renderLogs, setView};\n})();", context);
   const api = window.testViews; api.bindEvents();
   return {
     api, handlers, counts, document, get,
@@ -92,7 +92,7 @@ test("100条任务事件与100条任务日志合并为一次状态和任务请�
   for (let i = 0; i < 100; i++) { f.handlers.event({ type: "task", task: tasks[0] }); f.handlers.event({ type: "log", message: "routine" }); }
   await f.settle();
   assert.deepEqual(f.counts.calls, { "dm:state": 1, "dm:tasks": 1 }); assert.equal(f.counts.taskRenders, 1);
-  assert.equal(f.api.V.server.port, 17823, "状态响应已有server，不另发重复IPC");
+  assert.equal(f.counts.calls["dm:server"], undefined, "精简客户端不请求旧接口服务");
   t.diagnostic("200-event burst: state/server/tasks IPC 600 -> 2; full task table rebuilds 200 -> 1");
 });
 
@@ -119,21 +119,6 @@ test("刷新发生前切页不读隐藏列表，窗口重新可见后恢复最�
   assert.equal(f.counts.calls["dm:tasks"], 1); assert.equal(f.counts.calls["dm:state"], 2);
 });
 
-test("素材事件合并，刷新和新增素材保留原视频节点、播放位置及连接顺序", async (t) => {
-  let items = Array.from({ length: 30 }, (_, i) => media(i));
-  const f = fixture({ call: (channel) => channel === "dm:videos" ? { directory: "C:/fixture", items: copy(items) } : undefined });
-  f.api.V.view = "assets"; await f.api.refreshAssets();
-  const grid = f.get("#assetBody").children[0]; const card = grid.children[0]; const player = card.children[0]; player.currentTime = 2.5;
-  for (let i = 0; i < 100; i++) f.handlers.resource({ downloaded: "C:/fixture/result.mp4" });
-  await f.settle(); assert.equal(f.counts.calls["dm:videos"], 2); assert.equal(f.counts.videos, 30);
-  items = [media(99), ...items]; await f.api.refreshAssets();
-  assert.equal(grid.children[1], card); assert.equal(player.currentTime, 2.5); assert.equal(player.paused, false);
-  assert.equal(f.counts.videos, 31); assert.equal(f.counts.movedCards, 0);
-  items = items.filter((item) => item.path !== media(1).path); await f.api.refreshAssets();
-  assert.equal(grid.children.length, 30); assert.equal(grid.children[1], card);
-  t.diagnostic("30 videos + 100 resource events + 1 new file: player creations 3061 -> 31; existing video DOM preserved");
-});
-
 test("日志突发增量追加，最多400个DOM行和800条缓冲，筛选暂停清空均可用", async (t) => {
   const f = fixture(); f.api.V.view = "logs"; f.api.V.logLines = Array.from({ length: 400 }, (_, i) => logLine(i));
   f.api.renderLogs(); const body = f.get("#logBody"); body.scrollTop = body.scrollHeight;
@@ -152,11 +137,11 @@ test("日志突发增量追加，最多400个DOM行和800条缓冲，筛选暂�
   t.diagnostic("400 existing logs + 100 new logs: row creations 40400 -> 500 (100 incremental), visible limit remains 400");
 });
 
-test("后台日志仅入缓冲，后台素材不扫描磁盘，失败后后续刷新仍可用", async () => {
+test("后台日志仅入缓冲，失败后后续刷新仍可用", async () => {
   let reads = 0;
   const f = fixture({ call: (channel) => { if (channel === "dm:tasks" && reads++ === 0) throw new Error("fixture IPC failure"); } });
   f.api.V.view = "accounts";
-  for (let i = 0; i < 500; i++) { f.handlers.log(logLine(i)); f.handlers.resource({ downloaded: "fixture" }); }
+  for (let i = 0; i < 500; i++) { f.handlers.log(logLine(i)); }
   await f.settle(); assert.equal(f.counts.logRows, 0); assert.equal(f.counts.calls["dm:videos"], undefined);
   f.api.V.view = "tasks"; await f.api.refreshTasks(); await f.api.refreshTasks();
   assert.equal(f.api.V.tasks.length, 20); assert.equal(f.counts.maxActive["dm:tasks"], 1);
