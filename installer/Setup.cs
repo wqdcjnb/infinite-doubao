@@ -871,7 +871,7 @@ namespace DolaModSetup
             title.ForeColor = Color.FromArgb(28, 30, 38);
 
             Label sub = new Label();
-            sub.Text = "多开环境 · 分镜编排 · 指纹隔离 · 本地接口 / MCP";
+            sub.Text = "任务模板 · 云电脑草稿 · 批量提交";
             sub.Location = new Point(22, 52);
             sub.Size = new Size(470, 20);
             sub.ForeColor = Color.FromArgb(120, 126, 140);
