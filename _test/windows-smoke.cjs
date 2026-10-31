@@ -35,7 +35,13 @@ try {
   fs.writeFileSync(path.join(out, "installer-regression.log"), regression);
   report.checks.push("Native C# installer lock, integrity and upgrade regressions passed");
   for (const language of ["zh-CN", "zh-HK"]) {
-    const output = run(process.execPath, [path.join(__dirname, "draft-only-smoke.cjs")], { env: { ...process.env, DM_TEST_RUNTIME: path.join(install, pkg.productName + ".exe"), DM_TEST_OUTPUT: out, DM_TEST_FIXTURE_LANGUAGE: language, DM_TEST_CDP_PORT: "9261" } });
+    let output;
+    try {
+      output = run(process.execPath, [path.join(__dirname, "draft-only-smoke.cjs")], { env: { ...process.env, DM_TEST_RUNTIME: path.join(install, pkg.productName + ".exe"), DM_TEST_OUTPUT: out, DM_TEST_FIXTURE_LANGUAGE: language, DM_TEST_CDP_PORT: "9261" } });
+    } catch (error) {
+      fs.writeFileSync(path.join(out, `smoke-${language}.log`), String(error.stdout || "") + String(error.stderr || ""));
+      throw error;
+    }
     fs.writeFileSync(path.join(out, `smoke-${language}.log`), output);
     const smoke = JSON.parse(fs.readFileSync(path.join(out, "smoke-results.json"), "utf8")); assert.equal(smoke.ok, true, smoke.error);
     fs.copyFileSync(path.join(out, "smoke-results.json"), path.join(out, `smoke-${language}.json`));

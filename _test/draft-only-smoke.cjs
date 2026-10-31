@@ -133,6 +133,8 @@ async function call(channel, ...args) {
   report.ok = false; report.error = error.stack; process.exitCode = 1;
   if (c) try {
     report.diagnostics = await c.eval("(async()=>({text:document.body.innerText.slice(-2500),drafts:await DM.call('dm:drafts'),logs:await DM.call('dm:logs',15)}))()");
+    const guestSnapshot = `({url:location.href,ready:window.fixtureReady,text:document.body.innerText.slice(-4000),trace:window.fixtureTrace,editors:Array.from(document.querySelectorAll('textarea,[contenteditable=true]')).map(e=>({value:e.value,text:e.textContent,connected:e.isConnected,rect:e.getBoundingClientRect().toJSON()})),modes:Array.from(document.querySelectorAll('[data-testid=chat_input_action_mode]')).map(e=>({text:e.textContent,rect:e.getBoundingClientRect().toJSON(),display:getComputedStyle(e).display})),files:Array.from(document.querySelectorAll('input[type=file]')).map(e=>e.files.length)})`;
+    report.guestDiagnostics = await c.eval(`Promise.all(Array.from(document.querySelectorAll('webview')).map(async v=>{try{return await v.executeJavaScript(${JSON.stringify(guestSnapshot)})}catch(e){return {error:String(e)}}}))`);
     fs.writeFileSync(path.join(output, "failure.png"), Buffer.from((await c.send("Page.captureScreenshot")).data, "base64"));
   } catch {}
 }).finally(async () => {
